@@ -11,5 +11,18 @@
     "history": {
       "v1.5.4": "本地持久化版本，兼容 Subscribe.media_source/media_id"
     }
+  },
+  "P115StrmHelper": {
+    "name": "115网盘STRM助手",
+    "description": "115网盘STRM生成一条龙服务",
+    "labels": "115网盘,STRM",
+    "version": "2.8.74",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
+    "author": "DDSRem",
+    "level": 1,
+    "system_version": ">=2.0.0",
+    "history": {
+      "v2.8.74": "同步当前安装版，并修复 TransferChain 批次清理方法名兼容问题"
+    }
   }
 }
