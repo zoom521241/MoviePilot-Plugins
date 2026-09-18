@@ -218,13 +218,23 @@ class TransferHandler:
                             f"【整理接管】标记任务{action_name}失败 (任务: {task.fileitem.name}): {e}"
                         )
 
-                # 检查是否所有相关任务都完成了
-                check_func = getattr(chain.jobview, check_method)
-                if check_func(mp_sample_task):
-                    # 移除整个媒体组任务
+                # V3 统一使用 try_remove_job；旧版 is_done/remove_job 仅作兼容回退。
+                check_func = getattr(chain.jobview, check_method, None)
+                if check_func and check_func(mp_sample_task):
+                    remove_job = getattr(chain.jobview, "remove_job", None)
+                    try_remove_job = getattr(chain.jobview, "try_remove_job", None)
                     with task_lock:
-                        chain.jobview.remove_job(mp_sample_task)
+                        if remove_job:
+                            remove_job(mp_sample_task)
+                        elif try_remove_job:
+                            try_remove_job(mp_sample_task)
                     removed_count += 1
+                elif task_action == "fail":
+                    try_remove_job = getattr(chain.jobview, "try_remove_job", None)
+                    if try_remove_job:
+                        with task_lock:
+                            try_remove_job(mp_sample_task)
+                        removed_count += 1
             except Exception as e:
                 logger.debug(
                     f"【整理接管】移除任务组失败 (media_id={media_id}, season={season}): {e}",

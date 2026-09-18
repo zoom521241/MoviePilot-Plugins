@@ -41,6 +41,9 @@ class TransferTaskManager:
         # 是否正在处理批量任务
         self._processing = False
 
+        # 停止后拒绝新任务，并让已排队任务在本地安全丢弃；关闭插件时不再触发云盘操作。
+        self._stopped = False
+
         logger.info(
             f"【整理接管】初始化完成，批量延迟: {batch_delay} 秒，最大批次: {batch_max_size}"
         )
@@ -54,6 +57,11 @@ class TransferTaskManager:
         should_trigger_immediately = False
 
         with self._lock:
+            if self._stopped:
+                logger.info(
+                    f"【整理接管】任务管理器已停止，忽略任务: {task.fileitem.name}"
+                )
+                return
             # 检查是否达到最大批次大小
             if len(self._pending_tasks) >= self.batch_max_size:
                 logger.warn(
@@ -154,7 +162,7 @@ class TransferTaskManager:
                 self._processing = False
 
                 # 检查是否还有待处理的任务，如果有则立即触发下一批处理
-                if self._pending_tasks:
+                if self._pending_tasks and not self._stopped:
                     pending_count = len(self._pending_tasks)
                     logger.info(
                         f"【整理接管】批量处理完成后，队列中仍有 {pending_count} 个待处理任务，"
@@ -187,22 +195,22 @@ class TransferTaskManager:
     def shutdown(self) -> None:
         """
         关闭任务管理器
-        取消定时器并处理剩余任务
+        取消定时器并丢弃剩余任务
         """
         logger.info("【整理接管】正在关闭...")
 
         with self._lock:
+            self._stopped = True
             # 取消定时器
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+            pending_count = len(self._pending_tasks)
+            self._pending_tasks.clear()
 
-        # 处理剩余任务
-        if self.get_pending_count() > 0:
+        if pending_count:
             logger.info(
-                f"【整理接管】关闭时仍有 {self.get_pending_count()} 个待处理任务，"
-                f"立即处理"
+                f"【整理接管】关闭时丢弃 {pending_count} 个待处理任务，避免停止后继续访问网盘"
             )
-            self.flush()
 
         logger.info("【整理接管】已关闭")

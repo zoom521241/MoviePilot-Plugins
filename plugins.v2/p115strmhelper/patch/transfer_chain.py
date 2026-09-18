@@ -44,6 +44,26 @@ class TransferChainPatcher:
             try:
                 from app.chain.transfer import TransferChain
 
+                # V3 的整理链已引入 admission、checkpoint 和 terminal settlement。
+                # 旧版异步接管会在 add_task 后直接返回，绕过这些持久状态，导致
+                # 同一任务被宿主恢复线程每轮重新送入。让 V3 走原生 TransferChain，
+                # 由 StorageOperSelection 调用 115 存储插件并完成原子结算。
+                if any(
+                    hasattr(TransferChain, attr)
+                    for attr in (
+                        "_TransferChain__finish_job_execution",
+                        "_TransferChain__settle_legacy_transfer_result",
+                    )
+                ):
+                    logger.warning(
+                        "【整理接管】检测到 V3 持久化整理链，跳过旧版异步接管补丁，使用宿主原生整理流程"
+                    )
+                    cls._task_manager = None
+                    cls._handler = None
+                    cls._storage_module = ""
+                    cls._enabled = False
+                    return
+
                 cls._task_manager = task_manager
                 cls._handler = handler
                 cls._storage_module = storage_module
@@ -328,8 +348,18 @@ class TransferChainPatcher:
                     )
                     chain_self.jobview.running_task(task)
                     chain_self.jobview.finish_task(task)
-                    if chain_self.jobview.is_done(task):
-                        chain_self.jobview.remove_job(task)
+                    # V3 的 JobView 收尾接口改为 try_remove_job；保留旧接口回退，
+                    # 避免关联字幕/音频任务再次触发 AttributeError。
+                    is_done = getattr(chain_self.jobview, "is_done", None)
+                    remove_job = getattr(chain_self.jobview, "remove_job", None)
+                    if is_done and remove_job and is_done(task):
+                        remove_job(task)
+                    else:
+                        try_remove_job = getattr(
+                            chain_self.jobview, "try_remove_job", None
+                        )
+                        if try_remove_job:
+                            try_remove_job(task)
                     return True, "已由插件接管（字幕/音频文件，跟随主文件处理）"
 
                 need_rename, need_notify, need_scrape = cls._derive_transfer_flags(task)
@@ -445,9 +475,22 @@ class TransferChainPatcher:
                 logger.error(f"【整理接管】回退到原方法也失败: {fallback_error}")
                 return False, f"整理异常: {e}"
         finally:
-            # 与原生 __handle_transfer 一致：每次处理完尝试移除已完成作业，并清理批次 pending 集合
-            chain_self.jobview.try_remove_job(task)
-            chain_self._TransferChain__finish_scrape_batch_task(task)
+            # V3 将批次收尾方法改为非私有名称；收尾失败不能覆盖真实整理结果，
+            # 否则宿主会把已由插件处理的任务重新登记为未完成并反复回放。
+            try:
+                chain_self.jobview.try_remove_job(task)
+            except Exception as error:
+                logger.debug(f"【整理接管】移除已完成作业失败: {error}")
+            try:
+                finish_scrape_batch_task = getattr(
+                    chain_self,
+                    "_finish_scrape_batch_task",
+                    None,
+                ) or getattr(chain_self, "_TransferChain__finish_scrape_batch_task", None)
+                if finish_scrape_batch_task:
+                    finish_scrape_batch_task(task)
+            except Exception as error:
+                logger.debug(f"【整理接管】清理刮削批次状态失败: {error}")
 
     @classmethod
     def _derive_transfer_flags(cls, task) -> Tuple[bool, bool, bool]:
