@@ -41,5 +41,20 @@
       "v3.0.3": "修复并发限流等待时间指数增长导致整理停滞，保留移动重命名和 V3 严格核验修复。",
       "v3.0.2": "修复移动后路径查询失败跳过重命名、目录 ID 类型判断、正负缓存冲突；严格查询读取远端状态。"
     }
+  },
+  "MediaCoverGenerator": {
+    "name": "Emby媒体库封面生成",
+    "description": "生成媒体库动态/静态封面，支持 Emby/Jellyfin；修复 V3 入库事件阻塞和背景图下载失败。",
+    "labels": "Emby,Jellyfin,封面,V3",
+    "version": "1.0.2",
+    "icon": "https://raw.githubusercontent.com/wio-ki/MoviePilot-Plugins/main/icons/emby.png",
+    "author": "Kioo",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "v3": true,
+    "history": {
+      "v1.0.2": "入库事件后台合并处理，停止时取消待处理任务；背景图失败回退海报，避免阻塞 V3 整理后处理。",
+      "v1.0.1": "基于当前 V3 已安装版本，保留原有封面样式和配置。"
+    }
   }
 }
