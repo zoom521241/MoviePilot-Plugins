@@ -23,6 +23,7 @@ def monitor_life_thread_worker(
     :param monitor_life: 已初始化的 MonitorLife 对象
     :param stop_event: threading.Event 对象，用于接收停止信号
     """
+    cursor_initialized = False
     try:
         monitor_life.stop_event = stop_event
 
@@ -49,13 +50,14 @@ def monitor_life_thread_worker(
                 from_time = data.get("from_time")
                 from_id = data.get("from_id")
 
+        cursor_initialized = True
+        # 目录中断恢复不依赖生活事件拉取模式，latest 模式也不能丢失已开始的目录。
+        if not stop_event.is_set():
+            monitor_life.resume_directory_transfers(stop_event)
+
         while True:
             if stop_event.is_set():
                 logger.info("【监控生活事件】收到停止信号，退出上传事件监控")
-                configer.save_plugin_data(
-                    "monitor_life_strm_files",
-                    {"from_time": from_time, "from_id": from_id},
-                )
                 break
 
             try:
@@ -94,3 +96,9 @@ def monitor_life_thread_worker(
                 ),
             )
         raise
+    finally:
+        if cursor_initialized:
+            configer.save_plugin_data(
+                "monitor_life_strm_files",
+                {"from_time": from_time, "from_id": from_id},
+            )

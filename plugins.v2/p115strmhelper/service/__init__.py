@@ -331,6 +331,8 @@ class ServiceHelper:
             self.monitor_life_thread.join(timeout=25)
             if self.monitor_life_thread.is_alive():
                 logger.warning("【监控生活事件】线程未在预期时间内结束")
+                # 保留线程与停止事件，避免重新启动覆盖旧线程正在使用的停止信号。
+                return
             else:
                 logger.info("【监控生活事件】线程已正常退出")
 

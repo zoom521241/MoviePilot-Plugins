@@ -1,8 +1,8 @@
 from filecmp import cmp as files_equal
 from shutil import move as shutil_move, rmtree
 from collections import defaultdict
-from threading import Timer, Event, Thread
-from time import sleep, strftime, localtime, time
+from threading import Timer, Event, Thread, RLock
+from time import sleep, strftime, localtime, time, monotonic
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
 from itertools import batched
@@ -29,6 +29,8 @@ from ...helper.mediainfo_download import MediaInfoDownloader
 from ...helper.mediasyncdel import MediaSyncDelHelper
 from ...helper.mediaserver import MediaServerRefresh, emby_mediainfo_queue
 from .transfer_wait import wait_for_transfer_complete
+from .directory_scan import collect_directory_snapshot
+from .directory_journal import DirectoryTransferJournal
 
 from urllib.error import HTTPError
 
@@ -80,6 +82,7 @@ class MonitorLife:
     WAIT_TIME_OUT: int = 15
     SLEEP_TIME: int = 10
     WEB_FALLBACK_DURATION: int = 24 * 60 * 60
+    _directory_transfer_lock = RLock()
 
     def __init__(
         self,
@@ -95,6 +98,7 @@ class MonitorLife:
         :param stop_event (Event): 可选的停止事件，用于控制监听循环
         """
         self._client = client
+        self._resumed_directory_events = set()
         self.mediainfodownloader = mediainfodownloader
         self.stop_event = stop_event
 
@@ -306,6 +310,213 @@ class MonitorLife:
 
         walk_cd2_dir(root)
 
+    def _get_directory_transfer_journal(self):
+        # Plugin data, not user configuration; survives container recreation.
+        key = "pending_directory_transfers"
+        return DirectoryTransferJournal(
+            load=lambda: configer.get_plugin_data(key) or {},
+            save=lambda value: configer.save_plugin_data(key, value),
+        )
+
+    def _iter_transfer_directory(self, file_id, org_file_path, rmt_mediaext,
+                                 stop_event=None, deadline=None):
+        """A complete pass must not silently count invalid entries as stable."""
+        eligible = {ext.lower() for ext in (
+            list(rmt_mediaext) + list(settings.RMT_AUDIOEXT) + list(settings.RMT_SUBEXT)
+        )}
+        invalid = 0
+        iterator = iter_files_with_path(
+            self._client, cid=int(file_id), with_ancestors=True,
+            cooldown=2, use_media_api=False, raise_for_changed_count=True,
+            id_to_dirnode=..., max_workers=0, timeout=20,
+            **configer.get_ios_ua_app(),
+        )
+        try:
+            for item in iterator:
+                if stop_event and stop_event.is_set():
+                    return
+                if deadline is not None and monotonic() >= deadline:
+                    raise TimeoutError("目录扫描达到时间预算")
+                try:
+                    check_iter_path_data(item)
+                    if not item.get("path"):
+                        raise FileItemKeyMiss("文件路径为空")
+                    if item.get("is_dir"):
+                        continue
+                    path = Path(str(item["path"]))
+                    if not PathUtils.has_prefix(path, org_file_path):
+                        raise FileItemKeyMiss("文件路径不在本次扫描目录内")
+                    if path.suffix.lower() not in eligible:
+                        continue
+                    item = dict(item)
+                    item["pickcode"] = item.get("pickcode") or item.get("pick_code")
+                    for field in ("id", "parent_id", "size", "sha1", "pickcode"):
+                        if item.get(field) is None or (field != "size" and item[field] == ""):
+                            raise FileItemKeyMiss(f"缺失 {field} 信息")
+                    yield item
+                except FileItemKeyMiss as error:
+                    invalid += 1
+                    logger.warning("【网盘整理】目录扫描条目不完整: %s", error)
+        finally:
+            close = getattr(iterator, "close", None)
+            if close:
+                close()
+        if invalid:
+            raise FileItemKeyMiss(f"本轮存在 {invalid} 个不完整条目，不能确认目录稳定")
+
+    def _transfer_directory(self, event, file_path, rmt_mediaext, transferchain, stop_event):
+        # Manual and life-event scans share the journal. Serialize its full lifecycle.
+        with self._directory_transfer_lock:
+            return self._transfer_directory_locked(
+                event, file_path, rmt_mediaext, transferchain, stop_event
+            )
+
+    def _transfer_directory_locked(self, event, file_path, rmt_mediaext, transferchain, stop_event):
+        """Collect before moving: cloud folder events precede their last children."""
+        folder_id = str(event["file_id"])
+        journal = self._get_directory_transfer_journal()
+        accepted_ids = journal.begin(folder_id, event, file_path.as_posix())
+        stopped = lambda: bool(stop_event and stop_event.is_set())
+
+        def on_round(snapshot):
+            logger.info(
+                "【网盘整理】目录扫描 %s 第 %s 轮，累计发现 %s 个可整理文件，"
+                "异常轮次 %s，状态=%s",
+                file_path, snapshot.rounds, len(snapshot.items), snapshot.errors,
+                snapshot.reason,
+            )
+
+        deadline = monotonic() + 120
+        snapshot = collect_directory_snapshot(
+            lambda: self._iter_transfer_directory(
+                folder_id, file_path.as_posix(), rmt_mediaext,
+                stop_event=stop_event, deadline=deadline,
+            ),
+            stop_event=stop_event, on_round=on_round,
+        )
+        if snapshot.stopped or stopped():
+            journal.pause(folder_id)
+            logger.info("【网盘整理】目录扫描已停止，保留待恢复记录: %s", file_path)
+            return False
+        if not snapshot.stable:
+            logger.warning(
+                "【网盘整理】目录扫描未收敛 (%s)，仅提交已发现文件；"
+                "保留待核查记录，不自动无限重试: %s", snapshot.reason, file_path,
+            )
+
+        submitted = skipped = failed = 0
+        for item in snapshot.items:
+            if stopped():
+                journal.pause(folder_id)
+                logger.info("【网盘整理】目录提交已停止，已受理 %s 项，保留进度: %s", submitted, file_path)
+                return False
+            item_id = str(item["id"])
+            if item_id in accepted_ids:
+                skipped += 1
+                continue
+            path = Path(str(item["path"]))
+            parent_id = str(item["parent_id"])
+            if parent_id not in pantransfercacher.delete_pan_transfer_list:
+                pantransfercacher.delete_pan_transfer_list.append(parent_id)
+            cache_added = item_id not in pantransfercacher.creata_pan_transfer_list
+            if cache_added:
+                pantransfercacher.creata_pan_transfer_list.append(item_id)
+            pantransfercacher.file_item_dict[item_id] = {
+                "sha1": item["sha1"], "size": item["size"],
+            }
+            try:
+                fileitem = FileItem(
+                    storage=configer.storage_module, fileid=item_id,
+                    parent_fileid=parent_id, path=path.as_posix(), type="file",
+                    name=path.name, basename=path.stem,
+                    extension=path.suffix[1:].lower(), size=item["size"],
+                    pickcode=item["pickcode"], modify_time=item.get("ctime"),
+                )
+                result = transferchain.do_transfer(fileitem=fileitem)
+                success = isinstance(result, tuple) and bool(result) and result[0] is True
+                if not success:
+                    reason = result[1] if isinstance(result, tuple) and len(result) > 1 else result
+                    logger.warning("【网盘整理】MP 未受理 %s: %s", path, reason)
+            except Exception as error:
+                success = False
+                logger.error("【网盘整理】提交失败 %s: %s", path, error)
+            if success:
+                # If persistence itself fails, keep the event pending; do not mark it done.
+                journal.record_accepted(folder_id, item_id)
+                accepted_ids.add(item_id)
+                submitted += 1
+                logger.info("【网盘整理】MP 已受理 %s", path)
+            else:
+                failed += 1
+                if cache_added and item_id in pantransfercacher.creata_pan_transfer_list:
+                    pantransfercacher.creata_pan_transfer_list.remove(item_id)
+        if stopped():
+            journal.pause(folder_id)
+            return False
+        complete = snapshot.stable and failed == 0
+        journal.finish(folder_id, complete=complete)
+        logger.info(
+            "【网盘整理】目录扫描%s，发现 %s 项，MP 受理 %s 项，"
+            "已受理跳过 %s 项，提交失败 %s 项: %s",
+            "完成" if complete else "未完成（保留待核查记录）",
+            len(snapshot.items), submitted, skipped, failed, file_path,
+        )
+        return complete
+
+    def resume_directory_transfers(self, stop_event):
+        """Resume only interrupted work, once per start, including latest mode."""
+        journal = self._get_directory_transfer_journal()
+        if not configer.pan_transfer_enabled or not configer.pan_transfer_paths:
+            return
+        rmt_mediaext = [f".{ext.strip()}" for ext in
+                        configer.user_rmt_mediaext.replace("，", ",").split(",")]
+        for entry in journal.pending():
+            if stop_event.is_set():
+                return
+            folder_id = str(entry["folder_id"])
+            event_id = str(entry["event"].get("id", ""))
+            path = Path(entry["path"])
+            if configer.pan_transfer_clouddrive2_config.enabled:
+                journal.finish(folder_id, complete=False)
+                if event_id:
+                    self._resumed_directory_events.add(event_id)
+                logger.warning("【网盘整理】整理后端已切换，原 115 目录保留待核查记录: %s", path)
+                continue
+            if not PathUtils.get_run_transfer_path(configer.pan_transfer_paths, path):
+                journal.finish(folder_id, complete=False)
+                if event_id:
+                    self._resumed_directory_events.add(event_id)
+                logger.warning("【网盘整理】恢复目录已不在监控范围，保留待核查记录: %s", path)
+                continue
+            try:
+                # Resolve the current path by stable ID before touching an old path.
+                current_path = get_path(
+                    client=self._client, attr=int(folder_id), root_id=None,
+                    ensure_file=False, refresh=True, timeout=20, app="android",
+                    **configer.get_ios_ua_app(app=False),
+                )
+                if stop_event.is_set():
+                    journal.pause(folder_id)
+                    return
+                if isinstance(current_path, (str, Path)):
+                    current_path = str(current_path).removeprefix("根目录")
+                if not current_path or Path(current_path) != path:
+                    journal.finish(folder_id, complete=False)
+                    logger.warning("【网盘整理】恢复目录位置已变化或无法确认，保留待核查记录: %s", path)
+                    continue
+                logger.info("【网盘整理】恢复未完成目录: %s", path)
+                self.media_transfer(entry["event"], path, rmt_mediaext)
+            except Exception as error:
+                if stop_event.is_set():
+                    journal.pause(folder_id)
+                    return
+                journal.finish(folder_id, complete=False)
+                logger.error("【网盘整理】恢复目录失败，保留待核查记录: %s: %s", path, error)
+            finally:
+                if event_id and not stop_event.is_set():
+                    # last/all may replay the old event after startup recovery.
+                    self._resumed_directory_events.add(event_id)
+
     def media_transfer(self, event: Dict[str, Any], file_path: Path, rmt_mediaext):
         """
         运行媒体文件整理
@@ -339,94 +550,9 @@ class MonitorLife:
                     pantransfercacher.delete_pan_transfer_list.append(
                         str(event["file_id"])
                     )
-                for item in iter_files_with_path(
-                    self._client,
-                    cid=int(file_id),
-                    with_ancestors=True,
-                    cooldown=2,
-                    use_media_api=False,
-                    **configer.get_ios_ua_app(),
-                ):
-                    try:
-                        check_iter_path_data(item)
-                    except FileItemKeyMiss as e:
-                        logger.warning(f"【网盘整理】数据拉取异常: {e}")
-                        continue
-                    item_path = item.get("path")
-                    if not item_path:
-                        logger.warning("【网盘整理】数据路径为空，跳过: %s", item)
-                        continue
-                    file_path = Path(str(item_path))
-                    if not PathUtils.has_prefix(file_path, org_file_path):
-                        continue
-                    # 缓存文件夹ID
-                    if (
-                        str(item["parent_id"])
-                        not in pantransfercacher.delete_pan_transfer_list
-                    ):
-                        pantransfercacher.delete_pan_transfer_list.append(
-                            str(item["parent_id"])
-                        )
-                    if file_path.suffix.lower() in rmt_mediaext:
-                        # 缓存文件ID
-                        if (
-                            str(item["id"])
-                            not in pantransfercacher.creata_pan_transfer_list
-                        ):
-                            pantransfercacher.creata_pan_transfer_list.append(
-                                str(item["id"])
-                            )
-                        # 缓存文件信息用于ffprobe命名补充
-                        if (
-                            str(item["id"])
-                            not in pantransfercacher.file_item_dict.keys()
-                        ):
-                            pantransfercacher.file_item_dict[str(item["id"])] = {
-                                "sha1": item["sha1"],
-                                "size": item["size"],
-                            }
-                        fileitem = FileItem(
-                            storage=configer.storage_module,
-                            fileid=str(item["id"]),
-                            parent_fileid=str(item["parent_id"]),
-                            path=file_path.as_posix(),
-                            type="file",
-                            name=file_path.name,
-                            basename=file_path.stem,
-                            extension=file_path.suffix[1:].lower(),
-                            size=item["size"],
-                            pickcode=item["pickcode"],
-                            modify_time=item.get("ctime", None),
-                        )
-                        transferchain.do_transfer(fileitem=fileitem)
-                        logger.info(f"【网盘整理】{file_path} 加入整理列队")
-                    if (
-                        file_path.suffix.lower() in settings.RMT_AUDIOEXT
-                        or file_path.suffix.lower() in settings.RMT_SUBEXT
-                    ):
-                        # 如果是MP可处理的音轨或字幕文件，则缓存文件ID
-                        if (
-                            str(item["id"])
-                            not in pantransfercacher.creata_pan_transfer_list
-                        ):
-                            pantransfercacher.creata_pan_transfer_list.append(
-                                str(item["id"])
-                            )
-                        fileitem = FileItem(
-                            storage=configer.storage_module,
-                            fileid=str(item["id"]),
-                            parent_fileid=str(item["parent_id"]),
-                            path=file_path.as_posix(),
-                            type="file",
-                            name=file_path.name,
-                            basename=file_path.stem,
-                            extension=file_path.suffix[1:].lower(),
-                            size=item["size"],
-                            pickcode=item["pickcode"],
-                            modify_time=item.get("ctime", None),
-                        )
-                        transferchain.do_transfer(fileitem=fileitem)
-                        logger.info(f"【网盘整理】{file_path} 加入整理列队")
+                return self._transfer_directory(
+                    event, file_path, rmt_mediaext, transferchain, self.stop_event
+                )
         else:
             # 文件情况，直接整理
             if file_path.suffix.lower() in rmt_mediaext:
@@ -2148,6 +2274,9 @@ class MonitorLife:
 
         :return Tuple: (from_time, from_id)
         """
+        stop_event = self.stop_event
+        if stop_event and stop_event.is_set():
+            return from_time, from_id
         if self._wait_for_transfer_complete():
             return from_time, from_id
 
@@ -2190,9 +2319,9 @@ class MonitorLife:
                 self._record_ios_405()
 
         if not events_batch:
-            if self.stop_event and self.stop_event.wait(timeout=self.WAIT_TIME_OUT):
+            if stop_event and stop_event.wait(timeout=self.WAIT_TIME_OUT):
                 return from_time, from_id
-            elif not self.stop_event:
+            elif not stop_event:
                 sleep(self.SLEEP_TIME)
             return from_time, from_id
 
@@ -2202,96 +2331,110 @@ class MonitorLife:
         return_from_time: int = from_time
         return_from_id: int = from_id
         for event in reversed(events_batch):
-            self.rmt_mediaext = [
-                f".{ext.strip()}"
-                for ext in configer.get_config("user_rmt_mediaext")
-                .replace("，", ",")
-                .split(",")
-            ]
-            self.rmt_mediaext_set = set(self.rmt_mediaext)
-            self.download_mediaext_set = {
-                f".{ext.strip()}"
-                for ext in configer.get_config("user_download_mediaext")
-                .replace("，", ",")
-                .split(",")
-            }
-
-            logger.debug(
-                f"【监控生活事件】{BEHAVIOR_TYPE_TO_NAME.get(event['type'], '未知类型')}: {event}"
-            )
-
-            return_from_id = int(event["id"])
-            return_from_time = int(event["update_time"])
-
-            if int(event["type"]) not in {1, 2, 5, 6, 14, 17, 18, 20, 22, 23, 24}:
-                continue
-
-            if (
-                int(event["type"]) == 1
-                or int(event["type"]) == 2
-                or int(event["type"]) == 14
-                or int(event["type"]) == 18
-                or int(event["type"]) == 23
-            ):
-                # 新路径事件处理
-                self.create(event=event)
-
-            if int(event["type"]) == 5 or int(event["type"]) == 6:
-                # 移动事件处理
-                self.move(event=event)
-
-            if int(event["type"]) == 20 or int(event["type"]) == 24:
-                # 重命名事件处理
-                self.rename(event=event)
-
-            if int(event["type"]) == 22:
-                # 删除文件/文件夹事件处理
-                if str(event["file_id"]) in pantransfercacher.delete_pan_transfer_list:
-                    # 检查是否命中删除文件夹缓存，命中则无需处理
-                    pantransfercacher.delete_pan_transfer_list.remove(
-                        str(event["file_id"])
-                    )
-                else:
-                    if (
-                        configer.monitor_life_enabled
-                        and configer.monitor_life_paths
-                        and "remove" in configer.monitor_life_event_modes
-                    ):
-                        self.remove(event=event)
-
-            if int(event["type"]) == 17:
-                # 对于创建文件夹事件直接写入数据库
-                _databasehelper = FileDbHelper()
-                file_name = event["file_name"]
-                dir_path = self._get_path_by_cid(int(event["parent_id"]))
-                if dir_path is None:
-                    logger.warning(
-                        f"【监控生活事件】无法获取父目录路径，跳过写入数据库: {event}"
-                    )
+            if stop_event and stop_event.is_set():
+                return return_from_time, return_from_id
+            failed = False
+            try:
+                if str(event.get("id", "")) in self._resumed_directory_events:
                     continue
-                file_path = Path(dir_path) / file_name
-                # 待整理目录跳过处理
-                if configer.pan_transfer_enabled and configer.pan_transfer_paths:
-                    if PathUtils.get_run_transfer_path(
-                        paths=configer.pan_transfer_paths,
-                        transfer_path=file_path.as_posix(),
-                    ):
-                        continue
-                # 未识别目录跳过处理
-                if configer.pan_transfer_unrecognized_path:
-                    if PathUtils.has_prefix(
-                        file_path.as_posix(), configer.pan_transfer_unrecognized_path
-                    ):
-                        continue
-                _databasehelper.upsert_batch(
-                    _databasehelper.process_life_dir_item(
-                        event=event, file_path=file_path
-                    )
+                self.rmt_mediaext = [
+                    f".{ext.strip()}"
+                    for ext in configer.get_config("user_rmt_mediaext")
+                    .replace("，", ",")
+                    .split(",")
+                ]
+                self.rmt_mediaext_set = set(self.rmt_mediaext)
+                self.download_mediaext_set = {
+                    f".{ext.strip()}"
+                    for ext in configer.get_config("user_download_mediaext")
+                    .replace("，", ",")
+                    .split(",")
+                }
+
+                logger.debug(
+                    f"【监控生活事件】{BEHAVIOR_TYPE_TO_NAME.get(event['type'], '未知类型')}: {event}"
                 )
 
-        if self.stop_event and self.stop_event.wait(timeout=self.WAIT_TIME_OUT):
+                if int(event["type"]) not in {1, 2, 5, 6, 14, 17, 18, 20, 22, 23, 24}:
+                    continue
+
+                if (
+                    int(event["type"]) == 1
+                    or int(event["type"]) == 2
+                    or int(event["type"]) == 14
+                    or int(event["type"]) == 18
+                    or int(event["type"]) == 23
+                ):
+                    # 新路径事件处理
+                    self.create(event=event)
+
+                if int(event["type"]) == 5 or int(event["type"]) == 6:
+                    # 移动事件处理
+                    self.move(event=event)
+
+                if int(event["type"]) == 20 or int(event["type"]) == 24:
+                    # 重命名事件处理
+                    self.rename(event=event)
+
+                if int(event["type"]) == 22:
+                    # 删除文件/文件夹事件处理
+                    if str(event["file_id"]) in pantransfercacher.delete_pan_transfer_list:
+                        # 检查是否命中删除文件夹缓存，命中则无需处理
+                        pantransfercacher.delete_pan_transfer_list.remove(
+                            str(event["file_id"])
+                        )
+                    else:
+                        if (
+                            configer.monitor_life_enabled
+                            and configer.monitor_life_paths
+                            and "remove" in configer.monitor_life_event_modes
+                        ):
+                            self.remove(event=event)
+
+                if int(event["type"]) == 17:
+                    # 对于创建文件夹事件直接写入数据库
+                    _databasehelper = FileDbHelper()
+                    file_name = event["file_name"]
+                    dir_path = self._get_path_by_cid(int(event["parent_id"]))
+                    if dir_path is None:
+                        logger.warning(
+                            f"【监控生活事件】无法获取父目录路径，跳过写入数据库: {event}"
+                        )
+                        continue
+                    file_path = Path(dir_path) / file_name
+                    # 待整理目录跳过处理
+                    if configer.pan_transfer_enabled and configer.pan_transfer_paths:
+                        if PathUtils.get_run_transfer_path(
+                            paths=configer.pan_transfer_paths,
+                            transfer_path=file_path.as_posix(),
+                        ):
+                            continue
+                    # 未识别目录跳过处理
+                    if configer.pan_transfer_unrecognized_path:
+                        if PathUtils.has_prefix(
+                            file_path.as_posix(), configer.pan_transfer_unrecognized_path
+                        ):
+                            continue
+                    _databasehelper.upsert_batch(
+                        _databasehelper.process_life_dir_item(
+                            event=event, file_path=file_path
+                        )
+                    )
+
+            except BaseException:
+                failed = True
+                raise
+            finally:
+                # A normal continue (ignored event) is also consumed; an exception is not.
+                if not failed and not (stop_event and stop_event.is_set()):
+                    return_from_id = int(event["id"])
+                    return_from_time = int(event["update_time"])
+            if stop_event and stop_event.is_set():
+                return return_from_time, return_from_id
+
+        if stop_event and stop_event.wait(timeout=self.WAIT_TIME_OUT):
             return return_from_time, return_from_id
-        elif not self.stop_event:
+        elif not stop_event:
             sleep(self.SLEEP_TIME)
 
         return return_from_time, return_from_id

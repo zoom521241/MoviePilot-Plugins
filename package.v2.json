@@ -16,12 +16,13 @@
     "name": "115网盘STRM助手",
     "description": "115网盘STRM生成一条龙服务",
     "labels": "115网盘,STRM",
-    "version": "2.8.74.2",
+    "version": "2.8.74.3",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "DDSRem",
     "level": 1,
     "system_version": ">=2.0.0",
     "history": {
+      "v2.8.74.3": "修复整目录转存子文件延迟可见导致漏整理：每轮间隔 10 秒，至少观察 30 秒并连续两次完整比较不变，最多 6 轮或 120 秒软时限；持久化停止断点并在 latest 模式下恢复，未收敛记录保留待核查，不无限重试。",
       "v2.8.74.2": "兼容 V3 持久化整理结算，修复重复入队和停止后继续执行；补齐安装模块及依赖包。",
       "v2.8.74": "同步当前安装版，并修复 TransferChain 批次清理方法名兼容问题"
     },
