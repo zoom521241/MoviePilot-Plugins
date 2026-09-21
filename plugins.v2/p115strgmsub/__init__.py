@@ -39,7 +39,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.5"
+    plugin_version = "1.5.6"
     # 插件作者
     plugin_author = "mrtian2016"
     # 作者主页
@@ -295,6 +295,7 @@ class P115StrgmSub(_PluginBase):
                     continue
                 subscribe_oper.update(s.id, {"sites": site_ids})
                 updated += 1
+            db.commit()
         logger.info(f"{reason}：已更新 {updated} 个订阅（跳过 {excluded} 个排除订阅）")
 
     # ------------------ 禁用窗口判断 ------------------
@@ -599,6 +600,7 @@ class P115StrgmSub(_PluginBase):
                     with SessionFactory() as db:
                         site_id_115 = self._ensure_115_site_id(db)
                         SubscribeOper(db=db).update(sid, {"sites": [site_id_115]})
+                        db.commit()
                 logger.info(f"已屏蔽系统订阅：新增订阅已拉回仅115（subscribe_id={sid}）")
             else:
                 if self._window_enabled() and hasattr(self._subscribe_handler, "set_sites_for_subscribe_by_names"):

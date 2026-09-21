@@ -12,10 +12,11 @@ P115StrgmSub v1.5.5 离线回归测试
 """
 import sys
 import types
+from pathlib import Path
 import unittest
 from unittest import mock
 
-_PLUGIN_ROOT = r"E:\Agent\NAS_SSH\MoviePilot-Plugins\plugins.v2"
+_PLUGIN_ROOT = str(Path(__file__).resolve().parents[1] / "plugins.v2")
 
 
 def _install_mp_mocks():
@@ -269,7 +270,7 @@ class TestEnterBlocked(unittest.TestCase):
 
 class TestVersion(unittest.TestCase):
     def test_version_bumped(self):
-        self.assertEqual(P115StrgmSub.plugin_version, "1.5.5")
+        self.assertEqual(P115StrgmSub.plugin_version, "1.5.6")
 
     def test_site_constants(self):
         self.assertEqual(P115StrgmSub._SITE_115_ID, -1)

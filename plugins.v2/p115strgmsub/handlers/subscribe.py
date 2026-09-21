@@ -254,6 +254,8 @@ class SubscribeHandler:
                 subscribe_oper.update(s.id, {"sites": value})
                 updated += 1
 
+            # V3 的显式 Session 由调用方提交，关闭 Session 不会自动保存。
+            db.commit()
             logger.info(f"{action_desc}：已更新 {updated} 个订阅（跳过 {excluded} 个排除订阅）")
             return site_ids_uniq
 
@@ -287,6 +289,7 @@ class SubscribeHandler:
                 subscribe_oper.update(s.id, {"sites": value})
                 updated += 1
 
+            db.commit()
             logger.info(f"已屏蔽系统订阅：全量订阅仅115网盘（已更新 {updated} 个，跳过 {excluded} 个排除订阅）")
             return [site_id_115]
 
@@ -302,6 +305,7 @@ class SubscribeHandler:
             storage = self._guess_sites_storage_format_for_subscribe(db, int(subscribe_id))
             value = str(site_id_115) if storage == "str" else [site_id_115]
             SubscribeOper(db=db).update(int(subscribe_id), {"sites": value})
+            db.commit()
             logger.info(f"已屏蔽系统订阅：检测到新增订阅，准备拉回仅115（subscribe_id={subscribe_id}）")
             return [site_id_115]
 
@@ -337,5 +341,6 @@ class SubscribeHandler:
             storage = self._guess_sites_storage_format_for_subscribe(db, int(subscribe_id))
             value = ",".join(str(x) for x in site_ids_uniq) if storage == "str" else site_ids_uniq
             SubscribeOper(db=db).update(int(subscribe_id), {"sites": value})
+            db.commit()
             logger.info(f"已恢复系统订阅：新增订阅已同步窗口站点（subscribe_id={subscribe_id}）")
             return site_ids_uniq
