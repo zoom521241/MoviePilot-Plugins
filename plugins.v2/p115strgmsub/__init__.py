@@ -41,9 +41,9 @@ class P115StrgmSub(_PluginBase):
     # 插件版本
     plugin_version = "1.5.6"
     # 插件作者
-    plugin_author = "mrtian2016"
+    plugin_author = "zoom521241"
     # 作者主页
-    author_url = "https://github.com/mrtian2016"
+    author_url = "https://github.com/zoom521241"
     # 插件配置项ID前缀
     plugin_config_prefix = "p115strgmsub_"
     plugin_order = 20

@@ -1,13 +1,13 @@
 # MoviePilot-Plugins
 
-个人维护的 MoviePilot 插件仓库，包含基于实际 V3 环境验证的 115 插件兼容修复。
+由 [zoom521241](https://github.com/zoom521241) 维护的 MoviePilot 插件仓库，包含基于实际 V3 环境验证的 115 插件兼容修复。插件市场及插件页面的作者统一显示为 `zoom521241`；各插件基于下列原作者的作品继续维护。
 
-| 插件 | 版本 | 说明 |
-| --- | --- | --- |
-| 115网盘STRM助手 | 2.8.74.3 | 修复整目录转存子文件延迟可见导致漏整理，增加有界复扫和停止后的持久化恢复 |
-| 115网盘储存 | 3.0.3 | 修复并发限流等待不断增长、移动后重命名及文件状态核验；要求 MoviePilot V3 |
-| 115网盘订阅追更 | 1.5.6 | 修复 V3 站点回退及站点更新未提交事务导致屏蔽未实际保存的问题 |
-| Emby媒体库封面生成 | 1.0.2 | 后台合并处理入库事件，背景图失败回退海报；要求 MoviePilot V3 |
+| 插件 | 版本 | 原作者 | 说明 |
+| --- | --- | --- | --- |
+| 115网盘STRM助手 | 2.8.74.3 | [DDSRem](https://github.com/DDSRem) | 修复整目录转存子文件延迟可见导致漏整理，增加有界复扫和停止后的持久化恢复 |
+| 115网盘储存 | 3.0.3 | [DDSRem](https://github.com/DDSRem) | 修复并发限流等待不断增长、移动后重命名及文件状态核验；要求 MoviePilot V3 |
+| 115网盘订阅追更 | 1.5.6 | [mrtian2016](https://github.com/mrtian2016) | 修复 V3 站点回退及站点更新未提交事务导致屏蔽未实际保存的问题 |
+| Emby媒体库封面生成 | 1.0.2 | [Kioo / wio-ki](https://github.com/wio-ki) | 后台合并处理入库事件，背景图失败回退海报；要求 MoviePilot V3 |
 
 在 MoviePilot 插件市场添加此仓库地址：
 
@@ -73,4 +73,4 @@ python -m unittest discover -s tests -v
 
 ## 来源
 
-115网盘STRM助手和115网盘储存原作者为 [DDSRem](https://github.com/DDSRem)；115网盘订阅追更原作者为 [mrtian2016](https://github.com/mrtian2016)；Emby媒体库封面生成来自 [Kioo](https://github.com/wio-ki/MoviePilot-Plugins)，其目录附原 GPL-3.0 许可证和本次修改说明。本仓库保留原作者标识，维护兼容补丁。`wheels/` 中的依赖包保留各自的发行元数据。
+115网盘STRM助手和115网盘储存原作者为 [DDSRem](https://github.com/DDSRem)；115网盘订阅追更原作者为 [mrtian2016](https://github.com/mrtian2016)；Emby媒体库封面生成来自 [Kioo](https://github.com/wio-ki/MoviePilot-Plugins)，其目录附原 GPL-3.0 许可证和本次修改说明。本仓库版本由 **zoom521241** 维护并以此显示插件作者，原始作品来源在本 README 中署名。原许可证、源码版权声明以及 `wheels/` 中依赖包各自的发行元数据继续保留。

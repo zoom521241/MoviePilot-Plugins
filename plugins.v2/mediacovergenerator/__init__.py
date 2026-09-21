@@ -54,9 +54,9 @@ class MediaCoverGenerator(_PluginBase):
     # 插件版本
     plugin_version = "1.0.2"
     # 插件作者
-    plugin_author = "Kioo"
+    plugin_author = "zoom521241"
     # 作者主页
-    author_url = "https://github.com/wio-ki"
+    author_url = "https://github.com/zoom521241"
     # 插件配置项ID前缀
     plugin_config_prefix = "mediacovergenerator_"
     # 加载顺序
