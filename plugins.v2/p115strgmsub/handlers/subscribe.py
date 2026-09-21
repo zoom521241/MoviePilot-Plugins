@@ -150,18 +150,28 @@ class SubscribeHandler:
     def _ensure_115_site_id(db) -> int:
         row = db.execute(text("SELECT id FROM site WHERE name=:name LIMIT 1"), {"name": "115网盘"}).fetchone()
         if row and row[0] is not None:
-            return int(row[0])
+            site_id = int(row[0])
+            # v1.5.5：补齐 domain，避免订阅资源匹配按域名过滤时因空域名失效
+            result = db.execute(
+                text("UPDATE site SET domain=:d WHERE id=:i AND (domain IS NULL OR domain='')"),
+                {"d": "115.com", "i": site_id}
+            )
+            if getattr(result, "rowcount", 0):
+                db.commit()
+                logger.info(f"已补齐站点域名：115网盘(id={site_id}) domain=115.com")
+            return site_id
 
         # existing = Site.get(db, -1)
         row_ex = db.execute(text("SELECT id FROM site WHERE id=:i"), {"i": -1}).fetchone()
         if not row_ex:
             db.execute(
                 text(
-                    "INSERT INTO site (id, name, url, is_active, limit_interval, limit_count, limit_seconds, timeout) "
-                    "VALUES (:id,:name,:url,:is_active,:limit_interval,:limit_count,:limit_seconds,:timeout)"
+                    "INSERT INTO site (id, name, url, domain, is_active, limit_interval, limit_count, limit_seconds, timeout) "
+                    "VALUES (:id,:name,:url,:domain,:is_active,:limit_interval,:limit_count,:limit_seconds,:timeout)"
                 ),
                 {
-                    "id": -1, "name": "115网盘", "url": "https://115.com", "is_active": True,
+                    "id": -1, "name": "115网盘", "url": "https://115.com", "domain": "115.com",
+                    "is_active": True,
                     "limit_interval": 10000000, "limit_count": 1, "limit_seconds": 10000000, "timeout": 1
                 }
             )

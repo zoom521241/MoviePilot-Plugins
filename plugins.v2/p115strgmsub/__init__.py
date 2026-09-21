@@ -19,7 +19,7 @@ from app.db.subscribe_oper import SubscribeOper
 from app.db.models.site import Site
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas.types import EventType, MediaType, NotificationType
+from app.schemas.types import EventType, MediaType, NotificationType, SystemConfigKey
 
 from .clients import PanSouClient, P115ClientManager, NullbrClient, HDHiveOpenAPIClient, HDHiveOpenAPIError
 from .handlers import SearchHandler, SyncHandler, SubscribeHandler, ApiHandler
@@ -39,7 +39,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.4"
+    plugin_version = "1.5.5"
     # 插件作者
     plugin_author = "mrtian2016"
     # 作者主页
@@ -229,20 +229,30 @@ class P115StrgmSub(_PluginBase):
         def _do_ensure(session):
             row = session.execute(text("SELECT id FROM site WHERE name=:n LIMIT 1"), {"n": "115网盘"}).fetchone()
             if row and row[0] is not None:
-                return int(row[0])
+                site_id = int(row[0])
+                # v1.5.5：补齐 domain，避免订阅资源匹配按域名过滤时因空域名失效
+                result = session.execute(
+                    text("UPDATE site SET domain=:d WHERE id=:i AND (domain IS NULL OR domain='')"),
+                    {"d": self._SITE_115_DOMAIN, "i": site_id}
+                )
+                if getattr(result, "rowcount", 0):
+                    session.commit()
+                    logger.info(f"已补齐站点域名：115网盘(id={site_id}) domain={self._SITE_115_DOMAIN}")
+                return site_id
 
             # existing = Site.get(session, -1)
             row_ex = session.execute(text("SELECT id FROM site WHERE id=:i"), {"i": -1}).fetchone()
             if not row_ex:
                 session.execute(
                     text(
-                        "INSERT INTO site (id, name, url, is_active, limit_interval, limit_count, limit_seconds, timeout) "
-                        "VALUES (:id, :name, :url, :is_active, :limit_interval ,:limit_count, :limit_seconds, :timeout)"
+                        "INSERT INTO site (id, name, url, domain, is_active, limit_interval, limit_count, limit_seconds, timeout) "
+                        "VALUES (:id, :name, :url, :domain, :is_active, :limit_interval ,:limit_count, :limit_seconds, :timeout)"
                     ),
                     {
                         "id": -1,
                         "name": "115网盘",
                         "url": "https://115.com",
+                        "domain": self._SITE_115_DOMAIN,
                         "is_active": True,
                         "limit_interval": 10000000,
                         "limit_count": 1,
@@ -302,13 +312,97 @@ class P115StrgmSub(_PluginBase):
     def _window_enabled(self) -> bool:
         return not self._window_disabled()
 
-    # ------------------ 系统默认订阅站点：只在已恢复系统订阅时尝试 ------------------
+    # ------------------ 系统默认订阅站点（V3 RssSites）------------------
+
+    # MoviePilot V3 get_sub_sites() 逻辑：订阅站点与系统默认订阅站点（RssSites）
+    # 交集为空时，会回退为默认站点列表。若仅把订阅 sites 设为 [-1]（115网盘），
+    # 而 RssSites 是真实站点，交集为空会导致屏蔽被完全绕过（搜索与站点资源缓存
+    # 订阅匹配两条路径均失效）。因此屏蔽态必须把 -1 合并进 RssSites，
+    # 使交集计算返回 [-1]，同时不影响被排除订阅使用自身/默认站点。
+
+    _SITE_115_ID: int = -1
+    _SITE_115_DOMAIN: str = "115.com"
+
+    def _get_system_config_oper(self):
+        """返回插件基类提供的系统配置操作对象（V3 单例），不可用时返回 None"""
+        oper = getattr(self, "systemconfig", None)
+        if oper is None:
+            return None
+        # 必须同时提供 get/set 才可用
+        if not hasattr(oper, "get") or not hasattr(oper, "set"):
+            return None
+        return oper
+
+    def _get_system_default_site_ids(self) -> Optional[List[int]]:
+        """
+        读取系统默认订阅站点（RssSites）。
+        返回 None 表示当前环境不支持读取（保持原有行为）；返回 [] 表示配置为空。
+        """
+        oper = self._get_system_config_oper()
+        if oper is None:
+            return None
+        try:
+            value = oper.get(SystemConfigKey.RssSites)
+        except Exception as e:
+            logger.warning(f"读取系统默认订阅站点失败：{e}")
+            return None
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [x.strip() for x in value.split(",") if x.strip()]
+        try:
+            return [int(x) for x in value]
+        except (TypeError, ValueError):
+            logger.warning(f"系统默认订阅站点格式异常：{value!r}")
+            return None
+
+    def _set_system_default_site_ids(self, site_ids: List[int]) -> bool:
+        """写入系统默认订阅站点（RssSites），成功返回 True"""
+        oper = self._get_system_config_oper()
+        if oper is None:
+            return False
+        try:
+            oper.set(SystemConfigKey.RssSites, list(site_ids))
+            return True
+        except Exception as e:
+            logger.warning(f"写入系统默认订阅站点失败：{e}")
+            return False
+
+    def _ensure_default_sites_include_115(self):
+        """
+        屏蔽态自愈：把 115网盘(-1) 合并进系统默认订阅站点。
+
+        - RssSites 为空：交集回退不会发生（get_sub_sites 直接返回订阅 sites），
+          不写入，避免影响被排除订阅的默认站点语义。
+        - RssSites 非空且已含 -1：无操作。
+        - RssSites 非空且不含 -1：合并 -1 到首位。
+        """
+        current = self._get_system_default_site_ids()
+        if current is None:
+            return
+        if not current:
+            logger.debug("已屏蔽系统订阅：系统默认订阅站点为空，无需合并115网盘")
+            return
+        if self._SITE_115_ID in current:
+            return
+        new_value = [self._SITE_115_ID] + [x for x in current if x != self._SITE_115_ID]
+        if self._set_system_default_site_ids(new_value):
+            logger.info(
+                f"已屏蔽系统订阅：系统默认订阅站点已合并115网盘（{current} -> {new_value}），"
+                f"防止订阅站点交集回退绕过屏蔽"
+            )
 
     def _try_set_default_sites_for_unblocked(self, site_ids: List[int]):
         """
-        只在“已恢复系统订阅”时尝试设置系统默认订阅站点为窗口站点。
-        若系统不存在对应key，会静默失败，不影响订阅 sites 已更新。
+        已恢复系统订阅时：把系统默认订阅站点设置为窗口站点（同时移除 -1）。
+
+        V3 优先写 RssSites；旧版本回退到历史键名探测（原 v1.5.4 行为）。
         """
+        if site_ids and self._set_system_default_site_ids(site_ids):
+            logger.info(f"已恢复系统订阅：已同步系统默认订阅站点（RssSites={site_ids}）")
+            return
+
+        # 兼容旧版本 MoviePilot：尝试历史键名（与 v1.5.4 保持一致）
         try:
             from app.db.systemconfig_oper import SystemConfigOper
         except Exception:
@@ -360,7 +454,8 @@ class P115StrgmSub(_PluginBase):
         """
         已屏蔽系统订阅：
         - 全量订阅 sites=仅115
-        - 不再尝试设置屏蔽态默认站点=115（依赖 SubscribeAdded 兜底）
+        - V3：把 -1 合并进系统默认订阅站点（RssSites），防止 get_sub_sites
+          交集回退为默认站点导致屏蔽被绕过（v1.5.5 修复）
         - 取消所有窗口任务
         """
         self._ensure_toggle_scheduler()
@@ -368,6 +463,7 @@ class P115StrgmSub(_PluginBase):
         self._init_subscribe_handler()
 
         self._subscribe_handler.set_blocked_sites_only_115()
+        self._ensure_default_sites_include_115()
         self._block_system_subscribe = True
         self.__update_config()
         logger.info(f"已屏蔽系统订阅（仅115网盘）：{reason}")
@@ -1114,6 +1210,13 @@ class P115StrgmSub(_PluginBase):
         with lock:
             tz = pytz.timezone(settings.TZ)
             run_start = datetime.datetime.now(tz=tz)
+
+            # v1.5.5：屏蔽态自愈——若默认订阅站点被外部改动导致 -1 丢失，重新合并
+            try:
+                if self._block_system_subscribe:
+                    self._ensure_default_sites_include_115()
+            except Exception as e:
+                logger.warning(f"屏蔽态默认站点自愈失败：{e}")
 
             success = False
             try:
