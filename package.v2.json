@@ -3,7 +3,7 @@
     "name": "115网盘订阅追更",
     "description": "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。",
     "labels": "订阅,115网盘",
-    "version": "1.5.6",
+    "version": "1.5.7",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
     "level": 1,
@@ -11,7 +11,8 @@
     "history": {
       "v1.5.6": "修复 V3 显式 Session 修改订阅站点后未提交事务，导致日志显示已屏蔽但 sites=null 仍可走 PT；覆盖批量、新增订阅及解除屏蔽写入，保留排除/指定模式。",
       "v1.5.5": "修复V3默认订阅站点交集回退导致屏蔽被绕过：屏蔽态把115网盘合并进系统默认订阅站点，补齐虚拟站点domain，同步任务自愈",
-      "v1.5.4": "本地持久化版本，兼容 Subscribe.media_source/media_id"
+      "v1.5.4": "本地持久化版本，兼容 Subscribe.media_source/media_id",
+      "v1.5.7": "修复 V3 no_exists 键改为来源前缀格式(tmdb:xxx)后电视剧缺集查找落空、导致剧集订阅被误判无缺失而跳过搜索的问题"
     }
   },
   "P115StrmHelper": {

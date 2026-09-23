@@ -270,7 +270,7 @@ class TestEnterBlocked(unittest.TestCase):
 
 class TestVersion(unittest.TestCase):
     def test_version_bumped(self):
-        self.assertEqual(P115StrgmSub.plugin_version, "1.5.6")
+        self.assertEqual(P115StrgmSub.plugin_version, "1.5.7")
 
     def test_site_constants(self):
         self.assertEqual(P115StrgmSub._SITE_115_ID, -1)
@@ -314,6 +314,55 @@ class TestSiteDomainSql(unittest.TestCase):
         site_id, stmts = self._run_do_ensure(existing_row=(-1,), update_result=0)
         self.assertEqual(site_id, -1)
         self.assertIn("UPDATE site SET domain", stmts[-1][0] if stmts else "")
+
+
+class TestNoExistsSeasonInfoKeyResolution(unittest.TestCase):
+    """
+    v1.5.7：V3 的 get_no_exists_info 返回键为来源前缀格式（"tmdb:95350"），
+    resolve_no_exists_season_info 必须能同时兼容新旧键格式，
+    否则剧集订阅会被误判为"没有缺失"而整体跳过搜索。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from p115strgmsub.handlers.sync import resolve_no_exists_season_info
+        cls.fn = staticmethod(resolve_no_exists_season_info)
+
+    def test_v3_prefixed_tmdb_key(self):
+        no_exists = {"tmdb:95350": {1: "INFO"}}
+        self.assertEqual(self.fn(no_exists, tmdb_id=95350), {1: "INFO"})
+
+    def test_v3_prefixed_tmdb_key_with_str_id(self):
+        no_exists = {"tmdb:95350": {1: "INFO"}}
+        self.assertEqual(self.fn(no_exists, tmdb_id="95350"), {1: "INFO"})
+
+    def test_legacy_bare_int_key(self):
+        no_exists = {95350: {1: "INFO"}}
+        self.assertEqual(self.fn(no_exists, tmdb_id=95350), {1: "INFO"})
+
+    def test_legacy_bare_str_key(self):
+        no_exists = {"95350": {1: "INFO"}}
+        self.assertEqual(self.fn(no_exists, tmdb_id=95350), {1: "INFO"})
+
+    def test_douban_prefixed_key(self):
+        no_exists = {"douban:36452545": {1: "INFO"}}
+        self.assertEqual(self.fn(no_exists, douban_id=36452545), {1: "INFO"})
+
+    def test_single_entry_fallback(self):
+        # 键格式再次变化时，单键字典兜底取用
+        no_exists = {"themoviedb:95350": {1: "INFO"}}
+        self.assertEqual(self.fn(no_exists, tmdb_id=95350), {1: "INFO"})
+
+    def test_no_fallback_when_multiple_unrelated_keys(self):
+        # 多个不相关键时不允许兜底误取
+        no_exists = {"tmdb:1": {1: "A"}, "tmdb:2": {1: "B"}}
+        self.assertEqual(self.fn(no_exists, tmdb_id=95350), {})
+
+    def test_empty_and_none(self):
+        self.assertEqual(self.fn(None, tmdb_id=95350), {})
+        self.assertEqual(self.fn({}, tmdb_id=95350), {})
+        # 未传 id 时单键字典仍兜底（调用方始终针对同一媒体查询，单键必然属于当前媒体）
+        self.assertEqual(self.fn({"tmdb:95350": {1: "INFO"}}), {1: "INFO"})
 
 
 if __name__ == "__main__":

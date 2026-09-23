@@ -21,6 +21,31 @@ from .search import SearchHandler
 from .subscribe import SubscribeHandler
 
 
+def resolve_no_exists_season_info(no_exists: Optional[Dict[Any, Dict[int, Any]]],
+                                  tmdb_id: Any = None,
+                                  douban_id: Any = None) -> Dict[int, Any]:
+    """
+    从 get_no_exists_info 返回的字典中定位当前媒体的季集信息。
+
+    V3 的 no_exists 键为来源前缀格式（如 "tmdb:95350"），旧版为裸 tmdb/douban id。
+    依次尝试裸 id、字符串 id、来源前缀键；若字典只有一个键则直接取用兜底，
+    避免键格式再次变化导致整季被误判为"没有缺失"。
+    """
+    if not no_exists:
+        return {}
+    candidate_keys = []
+    if tmdb_id:
+        candidate_keys += [tmdb_id, str(tmdb_id), f"tmdb:{tmdb_id}"]
+    if douban_id:
+        candidate_keys += [douban_id, str(douban_id), f"douban:{douban_id}"]
+    for k in candidate_keys:
+        if k in no_exists:
+            return no_exists[k] or {}
+    if len(no_exists) == 1:
+        return next(iter(no_exists.values())) or {}
+    return {}
+
+
 class SyncHandler:
     """同步处理器"""
 
@@ -403,10 +428,16 @@ class SyncHandler:
             # 获取缺失的集数列表
             season = meta.begin_season or 1
             missing_episodes = []
-            mediakey = mediainfo.tmdb_id or mediainfo.douban_id
 
-            if no_exists and mediakey:
-                season_info = no_exists.get(mediakey, {})
+            # v1.5.7：V3 的 no_exists 键已改为来源前缀格式（如 "tmdb:95350"），
+            # 裸 tmdb/douban id 直接 .get() 会落空导致整季被误判为"没有缺失"
+            season_info = resolve_no_exists_season_info(
+                no_exists,
+                tmdb_id=mediainfo.tmdb_id,
+                douban_id=mediainfo.douban_id,
+            )
+
+            if season_info:
                 not_exist_info = season_info.get(season)
                 if not_exist_info:
                     missing_episodes = not_exist_info.episodes or []

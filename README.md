@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | 115网盘STRM助手 | 2.8.74.3 | [DDSRem](https://github.com/DDSRem) | 修复整目录转存子文件延迟可见导致漏整理，增加有界复扫和停止后的持久化恢复 |
 | 115网盘储存 | 3.0.3 | [DDSRem](https://github.com/DDSRem) | 修复并发限流等待不断增长、移动后重命名及文件状态核验；要求 MoviePilot V3 |
-| 115网盘订阅追更 | 1.5.6 | [mrtian2016](https://github.com/mrtian2016) | 修复 V3 站点回退及站点更新未提交事务导致屏蔽未实际保存的问题 |
+| 115网盘订阅追更 | 1.5.7 | [mrtian2016](https://github.com/mrtian2016) | 修复 V3 缺集字典键格式变化导致剧集订阅被误判无缺失而跳过搜索的问题 |
 | Emby媒体库封面生成 | 1.0.2 | [Kioo / wio-ki](https://github.com/wio-ki) | 后台合并处理入库事件，背景图失败回退海报；要求 MoviePilot V3 |
 
 在 MoviePilot 插件市场添加此仓库地址：
@@ -18,6 +18,14 @@ https://github.com/zoom521241/MoviePilot-Plugins
 当前沿用 `package.v2.json` 和 `plugins.v2/` 布局。MoviePilot V3 可通过兼容索引发现这些插件；储存插件声明 `system_version >=3.0.0`，使用 V3 SDK。STRM 助手保留旧版本分支，本次验证在 V3 完成。
 
 ## 本次修复
+
+### 115网盘订阅追更 1.5.7（2026-09-23）
+
+修复 V3 近期版本将 `get_no_exists_info` 返回字典的键改为来源前缀格式（如 `tmdb:95350`，见 `app/schemas/media.py` 的 `build_media_key`）后，插件仍按裸 tmdb/douban id 查键，导致剧集订阅每次都查不到缺失集、被误判为「没有缺失剧集信息」而整体跳过搜索的问题。实际后果：绿灯军团 S01E06 本地文件被删除、订阅重置后，插件连续多次同步（02:30/10:30/18:30 及手动触发）均跳过该剧，不再搜索 115 资源。
+
+1.5.7 将键解析抽为 `resolve_no_exists_season_info`：依次尝试裸 id、字符串 id、`tmdb:/douban:` 前缀键，并在字典仅单键时兜底取用（调用方始终针对同一媒体查询，单键必然属于当前媒体）。新增 8 项回归测试（仓库总计 131 项通过）。
+
+
 
 ### 115网盘订阅追更 1.5.6（2026-09-21）
 
