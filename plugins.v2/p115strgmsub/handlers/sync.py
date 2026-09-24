@@ -369,10 +369,13 @@ class SyncHandler:
             if hasattr(self._search_handler, 'reset_sub_spent_points'):
                 self._search_handler.reset_sub_spent_points(sub_key)
 
-            # 早期检查：如果订阅显示没有缺失集数，跳过处理
+            # v1.5.8：lack_episode 可能是未对账的陈旧值（删除剧集/重置订阅后 MoviePilot 不会回写），
+            # 因此不再据此直接跳过，改为继续查询媒体库真实缺失情况，并在下面顺带校准该字段。
             if subscribe.lack_episode == 0:
-                logger.info(f"{subscribe.name} S{subscribe.season or 1} 订阅显示媒体库已完整(lack_episode=0)，跳过")
-                return transferred_count
+                logger.info(
+                    f"{subscribe.name} S{subscribe.season or 1} 订阅记录显示已完整(lack_episode=0)，"
+                    f"仍继续核对媒体库（该字段可能未与影视库对账）"
+                )
 
             # 生成元数据
             meta = MetaInfo(subscribe.name)
@@ -416,7 +419,8 @@ class SyncHandler:
                     self._subscribe_handler.check_and_finish_subscribe(
                         subscribe=subscribe,
                         mediainfo=mediainfo,
-                        success_episodes=all_episodes
+                        success_episodes=all_episodes,
+                        library_lack=0
                     )
                 elif subscribe.lack_episode != 0:
                     SubscribeOper().update(subscribe.id, {"lack_episode": 0})
@@ -444,6 +448,17 @@ class SyncHandler:
                     if not missing_episodes and not_exist_info.total_episode:
                         start_ep = not_exist_info.start_episode or 1
                         missing_episodes = list(range(start_ep, not_exist_info.total_episode + 1))
+
+            # v1.5.8：以媒体库真实缺失集数校准订阅进度（删除剧集/重置订阅后也能自动纠正显示）
+            # 仅在确实取到媒体库缺失数据时才校准，避免键匹配失败等情况把未知状态写成 0
+            library_lack = None
+            if season_info:
+                library_lack = len(missing_episodes) if missing_episodes else 0
+                self._subscribe_handler.sync_lack_episode_with_library(
+                    subscribe=subscribe,
+                    library_lack=library_lack,
+                    season=season
+                )
 
             if not missing_episodes:
                 logger.info(f"{mediainfo.title_year} S{season} 没有缺失剧集信息")
@@ -512,7 +527,8 @@ class SyncHandler:
                     self._subscribe_handler.check_and_finish_subscribe(
                         subscribe=subscribe,
                         mediainfo=mediainfo,
-                        success_episodes=list(existing_episodes_in_cloud)
+                        success_episodes=list(existing_episodes_in_cloud),
+                        library_lack=library_lack
                     )
                     # 缺失集数已全部补齐，清除历史积分记录
                     if hasattr(self._search_handler, 'clear_sub_points'):
@@ -818,7 +834,8 @@ class SyncHandler:
                 self._subscribe_handler.check_and_finish_subscribe(
                     subscribe=subscribe,
                     mediainfo=mediainfo,
-                    success_episodes=all_success_episodes
+                    success_episodes=all_success_episodes,
+                    library_lack=library_lack
                 )
                 # 如果订阅已完成（缺失集数归零），清除该订阅的历史积分记录
                 total_ep = subscribe.total_episode or 0

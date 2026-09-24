@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | 115网盘STRM助手 | 2.8.74.3 | [DDSRem](https://github.com/DDSRem) | 修复整目录转存子文件延迟可见导致漏整理，增加有界复扫和停止后的持久化恢复 |
 | 115网盘储存 | 3.0.3 | [DDSRem](https://github.com/DDSRem) | 修复并发限流等待不断增长、移动后重命名及文件状态核验；要求 MoviePilot V3 |
-| 115网盘订阅追更 | 1.5.7 | [mrtian2016](https://github.com/mrtian2016) | 修复 V3 缺集字典键格式变化导致剧集订阅被误判无缺失而跳过搜索的问题 |
+| 115网盘订阅追更 | 1.5.8 | [mrtian2016](https://github.com/mrtian2016) | 每轮同步以媒体库真实缺失回写订阅进度，修正"已订阅集数"显示不准（删除剧集/重置订阅后自动校准） |
 | Emby媒体库封面生成 | 1.0.2 | [Kioo / wio-ki](https://github.com/wio-ki) | 后台合并处理入库事件，背景图失败回退海报；要求 MoviePilot V3 |
 
 在 MoviePilot 插件市场添加此仓库地址：
@@ -18,6 +18,26 @@ https://github.com/zoom521241/MoviePilot-Plugins
 当前沿用 `package.v2.json` 和 `plugins.v2/` 布局。MoviePilot V3 可通过兼容索引发现这些插件；储存插件声明 `system_version >=3.0.0`，使用 V3 SDK。STRM 助手保留旧版本分支，本次验证在 V3 完成。
 
 ## 本次修复
+
+### 115网盘订阅追更 1.5.8（2026-09-24）
+
+修复订阅页「已订阅集数」显示不准。该数字是派生值 `total_episode - lack_episode`（见 `app/schemas/subscribe.py` 的
+`compute_subscribe_completed_episode`），而 MoviePilot 只在「总集数变化 / 下载事件 / 洗版」等时机回写 `lack_episode`，
+**删除剧集、重置订阅都不会与影视库对账**。插件此前在转存成功后用自己的 `note`（只记录插件自己转存过的集）反推缺失集数写回，
+于是出现绿灯军团 Emby 实际已有 6 集、订阅页却显示 1 集的情况。
+
+1.5.8 的修复方式：
+
+- **每轮同步对账**：取到 `get_no_exists_info`（媒体库口径）后，调用 `sync_lack_episode_with_library()` 把 `lack_episode`
+  校准为媒体库真实缺失集数，删除剧集或重置订阅后下一轮同步自动纠正（延迟不超过一个同步周期）。
+- **不再用 note 反推**：`check_and_finish_subscribe()` 新增 `library_lack` 参数，有媒体库数据时以它为准；
+  「是否完成订阅并移入历史」仍按原有 note 覆盖率规则判断，避免行为回归。
+- **修正陈旧值导致的跳过**：原先 `lack_episode == 0` 会直接跳过订阅，而该字段可能未与影视库对账，现改为继续核对媒体库。
+- 未播出的剧集在 `no_exists` 中同样计入缺失，因此不会误算成 0 而误触发订阅完成。
+- 新增 13 项离线回归测试（仓库总计 142 项通过）。
+
+部署验证：2026-09-24 在 MoviePilot V3 / PostgreSQL 环境热重载后手动触发同步，日志出现
+「校准订阅 绿灯军团 S1 缺失集数（以媒体库为准）：7 -> 2」，与 Emby 实际拥有 E01-E06 一致，订阅页显示 6 集。
 
 ### 115网盘订阅追更 1.5.7（2026-09-23）
 

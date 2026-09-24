@@ -2,7 +2,7 @@
 订阅处理模块
 负责订阅状态检查、完成、站点更新等逻辑（v1.2.5）
 """
-from typing import List, Callable, Dict, Any
+from typing import List, Callable, Dict, Any, Optional
 from sqlalchemy import text
 
 from app.core.metainfo import MetaInfo
@@ -13,6 +13,12 @@ from app.db.models.site import Site
 from app.log import logger
 from app.schemas import MediaInfo
 from app.schemas.types import MediaType, NotificationType
+
+
+def _tv_type_value() -> str:
+    """兼容 MediaType.TV 为枚举（有 .value）或字符串两种形态"""
+    tv = MediaType.TV
+    return getattr(tv, "value", tv)
 
 
 class SubscribeHandler:
@@ -42,14 +48,71 @@ class SubscribeHandler:
 
     # ------------------ 订阅完成逻辑（完整保留） ------------------
 
+    def sync_lack_episode_with_library(self,
+                                       subscribe,
+                                       library_lack: int,
+                                       season: Optional[int] = None) -> bool:
+        """
+        v1.5.8：把订阅的缺失集数校准为"媒体库真实缺失"的集数。
+
+        MoviePilot 只在"总集数变化 / 下载事件 / 洗版"等时机回写 lack_episode，
+        删除剧集、重置订阅都不会触发对账，导致订阅页显示的
+        "已订阅集数 = total_episode - lack_episode"长期不准。
+        本插件每轮同步都会拿 get_no_exists_info（媒体库口径）的结果对账一次。
+
+        注意：未播出的剧集在 no_exists 里同样计入缺失，因此不会误算成 0，
+        也就不会触发"订阅完成移入历史记录"。
+
+        :param subscribe: 订阅对象
+        :param library_lack: 媒体库口径的缺失集数
+        :param season: 季数，仅用于日志
+        :return: 是否发生了写库
+        """
+        try:
+            if subscribe is None:
+                return False
+            if getattr(subscribe, "type", None) != _tv_type_value():
+                return False
+            total_episode = subscribe.total_episode or 0
+            if total_episode <= 0:
+                return False
+
+            library_lack = max(0, min(int(library_lack or 0), total_episode))
+            current_lack = subscribe.lack_episode or 0
+            if library_lack == current_lack:
+                return False
+
+            SubscribeOper().update(subscribe.id, {"lack_episode": library_lack})
+            try:
+                subscribe.lack_episode = library_lack
+            except Exception:
+                pass
+            season_text = f" S{season}" if season else ""
+            logger.info(
+                f"校准订阅 {subscribe.name}{season_text} 缺失集数（以媒体库为准）："
+                f"{current_lack} -> {library_lack}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"校准订阅 {getattr(subscribe, 'name', None)} 缺失集数失败：{e}"
+            )
+            return False
+
     def check_and_finish_subscribe(
         self,
         subscribe,
         mediainfo: MediaInfo,
-        success_episodes: List[int]
+        success_episodes: List[int],
+        library_lack: Optional[int] = None
     ):
         """
         检查订阅是否完成，如果完成则调用官方接口
+
+        :param library_lack: v1.5.8 新增，媒体库口径的真实缺失集数。
+                             提供时用它写回 lack_episode（订阅页显示值），
+                             避免用"插件自己的 note"反推导致计数不准；
+                             "是否完成订阅"仍按 note 覆盖率判断，保持原有行为。
         """
         try:
             current_note = subscribe.note or []
@@ -62,13 +125,24 @@ class SubscribeHandler:
             total_episode = subscribe.total_episode or 0
             start_episode = subscribe.start_episode or 1
 
+            # 完成判定：按订阅目标范围是否被 note 覆盖（保持原有行为）
+            finished = False
             if mediainfo.type == MediaType.TV and total_episode > 0:
                 expected_episodes = set(range(start_episode, total_episode + 1))
                 downloaded_episodes = set(new_note)
                 remaining_episodes = expected_episodes - downloaded_episodes
-                new_lack = len(remaining_episodes)
+                finished = not remaining_episodes
+                note_lack = len(remaining_episodes)
             else:
                 new_lack = max(0, current_lack - len(success_episodes))
+                finished = new_lack == 0
+
+            # 缺失集数：优先采用媒体库口径，其次退回 note 反推
+            if mediainfo.type == MediaType.TV and total_episode > 0:
+                if library_lack is not None:
+                    new_lack = max(0, int(library_lack))
+                else:
+                    new_lack = note_lack
 
             update_data = {}
             if new_note != current_note:
@@ -81,7 +155,7 @@ class SubscribeHandler:
             if update_data:
                 SubscribeOper().update(subscribe.id, update_data)
 
-            if new_lack == 0:
+            if finished:
                 logger.info(f"订阅 {subscribe.name} 已完成，准备移至历史记录")
 
                 meta = MetaInfo(subscribe.name)
