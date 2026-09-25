@@ -230,7 +230,39 @@ class QuarkTo115(_PluginBase):
                 "auth": "apikey",
                 "summary": "扫码登录状态",
             },
+            {
+                "path": "/scan",
+                "endpoint": self.__scan_api,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "扫描待搬清单（不传输）",
+            },
+            {
+                "path": "/run",
+                "endpoint": self.__run_api,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "立即执行一次搬家",
+            },
         ]
+
+    def __scan_api(self) -> Dict[str, Any]:
+        """扫描源目录并返回待搬清单，不执行任何传输。"""
+        result = self.scan()
+        return {
+            "success": bool(result.get("success")),
+            "message": result.get("message") or "",
+            "total": len(result.get("items") or []),
+            "items": result.get("items") or [],
+        }
+
+    def __run_api(self) -> Dict[str, Any]:
+        """立即执行一次搬家任务。"""
+        result = self.transfer(dry_run=False)
+        return {
+            "success": bool(result.get("success")),
+            "message": result.get("message") or "",
+        }
 
     # ------------------------------------------------------------------ #
     # 命令
