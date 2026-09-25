@@ -198,19 +198,44 @@ class QuarkClient:
             parent_fid = found
         return parent_fid
 
-    def walk(self, pdir_fid: str = "0", _prefix: str = "") -> Iterator[dict]:
-        """递归遍历目录树。
+    def walk(self, pdir_fid: str = "0", max_depth: int = 3, max_nodes: int = 500,
+             _prefix: str = "", _depth: int = 0,
+             _counter: Optional[List[int]] = None) -> Iterator[dict]:
+        """按深度优先递归遍历目录树。
+
+        遍历深度与节点数双重受限，避免误填根目录时把整个网盘翻一遍——
+        那既慢又容易触发风控。
 
         :param pdir_fid: 起始目录 fid
-        :param _prefix: 内部使用的路径前缀
+        :param max_depth: 最大递归深度，根目录自身为第 0 层
+        :param max_nodes: 最多枚举的对象总数，超出即停止
         :return: 逐条产出带 path 字段的对象字典
         """
+        if _counter is None:
+            _counter = [0]
+        if max_depth <= 0:
+            max_depth = 1
+        if max_nodes <= 0:
+            max_nodes = 100
+        if _depth >= max_depth or _counter[0] >= max_nodes:
+            return
+
         for item in self.iter_dir(pdir_fid):
+            if _counter[0] >= max_nodes:
+                return
+            _counter[0] += 1
             name = item.get("file_name") or ""
             item["path"] = f"{_prefix}/{name}".replace("//", "/")
             yield item
-            if item.get("dir"):
-                yield from self.walk(item.get("fid"), _prefix=item["path"])
+            if item.get("dir") and _depth + 1 < max_depth:
+                yield from self.walk(
+                    item.get("fid"),
+                    max_depth=max_depth,
+                    max_nodes=max_nodes,
+                    _prefix=item["path"],
+                    _depth=_depth + 1,
+                    _counter=_counter,
+                )
 
     # ------------------------------------------------------------------ #
     # 下载

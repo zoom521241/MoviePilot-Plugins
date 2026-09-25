@@ -55,6 +55,7 @@ class QuarkTo115(_PluginBase):
     _only_video = True
     _qps = 1.0
     _max_files = 20
+    _max_depth = 3
     _notify = True
 
     _client: Optional[QuarkClient] = None
@@ -73,7 +74,8 @@ class QuarkTo115(_PluginBase):
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
-        self._src_dir = str(config.get("src_dir") or "/").strip() or "/"
+        # 源目录不默认根目录：误填 / 会把整个网盘翻一遍
+        self._src_dir = str(config.get("src_dir") or "").strip().rstrip("/")
         self._dst_dir = str(config.get("dst_dir") or "/夸克搬家").strip() or "/"
         self._cron = str(config.get("cron") or "0 3 * * *").strip()
         self._only_video = bool(config.get("only_video", True))
@@ -86,6 +88,10 @@ class QuarkTo115(_PluginBase):
             self._max_files = max(1, int(config.get("max_files") or 20))
         except (TypeError, ValueError):
             self._max_files = 20
+        try:
+            self._max_depth = max(1, int(config.get("max_depth") or 3))
+        except (TypeError, ValueError):
+            self._max_depth = 3
 
         self._auth = QuarkAuth()
         self._login_state = {}
@@ -246,9 +252,16 @@ class QuarkTo115(_PluginBase):
             },
         ]
 
-    def __scan_api(self) -> Dict[str, Any]:
-        """扫描源目录并返回待搬清单，不执行任何传输。"""
-        result = self.scan()
+    def __scan_api(self, dir: str = "", depth: int = 0,
+                   limit: int = 0) -> Dict[str, Any]:
+        """扫描待搬清单，不执行任何传输。
+
+        :param dir: 临时指定源目录，为空时使用插件配置
+        :param depth: 临时指定遍历深度，为空时使用插件配置
+        :param limit: 临时指定返回条数上限，为空时使用插件配置
+        """
+        result = self.scan(src_dir=dir or None, depth=depth or None,
+                           max_files=limit or None)
         return {
             "success": bool(result.get("success")),
             "message": result.get("message") or "",
@@ -360,19 +373,49 @@ class QuarkTo115(_PluginBase):
     # ------------------------------------------------------------------ #
     # 核心流程
     # ------------------------------------------------------------------ #
-    def scan(self) -> Dict[str, Any]:
+    def scan(self, src_dir: str = None, depth: int = None,
+             max_files: int = None) -> Dict[str, Any]:
         """扫描夸克源目录，返回待搬清单。
 
+        :param src_dir: 覆盖配置中的源目录，为空时回退配置值
+        :param depth: 覆盖配置中的遍历深度
+        :param max_files: 覆盖配置中的单轮上限
         :return: 含 success / items / message 的结果字典
         """
         if not self.__ensure_client():
             return {"success": False, "items": [], "message": "夸克未登录或 cookie 已失效"}
-        fid = self._client.resolve_path(self._src_dir)
+
+        target_dir = (src_dir or "").strip().rstrip("/") or self._src_dir
+        if not target_dir:
+            return {
+                "success": False,
+                "items": [],
+                "message": "未配置夸克源目录，请先在插件配置填写要搬家的目录",
+            }
+        if target_dir == "/":
+            return {
+                "success": False,
+                "items": [],
+                "message": "源目录不能是网盘根目录，请填写具体目录（如 /影视/电影）",
+            }
+
+        fid = self._client.resolve_path(target_dir)
         if not fid:
-            return {"success": False, "items": [], "message": f"夸克源目录不存在：{self._src_dir}"}
+            return {"success": False, "items": [], "message": f"夸克源目录不存在：{target_dir}"}
+
+        try:
+            max_depth = max(1, int(depth)) if depth else self._max_depth
+        except (TypeError, ValueError):
+            max_depth = self._max_depth
+        try:
+            limit = max(1, int(max_files)) if max_files else self._max_files
+        except (TypeError, ValueError):
+            limit = self._max_files
 
         items: List[Dict[str, Any]] = []
-        for item in self._client.walk(fid):
+        scanned = 0
+        for item in self._client.walk(fid, max_depth=max_depth, max_nodes=500):
+            scanned += 1
             if item.get("dir"):
                 continue
             name = item.get("file_name") or ""
@@ -386,9 +429,14 @@ class QuarkTo115(_PluginBase):
                     "size": item.get("size") or 0,
                 }
             )
-            if len(items) >= self._max_files:
+            if len(items) >= limit:
                 break
-        return {"success": True, "items": items, "message": f"共发现 {len(items)} 个待搬文件"}
+        return {
+            "success": True,
+            "items": items,
+            "message": f"源目录 {target_dir} 扫描 {scanned} 个对象，"
+                       f"发现 {len(items)} 个待搬文件（深度上限 {max_depth}）",
+        }
 
     def transfer(self, dry_run: bool = True) -> Dict[str, Any]:
         """执行一次搬家任务。
@@ -586,13 +634,42 @@ class QuarkTo115(_PluginBase):
                         ],
                     },
                     {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "max_depth",
+                                            "label": "目录遍历深度",
+                                            "placeholder": "3",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "notify", "label": "完成后发送通知"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
                         "component": "VAlert",
                         "props": {
                             "type": "info",
                             "variant": "tonal",
                             "text": "首次使用请访问插件的扫码登录页完成夸克授权；"
-                            "115 需在「设置 - 存储」中完成授权。插件严格串行运行并限速，"
-                            "避免在网盘侧触发风控。",
+                            "115 需在「设置 - 存储」中完成授权。夸克源目录必须填写具体目录，"
+                            "不允许填根目录 /，插件严格串行运行并限速，避免触发风控。",
                         },
                     },
                 ],
@@ -600,11 +677,12 @@ class QuarkTo115(_PluginBase):
         ], {
             "enabled": False,
             "only_video": True,
-            "src_dir": "/",
+            "src_dir": "",
             "dst_dir": "/夸克搬家",
             "cron": "0 3 * * *",
             "qps": 1.0,
             "max_files": 20,
+            "max_depth": 3,
             "notify": True,
         }
 
