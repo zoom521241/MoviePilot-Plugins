@@ -2,6 +2,13 @@
 name = "moviepilot-plugin-p115disk"
 dynamic = ["version"]
 requires-python = ">=3.12"
+# MoviePilot 的依赖清单是「二选一」而不是合并：
+# 只要本文件存在，插件目录下的 requirements.txt 会被完全忽略。
+# 所以这里必须写全，漏一条就等于那条约束根本没生效。
+#
+# python-concurrenttools 必须锁 0.1.8：0.1.9 起不再提供 p115client 依赖的
+# threadpool_map / taskgroup_map，装上会让 115 相关调用失效。
 dependencies = [
     "p115client==0.0.9.6.5.1",
+    "python-concurrenttools==0.1.8",
 ]
