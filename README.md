@@ -1,6 +1,6 @@
 # MoviePilot-Plugins
 
-由 [zoom521241](https://github.com/zoom521241) 维护的 MoviePilot 插件仓库，主要收录 115 网盘相关插件在实际 V3 环境中的兼容性修复与稳定性加固。各插件基于下列原作者的作品继续维护，插件市场与插件页面统一以 `zoom521241` 显示作者。
+由 [zoom521241](https://github.com/zoom521241) 维护的 MoviePilot 插件仓库，收录 115 网盘相关插件与文档订阅插件在实际 V3 环境中的兼容性修复与稳定性加固。各插件基于下列原作者的作品继续维护，插件市场与插件页面统一以 `zoom521241` 显示作者。
 
 ## 插件一览
 
@@ -10,8 +10,53 @@
 | 115网盘STRM助手 | 2.8.74.4 | [DDSRem](https://github.com/DDSRem) | 把 115 网盘资源整理到媒体库目录并生成 `.strm` 文件，供 Emby / Jellyfin 直链播放 |
 | 115网盘订阅追更 | 1.5.9 | [mrtian2016](https://github.com/mrtian2016) | 结合 MoviePilot 订阅，自动搜索 115 网盘资源并转存缺失的电影与剧集 |
 | Emby媒体库封面生成 | 1.0.2 | [Kioo / wio-ki](https://github.com/wio-ki) | 为 Emby / Jellyfin 媒体库生成动态或静态封面，内置多种样式 |
+| 金山文档订阅添加 | 1.2.0 | [jinyuhao-886](https://github.com/jinyuhao-886) | 每天 21:01 扫描金山文档（KDocs）追剧表，自动把三个区段内的在播新剧添加到 MP 订阅 |
+
+## Releases 发版
+
+本仓库已为每个插件开启 Release 安装模式（清单里 `release: true`）。每次推送到 `main`，
+GitHub Actions（`.github/workflows/release.yml`）会自动检测版本号，打包并发布 Release：
+
+```sh
+# 日常升级流程
+1. 修改插件源码
+2. 在对应清单里把 version 升一位，并在 history 里补一句说明
+3. git push
+# -> 工作流自动生成  <PluginId>_v<Version> 的 Release，附 zip / tar.gz / sha256
+```
+
+发布判定规则很简单：以 `<PluginId>_v<Version>` 作为 tag，**tag 不存在即发版**。
+所以只改源码不改版本号不会产生重复发布；想重发某个版本，用 Actions 页面的
+「手动触发」并勾选 force 即可覆盖。
+
+现有 Release：
+
+| 插件 | Release |
+| --- | --- |
+| 金山文档订阅添加 | `Doc911Subscribe_v1.2.0` |
+| 115网盘储存 | `P115Disk_v3.0.4` |
+| 115网盘STRM助手 | `P115StrmHelper_v2.8.74.4` |
+| 115网盘订阅追更 | `P115StrgmSub_v1.5.9` |
+| Emby媒体库封面生成 | `MediaCoverGenerator_v1.0.2` |
 
 ## 各插件与原版差异
+
+### 金山文档订阅添加 1.2.0
+
+原插件为 MoviePilot V2 插件，装到 V3 环境会直接失败。本仓库做了 V3 移植：
+
+- **补依赖清单**（首要修复）。原插件目录里没有任何依赖清单，`import openpyxl` 失败导致
+  插件加载报错 → MoviePilot 把安装回滚。现新增 `pyproject.toml`，按 PEP 621 声明
+  `openpyxl>=3.1.0`，安装插件时由 MoviePilot 自动安装。
+- 修复 `app.db.subscribe_oper.Subscribe`：V3 已把订阅模型收敛到 `app.db.models.subscribe`，
+  旧写法是第二条致命错误，现改为优先从新位置导入并保留旧路径回退。
+- `openpyxl` 改为运行时惰性导入：即使依赖缺失，插件也能正常加载、可在页面改配置，
+  只在真正同步时报明确错误，而不是整个插件消失。
+- 补齐类级默认配置（`_doc_url` / `_file_id`），修掉未传配置时的 AttributeError。
+- 通知类型优先使用 V3 的 `MessageType`；数据库 Session 改为 `try/finally` 释放，
+  避免长时间占用订阅表。
+- 显示名称由「911文档订阅添加」更名为「金山文档订阅添加」，配置表单标签与日志前缀同步更新。
+  插件 ID 仍为 `Doc911Subscribe`，已保存的配置不受影响。
 
 ### 115网盘储存 3.0.4
 
@@ -46,6 +91,21 @@
 - Emby 无法下载远程背景图时，回退使用同一媒体项的海报，避免反复等待不可用的资源。
 - 停止任务后取消待处理事件及后续上传，不影响用户已有的配置与封面样式。
 
+## 仓库结构
+
+```text
+package.v2.json     V2 兼容清单（4 个 115/Emby 插件）
+plugins.v2/         V2 布局的插件源码
+package.v3.json     V3 清单（金山文档订阅添加）
+plugins.v3/         V3 插件源码，按 PEP 621 带 pyproject.toml 依赖声明
+tests/              离线回归测试
+.github/workflows/  Releases 自动发版
+```
+
+`plugins.v3/` 下的插件会因为 `release: true` 走 Release 安装包安装，
+`plugins.v2/` 下的插件在 V3 中通过兼容索引发现。其中 115网盘储存与 Emby媒体库封面生成
+声明 `system_version >=3.0.0`，需要 V3 环境。
+
 ## 安装
 
 在 MoviePilot 插件市场添加本仓库地址：
@@ -53,8 +113,6 @@
 ```text
 https://github.com/zoom521241/MoviePilot-Plugins
 ```
-
-仓库沿用 `package.v2.json` 与 `plugins.v2/` 布局，MoviePilot V3 可通过兼容索引发现这些插件。其中 115网盘储存与 Emby媒体库封面生成声明 `system_version >=3.0.0`，需要 V3 环境。
 
 ## 115 插件依赖兼容
 
@@ -76,6 +134,6 @@ python -m unittest discover -s tests -v
 
 ## 来源
 
-115网盘STRM助手与115网盘储存原作者为 [DDSRem](https://github.com/DDSRem)；115网盘订阅追更原作者为 [mrtian2016](https://github.com/mrtian2016)；Emby媒体库封面生成来自 [Kioo](https://github.com/wio-ki/MoviePilot-Plugins)，其目录内附原 GPL-3.0 许可证与本次修改说明。
+115网盘STRM助手与115网盘储存原作者为 [DDSRem](https://github.com/DDSRem)；115网盘订阅追更原作者为 [mrtian2016](https://github.com/mrtian2016)；Emby媒体库封面生成来自 [Kioo](https://github.com/wio-ki/MoviePilot-Plugins)，其目录内附原 GPL-3.0 许可证与本次修改说明；金山文档订阅添加原作者为 [jinyuhao-886](https://github.com/jinyuhao-886)。
 
 本仓库版本由 **zoom521241** 维护并以此显示插件作者，原始作品来源在本 README 中署名。原许可证、源码版权声明以及 `wheels/` 中依赖包各自的发行元数据继续保留。

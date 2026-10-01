@@ -1,5 +1,5 @@
 """
-911文档订阅添加插件（MoviePilot V3 移植版）
+金山文档订阅添加插件（MoviePilot V3 移植版）
 每天21:01自动扫描金山文档，将文档中「本月更新【国产剧】」「本月更新【国外剧】」「本月更新【综艺】」
 三个区段内的在播新剧自动添加到MP订阅（跳过已完结的旧季大包）
 
@@ -56,7 +56,7 @@ def _load_openpyxl():
         return openpyxl
     except ImportError as err:
         logger.error(
-            "911文档订阅添加：缺少依赖 openpyxl，无法解析文档。"
+            "金山文档订阅添加：缺少依赖 openpyxl，无法解析文档。"
             "请在插件详情页重新安装/更新插件，由 MoviePilot 自动安装依赖。"
             f"（{err}）"
         )
@@ -64,15 +64,15 @@ def _load_openpyxl():
 
 
 class Doc911Subscribe(_PluginBase):
-    """911文档订阅添加插件"""
+    """金山文档订阅添加插件"""
 
-    plugin_name = "911文档订阅添加"
+    plugin_name = "金山文档订阅添加"
     plugin_desc = (
-        "每天21:01扫描金山文档，自动添加「本月更新【国产剧】」"
+        "每天21:01扫描金山文档（KDocs），自动添加「本月更新【国产剧】」"
         "「本月更新【国外剧】」「本月更新【综艺】」在播新剧到MP订阅。"
     )
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/chain.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "jinyuhao-886"
     plugin_priority = 10
 
@@ -139,36 +139,36 @@ class Doc911Subscribe(_PluginBase):
         self.stop_service()
 
         if self._enabled and self._cookies:
-            logger.info("911文档订阅添加插件已启用，设置每日21:01定时任务")
+            logger.info("金山文档订阅添加插件已启用，设置每日21:01定时任务")
             self._scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
             self._scheduler.add_job(
                 self.sync_from_doc,
                 trigger=CronTrigger(hour=21, minute=1, timezone="Asia/Shanghai"),
-                name="911文档订阅添加",
+                name="金山文档订阅添加",
             )
             self._scheduler.start()
 
             if self._only_once:
-                logger.info("911文档订阅添加：仅执行一次模式")
+                logger.info("金山文档订阅添加：仅执行一次模式")
                 self.sync_from_doc()
         else:
             logger.info(
-                "911文档订阅添加插件未启用或缺少Cookie"
+                "金山文档订阅添加插件未启用或缺少Cookie"
                 if not self._enabled
-                else "911文档订阅添加插件已禁用"
+                else "金山文档订阅添加插件已禁用"
             )
 
     def sync_from_doc(self):
         """同步文档中的在播剧集到MP订阅"""
         if not self._cookies:
-            logger.error("911文档订阅添加：缺少金山文档Cookie，跳过执行")
+            logger.error("金山文档订阅添加：缺少金山文档Cookie，跳过执行")
             return
 
         openpyxl = _load_openpyxl()
         if openpyxl is None:
             return
 
-        logger.info("911文档订阅添加：开始同步文档数据...")
+        logger.info("金山文档订阅添加：开始同步文档数据...")
 
         try:
             # Step 1: 获取下载链接
@@ -185,16 +185,16 @@ class Doc911Subscribe(_PluginBase):
             plugin_dir = self.get_data_path()
             xlsx_path = plugin_dir / "doc.xlsx"
             xlsx_path.write_bytes(xlsx_data)
-            logger.info(f"911文档订阅添加：文档已保存到 {xlsx_path}")
+            logger.info(f"金山文档订阅添加：文档已保存到 {xlsx_path}")
 
             # Step 4: 解析在播剧集（过滤掉已完结的旧季）
             shows = self._parse_shows(xlsx_path, openpyxl=openpyxl)
             if not shows:
-                logger.info("911文档订阅添加：未找到新的在播剧集")
+                logger.info("金山文档订阅添加：未找到新的在播剧集")
                 return
 
             logger.info(
-                f"911文档订阅添加：找到 {len(shows)} 个在播剧集，开始添加订阅..."
+                f"金山文档订阅添加：找到 {len(shows)} 个在播剧集，开始添加订阅..."
             )
 
             # Step 5: 逐个添加订阅
@@ -209,16 +209,16 @@ class Doc911Subscribe(_PluginBase):
                         skipped += 1
                 except Exception as e:
                     logger.error(
-                        f"911文档订阅添加：添加订阅失败 [{show['name']}]: {str(e)}"
+                        f"金山文档订阅添加：添加订阅失败 [{show['name']}]: {str(e)}"
                     )
                     skipped += 1
 
             logger.info(
-                f"911文档订阅添加：执行完成，新增 {added} 个订阅，跳过 {skipped} 个"
+                f"金山文档订阅添加：执行完成，新增 {added} 个订阅，跳过 {skipped} 个"
             )
 
         except Exception as e:
-            logger.error(f"911文档订阅添加：同步失败: {str(e)}")
+            logger.error(f"金山文档订阅添加：同步失败: {str(e)}")
 
     def _get_download_url(self) -> Optional[str]:
         """获取金山文档下载链接"""
@@ -238,19 +238,19 @@ class Doc911Subscribe(_PluginBase):
             resp = requests.get(url, headers=headers, timeout=15)
             if resp.status_code != 200:
                 logger.error(
-                    f"911文档订阅添加：获取下载链接失败 HTTP {resp.status_code}"
+                    f"金山文档订阅添加：获取下载链接失败 HTTP {resp.status_code}"
                 )
                 return None
             data = resp.json()
             download_url = data.get("download_url") or data.get("url")
             if not download_url:
                 logger.error(
-                    f"911文档订阅添加：下载链接为空: {resp.text[:200]}"
+                    f"金山文档订阅添加：下载链接为空: {resp.text[:200]}"
                 )
                 return None
             return download_url
         except Exception as e:
-            logger.error(f"911文档订阅添加：获取下载链接异常: {str(e)}")
+            logger.error(f"金山文档订阅添加：获取下载链接异常: {str(e)}")
             return None
 
     def _download_xlsx(self, download_url: str) -> Optional[bytes]:
@@ -259,12 +259,12 @@ class Doc911Subscribe(_PluginBase):
             resp = requests.get(download_url, timeout=30)
             if resp.status_code != 200:
                 logger.error(
-                    f"911文档订阅添加：下载xlsx失败 HTTP {resp.status_code}"
+                    f"金山文档订阅添加：下载xlsx失败 HTTP {resp.status_code}"
                 )
                 return None
             return resp.content
         except Exception as e:
-            logger.error(f"911文档订阅添加：下载xlsx异常: {str(e)}")
+            logger.error(f"金山文档订阅添加：下载xlsx异常: {str(e)}")
             return None
 
     def _is_ongoing(self, cell_text: str) -> bool:
@@ -300,12 +300,12 @@ class Doc911Subscribe(_PluginBase):
             wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
 
             if not wb.sheetnames:
-                logger.warning("911文档订阅添加：xlsx中没有sheet")
+                logger.warning("金山文档订阅添加：xlsx中没有sheet")
                 return shows
 
             sheet_name = wb.sheetnames[0]
             ws = wb[sheet_name]
-            logger.info(f"911文档订阅添加：解析sheet [{sheet_name}]")
+            logger.info(f"金山文档订阅添加：解析sheet [{sheet_name}]")
 
             # 状态机：0=找区段, non-zero=在某个区段内
             current_section = None
@@ -331,7 +331,7 @@ class Doc911Subscribe(_PluginBase):
                 if found_section:
                     current_section = found_section
                     logger.debug(
-                        f"911文档订阅添加：进入区段 [{found_section}]"
+                        f"金山文档订阅添加：进入区段 [{found_section}]"
                     )
                     continue
 
@@ -340,7 +340,7 @@ class Doc911Subscribe(_PluginBase):
                     kw in cell_text for kw in self._STOP_SECTIONS
                 ):
                     logger.debug(
-                        f"911文档订阅添加：遇到终止区段 [{cell_text[:30]}]，停止"
+                        f"金山文档订阅添加：遇到终止区段 [{cell_text[:30]}]，停止"
                     )
                     current_section = None
                     continue
@@ -356,7 +356,7 @@ class Doc911Subscribe(_PluginBase):
                 # === 过滤：只在播的（有「更新」字样），跳过已完结整季包 ===
                 if not self._is_ongoing(cell_text):
                     logger.debug(
-                        f"911文档订阅添加：跳过已完结 [{cell_text[:50]}]"
+                        f"金山文档订阅添加：跳过已完结 [{cell_text[:50]}]"
                     )
                     continue
 
@@ -366,19 +366,19 @@ class Doc911Subscribe(_PluginBase):
                     show_info["section"] = current_section
                     shows.append(show_info)
                     logger.debug(
-                        f"911文档订阅添加：发现在播剧集 "
+                        f"金山文档订阅添加：发现在播剧集 "
                         f"[{show_info['name']} ({show_info['year']})] "
                         f"[{current_section}]"
                     )
 
             wb.close()
             logger.info(
-                f"911文档订阅添加：解析完成，共找到 {len(shows)} 个在播剧集"
+                f"金山文档订阅添加：解析完成，共找到 {len(shows)} 个在播剧集"
             )
             return shows
 
         except Exception as e:
-            logger.error(f"911文档订阅添加：解析xlsx异常: {str(e)}")
+            logger.error(f"金山文档订阅添加：解析xlsx异常: {str(e)}")
             return shows
 
     def _extract_show_info(self, cell_text: str) -> Optional[Dict]:
@@ -465,7 +465,7 @@ class Doc911Subscribe(_PluginBase):
             existing = Subscribe.get_by_title(db, base_name)
             if existing:
                 logger.info(
-                    f"911文档订阅添加：[{show['name']} ({show['year']})] 已订阅，跳过"
+                    f"金山文档订阅添加：[{show['name']} ({show['year']})] 已订阅，跳过"
                 )
                 return False
 
@@ -477,7 +477,7 @@ class Doc911Subscribe(_PluginBase):
                     title=show["name"],
                     season=show.get("season"),
                     mtype=MediaType.TV,
-                    source="911文档订阅添加",
+                    source="金山文档订阅添加",
                     message=True,
                 )
                 # 有季数时（如"第三季"）：不传 year，避免 TMDB 按首播年份过滤导致搜不到
@@ -488,7 +488,7 @@ class Doc911Subscribe(_PluginBase):
 
                 if subscribe_id:
                     logger.info(
-                        f"911文档订阅添加：已订阅 "
+                        f"金山文档订阅添加：已订阅 "
                         f"[{show['name']} ({show['year']})] "
                         f"subscribe_id={subscribe_id}"
                     )
@@ -496,7 +496,7 @@ class Doc911Subscribe(_PluginBase):
 
                 # 识别失败，发送通知提醒
                 logger.warning(
-                    f"911文档订阅添加：识别失败，跳过 "
+                    f"金山文档订阅添加：识别失败，跳过 "
                     f"[{show['name']} ({show['year']})]: {msg}"
                 )
                 try:
@@ -509,12 +509,12 @@ class Doc911Subscribe(_PluginBase):
                              f"建议：可手动搜索TMDB或添加自定义识别词",
                     )
                 except Exception as e:
-                    logger.error(f"911文档订阅添加：发送通知失败: {e}")
+                    logger.error(f"金山文档订阅添加：发送通知失败: {e}")
                 return False
 
             except Exception as e:
                 logger.error(
-                    f"911文档订阅添加：添加订阅异常 [{show['name']}]: {str(e)}"
+                    f"金山文档订阅添加：添加订阅异常 [{show['name']}]: {str(e)}"
                 )
                 return False
         finally:
@@ -553,7 +553,7 @@ class Doc911Subscribe(_PluginBase):
         )
 
         logger.info(
-            f"911文档订阅添加：调用智能助手处理 "
+            f"金山文档订阅添加：调用智能助手处理 "
             f"[{show['name']} ({show['year']})]"
         )
 
@@ -569,12 +569,12 @@ class Doc911Subscribe(_PluginBase):
                 )
             )
             logger.info(
-                f"911文档订阅添加：智能助手已接收任务 "
+                f"金山文档订阅添加：智能助手已接收任务 "
                 f"[{show['name']}]"
             )
         except Exception as e:
             logger.error(
-                f"911文档订阅添加：调用智能助手失败 "
+                f"金山文档订阅添加：调用智能助手失败 "
                 f"[{show['name']}]: {str(e)}"
             )
 
@@ -620,7 +620,7 @@ class Doc911Subscribe(_PluginBase):
 
             aliases[src_name] = entry
             logger.info(
-                f"911文档订阅添加：别名映射 [{src_name}] → "
+                f"金山文档订阅添加：别名映射 [{src_name}] → "
                 f"{entry['name']}" +
                 (f" S{entry['season']}" if "season" in entry else "")
             )
@@ -640,7 +640,7 @@ class Doc911Subscribe(_PluginBase):
                 if "season" in target:
                     show["season"] = target["season"]
                 logger.info(
-                    f"911文档订阅添加：别名映射生效 "
+                    f"金山文档订阅添加：别名映射生效 "
                     f"[{name}] → [{target['name']}]"
                     + (f" S{target['season']}" if "season" in target else "")
                 )
@@ -721,7 +721,7 @@ class Doc911Subscribe(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "doc_url",
-                                            "label": "911文档链接",
+                                            "label": "金山文档链接",
                                             "placeholder": "https://www.kdocs.cn/l/cgqWkD4v1nHK",
                                             "hint": "金山文档的分享链接。更换文档时填入新链接即可，无需手动修改File ID。",
                                             "clearable": True,
@@ -802,6 +802,6 @@ class Doc911Subscribe(_PluginBase):
                 self._scheduler.shutdown(wait=False)
             except Exception as e:
                 logger.error(
-                    f"911文档订阅添加：停止调度器失败: {str(e)}"
+                    f"金山文档订阅添加：停止调度器失败: {str(e)}"
                 )
             self._scheduler = None
