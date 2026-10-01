@@ -236,7 +236,10 @@ class TransferChainPatcher:
                     ):
                         try:
                             import asyncio
-                            from app.core import global_vars
+                            try:  # MoviePilot V3
+                                from app.core.config import global_vars
+                            except ImportError:  # MoviePilot V2
+                                from app.core import global_vars
 
                             group_key = (
                                 task.download_hash
