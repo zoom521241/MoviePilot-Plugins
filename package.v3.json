@@ -14,5 +14,76 @@
       "v1.2.0": "插件显示名称更名为「金山文档订阅添加」，配置表单标签与运行日志前缀同步更新；插件 ID 仍为 Doc911Subscribe，已保存的插件配置不受影响。",
       "v1.1.0": "MoviePilot V3 修复移植版。① 补齐缺失的依赖清单（pyproject.toml 声明 openpyxl），修复原版因 openpyxl 未安装导致插件加载失败、安装被回滚的问题；② 修复 V3 已从 app.db.subscribe_oper 移除 Subscribe 模型的导入错误，改为从 app.db.models.subscribe 导入；③ openpyxl 改为运行时惰性导入，依赖缺失时只影响同步动作并给出明确日志，插件本身仍可加载；④ 补齐类级默认配置（_doc_url/_file_id），修复未传配置时的 AttributeError；⑤ 通知类型优先使用 V3 的 MessageType；⑥ Session 改为 try/finally 释放；⑦ 配置表单补齐「名称别名映射」输入框。"
     }
+  },
+  "P115Disk": {
+    "name": "115网盘储存",
+    "description": "更快更强的115网盘存储模块；修复 V3 移动重命名与文件状态核验。",
+    "labels": "115网盘,存储,V3",
+    "version": "3.1.0",
+    "release": true,
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
+    "author": "zoom521241",
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "v3": true,
+    "history": {
+      "v3.1.0": "复制自 plugins.v2/p115disk 3.0.4，代码一致，改为 V3 独立维护线",
+      "v3.0.4": "固定 p115client 0.0.9.6.5.1 与 python-concurrenttools 0.1.8，修复依赖接口变化导致加载失败或 115 功能不可用，避免重建容器后再次装入不兼容版本。",
+      "v3.0.3": "修复并发限流等待时间指数增长导致整理停滞，保留移动重命名和 V3 严格核验修复。",
+      "v3.0.2": "修复移动后路径查询失败跳过重命名、目录 ID 类型判断、正负缓存冲突；严格查询读取远端状态。"
+    }
+  },
+  "P115StrgmSub": {
+    "name": "115网盘订阅追更",
+    "description": "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。",
+    "labels": "订阅,115网盘",
+    "version": "1.6.0",
+    "release": true,
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
+    "author": "zoom521241",
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "v3": true,
+    "history": {
+      "v1.6.0": "复制自 plugins.v2/p115strgmsub 1.5.9，代码一致，改为 V3 独立维护线",
+      "v1.5.9": "固定 p115client 0.0.9.6.5.1 与 python-concurrenttools 0.1.8，修复依赖接口变化导致加载失败或 115 功能不可用，避免重建容器后再次装入不兼容版本。",
+      "v1.5.8": "修复订阅页“已订阅集数”显示不准：每轮同步以媒体库真实缺失(no_exists)回写 lack_episode，删除剧集或重置订阅后可自动校准；不再用插件自身 note 反推缺失集数，并修正 lack_episode 为陈旧值时直接跳过订阅的问题（是否完成订阅仍按原有规则判断）。",
+      "v1.5.6": "修复 V3 显式 Session 修改订阅站点后未提交事务，导致日志显示已屏蔽但 sites=null 仍可走 PT；覆盖批量、新增订阅及解除屏蔽写入，保留排除/指定模式。"
+    }
+  },
+  "P115StrmHelper": {
+    "name": "115网盘STRM助手",
+    "description": "115网盘STRM生成一条龙服务",
+    "labels": "115网盘,STRM",
+    "version": "2.9.0",
+    "release": true,
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
+    "author": "zoom521241",
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "v3": true,
+    "history": {
+      "v2.9.0": "复制自 plugins.v2/p115strmhelper 2.8.74.5（含 global_vars 修复），改为 V3 独立维护线",
+      "v2.8.74.4": "固定 p115client 0.0.9.6.5.1 与 python-concurrenttools 0.1.8，修复依赖接口变化导致加载失败或 115 功能不可用，避免重建容器后再次装入不兼容版本。",
+      "v2.8.74.3": "修复整目录转存子文件延迟可见导致漏整理：每轮间隔 10 秒，至少观察 30 秒并连续两次完整比较不变，最多 6 轮或 120 秒软时限；持久化停止断点并在 latest 模式下恢复，未收敛记录保留待核查，不无限重试。",
+      "v2.8.74.2": "兼容 V3 持久化整理结算，修复重复入队和停止后继续执行；补齐安装模块及依赖包。"
+    }
+  },
+  "MediaCoverGenerator": {
+    "name": "Emby媒体库封面生成",
+    "description": "生成媒体库动态/静态封面，支持 Emby/Jellyfin；修复 V3 入库事件阻塞和背景图下载失败。",
+    "labels": "Emby,Jellyfin,封面,V3",
+    "version": "1.1.0",
+    "release": true,
+    "icon": "https://raw.githubusercontent.com/wio-ki/MoviePilot-Plugins/main/icons/emby.png",
+    "author": "zoom521241",
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "v3": true,
+    "history": {
+      "v1.1.0": "复制自 plugins.v2/mediacovergenerator 1.0.2，代码一致，改为 V3 独立维护线",
+      "v1.0.2": "入库事件后台合并处理，停止时取消待处理任务；背景图失败回退海报，避免阻塞 V3 整理后处理。",
+      "v1.0.1": "基于当前 V3 已安装版本，保留原有封面样式和配置。"
+    }
   }
 }
