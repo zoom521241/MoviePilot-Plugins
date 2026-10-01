@@ -1,0 +1,9 @@
+[project]
+name = "quarkto115"
+version = "0.1.0"
+description = "MoviePilot 插件：把夸克网盘指定目录中的影片搬迁到 115 网盘指定目录"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "qrcode>=7.4.2",
+]
