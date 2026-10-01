@@ -28,7 +28,10 @@ class P115Disk(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "3.0.4"
+    # 必须与 package.v3.json 里的 version 保持一致：
+    # MoviePilot 比较「清单版本」与「插件自己声明的版本」来判断是否有更新，
+    # 两边不一致会导致更新成功却一直提示可更新。
+    plugin_version = "3.0.5"
     # 插件作者
     plugin_author = "zoom521241"
     # 作者主页
