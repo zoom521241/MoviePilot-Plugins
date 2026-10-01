@@ -1,0 +1,132 @@
+name: Build and Release MoviePilot Plugins
+
+# 每次往 main 推送插件清单或源码时，自动为「版本号已变更」的插件生成 Release 安装包。
+#
+# 触发后的判定逻辑见 .github/scripts/detect_releases.py：
+#   - 扫描 package.v2.json / package.v3.json 中 release=true 的插件
+#   - tag 命名为 <PluginId>_v<Version>（例如 Doc911Subscribe_v1.1.0）
+#   - tag 已存在 = 该版本已发布，跳过
+# 所以日常只需：改代码 → 在清单里把 version 升一位 + 在 history 里写一句说明 → push，即可自动发版。
+
+run-name: ${{ github.event_name == 'workflow_dispatch' && '手动发布 Releases' || format('自动发布 Releases @ {0}', github.triggering_actor) }}
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'package.v2.json'
+      - 'package.v3.json'
+      - 'plugins.v2/**'
+      - 'plugins.v3/**'
+      - '.github/scripts/detect_releases.py'
+      - '.github/workflows/release.yml'
+
+  # 也想补某个已发布过的版本？手动触发即可覆盖。
+  workflow_dispatch:
+    inputs:
+      plugin_id:
+        description: '要发布的插件 ID（留空 = 全部待发布插件）'
+        required: false
+        type: string
+      force:
+        description: 'tag 已存在时也强制覆盖发布'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  detect:
+    name: 检测待发布插件
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 生成发布矩阵
+        id: gen
+        run: python3 .github/scripts/detect_releases.py
+
+  release:
+    name: ${{ matrix.plugin.name }} v${{ matrix.plugin.version }}
+    needs: detect
+    if: ${{ needs.detect.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        plugin: ${{ fromJson(needs.detect.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 打包插件源码
+        run: |
+          set -euo pipefail
+          SRC="${{ matrix.plugin.source_root }}/${{ matrix.plugin.source_dir }}"
+          BASE="${{ matrix.plugin.archive_base }}"
+          if [ ! -d "$SRC" ]; then
+            echo "::error::未找到源码目录 $SRC"
+            exit 1
+          fi
+          echo "打包 $SRC -> $BASE.zip / $BASE.tar.gz"
+          (cd "${{ matrix.plugin.source_root }}" && zip -rq "$GITHUB_WORKSPACE/$BASE.zip" "${{ matrix.plugin.source_dir }}")
+          tar -czf "$BASE.tar.gz" -C "${{ matrix.plugin.source_root }}" "${{ matrix.plugin.source_dir }}"
+          sha256sum "$BASE.zip"     > "$BASE.zip.sha256"
+          sha256sum "$BASE.tar.gz"  > "$BASE.tar.gz.sha256"
+          ls -lh "$BASE".*
+
+      - name: 处理同名 tag / release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ matrix.plugin.tag_name }}"
+          FORCE="${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}"
+          if [ "$FORCE" = "true" ]; then
+            echo "[info] 强制模式：覆盖同名发布"
+            gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes || true
+            git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1 && git push origin --delete "$TAG" || true
+          else
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "::error::Release $TAG 已存在。请先升版本号，或用手动触发的 force 选项。"
+              exit 1
+            fi
+          fi
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.plugin.tag_name }}
+          name: ${{ matrix.plugin.name }} v${{ matrix.plugin.version }}
+          body: |
+            ${{ matrix.plugin.notes }}
+
+            ---
+
+            **插件 ID**：`${{ matrix.plugin.id }}`
+            **源码路径**：`${{ matrix.plugin.source_root }}/${{ matrix.plugin.source_dir }}`
+            **MoviePilot 安装方式**：插件清单已开启 `release: true`，MoviePilot 会直接下载本 Release 的安装包。
+          files: |
+            ${{ matrix.plugin.archive_base }}.zip
+            ${{ matrix.plugin.archive_base }}.tar.gz
+            ${{ matrix.plugin.archive_base }}.zip.sha256
+            ${{ matrix.plugin.archive_base }}.tar.gz.sha256
+          draft: false
+          prerelease: false

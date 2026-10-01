@@ -1,0 +1,17 @@
+{
+  "Doc911Subscribe": {
+    "name": "911文档订阅添加",
+    "description": "每天21:01扫描金山文档，自动添加「本月更新【国产剧】」「本月更新【国外剧】」「本月更新【综艺】」在播新剧到MP订阅。可配置文档链接，TMDB识别失败时发送通知提醒。（V3 修复移植版）",
+    "labels": "订阅,文档,KDocs,金山文档,自动订阅,通知,V3",
+    "version": "1.1.0",
+    "release": true,
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/chain.png",
+    "author": "zoom521241",
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "v3": true,
+    "history": {
+      "v1.1.0": "MoviePilot V3 修复移植版。① 补齐缺失的依赖清单（pyproject.toml 声明 openpyxl），修复原版因 openpyxl 未安装导致插件加载失败、安装被回滚的问题；② 修复 V3 已从 app.db.subscribe_oper 移除 Subscribe 模型的导入错误，改为从 app.db.models.subscribe 导入；③ openpyxl 改为运行时惰性导入，依赖缺失时只影响同步动作并给出明确日志，插件本身仍可加载；④ 补齐类级默认配置（_doc_url/_file_id），修复未传配置时的 AttributeError；⑤ 通知类型优先使用 V3 的 MessageType；⑥ Session 改为 try/finally 释放；⑦ 配置表单补齐「名称别名映射」输入框。"
+    }
+  }
+}

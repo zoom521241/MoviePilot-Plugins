@@ -1,0 +1,11 @@
+[project]
+name = "moviepilot-plugin-doc911subscribe"
+dynamic = ["version"]
+requires-python = ">=3.12"
+# openpyxl 是本插件解析金山文档 xlsx 的必需依赖。
+# 原上游仓库缺少依赖清单，MoviePilot 不会自动安装，
+# 导致插件在第 13 行 `import openpyxl` 直接加载失败（安装被回滚）。
+# 这里按 PEP 621 声明，MP V3 安装插件时会自动安装。
+dependencies = [
+    "openpyxl>=3.1.0",
+]
