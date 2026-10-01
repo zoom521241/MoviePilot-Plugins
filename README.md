@@ -7,7 +7,7 @@
 | 插件 | 版本 | 原作者 | 作用 |
 | --- | --- | --- | --- |
 | 115网盘储存 | 3.0.4 | [DDSRem](https://github.com/DDSRem) | 作为 MoviePilot 的存储模块接入 115 网盘，提供文件列表、上传下载、快照等能力 |
-| 115网盘STRM助手 | 2.8.74.4 | [DDSRem](https://github.com/DDSRem) | 把 115 网盘资源整理到媒体库目录并生成 `.strm` 文件，供 Emby / Jellyfin 直链播放 |
+| 115网盘STRM助手 | 2.8.74.5 | [DDSRem](https://github.com/DDSRem) | 把 115 网盘资源整理到媒体库目录并生成 `.strm` 文件，供 Emby / Jellyfin 直链播放 |
 | 115网盘订阅追更 | 1.5.9 | [mrtian2016](https://github.com/mrtian2016) | 结合 MoviePilot 订阅，自动搜索 115 网盘资源并转存缺失的电影与剧集 |
 | Emby媒体库封面生成 | 1.0.2 | [Kioo / wio-ki](https://github.com/wio-ki) | 为 Emby / Jellyfin 媒体库生成动态或静态封面，内置多种样式 |
 | 金山文档订阅添加 | 1.2.0 | [jinyuhao-886](https://github.com/jinyuhao-886) | 每天 21:01 扫描金山文档（KDocs）追剧表，自动把三个区段内的在播新剧添加到 MP 订阅 |
@@ -35,7 +35,7 @@ GitHub Actions（`.github/workflows/release.yml`）会自动检测版本号，�
 | --- | --- |
 | 金山文档订阅添加 | `Doc911Subscribe_v1.2.0` |
 | 115网盘储存 | `P115Disk_v3.0.4` |
-| 115网盘STRM助手 | `P115StrmHelper_v2.8.74.4` |
+| 115网盘STRM助手 | `P115StrmHelper_v2.8.74.5` |
 | 115网盘订阅追更 | `P115StrgmSub_v1.5.9` |
 | Emby媒体库封面生成 | `MediaCoverGenerator_v1.0.2` |
 
@@ -66,10 +66,11 @@ GitHub Actions（`.github/workflows/release.yml`）会自动检测版本号，�
 - 云盘移动成功后改用稳定的文件 ID 完成重命名，不再依赖可能尚未更新的路径查询结果。
 - 目录 ID 统一按整数处理，避免把非根目录误判为根目录；严格存在性查询直接读取远端状态，网络错误仍按未知处理。
 
-### 115网盘STRM助手 2.8.74.4
+### 115网盘STRM助手 2.8.74.5
 
 负责资源整理与 STRM 生成。相比原版的调整：
 
+- **修复 V3 启动即崩溃**（2.8.74.5）。原插件写的是 `from app.core import global_vars`，而 V3 把 `app.core` 收敛为只导出 `config`，该导入在 V3 下直接抛 `ImportError`，插件加载失败。现改为先尝试 `app.core.config.global_vars`，失败再回退 V2 的 `app.core.global_vars`，两个版本都能用同一份源码。
 - 整目录转存时子文件往往延迟才可见，原先会因为少扫到文件而漏整理。改为先收集再复扫：每轮间隔 10 秒，至少观察 30 秒且连续两次完整比较不变才认定稳定，最多 6 轮并设 120 秒软时限；到时限仍未收敛就只提交已收集到的有效文件，保留记录待核查，不无限重试。
 - 兼容 MoviePilot V3 的持久化整理结算，原先绕过宿主自行入队会导致同一任务被重复提交，现在交由宿主原生流程执行。
 - 扫描进度持久化，停止后下次启动恢复未完成目录并跳过已受理的文件，即使选择 `latest` 模式也会恢复。
