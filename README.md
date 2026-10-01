@@ -6,11 +6,12 @@
 
 | 插件 | 版本 | 原作者 | 作用 |
 | --- | --- | --- | --- |
-| 115网盘储存 | 3.0.4 | [DDSRem](https://github.com/DDSRem) | 作为 MoviePilot 的存储模块接入 115 网盘，提供文件列表、上传下载、快照等能力 |
-| 115网盘STRM助手 | 2.8.74.5 | [DDSRem](https://github.com/DDSRem) | 把 115 网盘资源整理到媒体库目录并生成 `.strm` 文件，供 Emby / Jellyfin 直链播放 |
+| 115网盘储存 | 3.0.5 | [DDSRem](https://github.com/DDSRem) | 作为 MoviePilot 的存储模块接入 115 网盘，提供文件列表、上传下载、快照等能力 |
+| 115网盘STRM助手 | 2.8.74.6 | [DDSRem](https://github.com/DDSRem) | 把 115 网盘资源整理到媒体库目录并生成 `.strm` 文件，供 Emby / Jellyfin 直链播放 |
 | 115网盘订阅追更 | 1.5.9 | [mrtian2016](https://github.com/mrtian2016) | 结合 MoviePilot 订阅，自动搜索 115 网盘资源并转存缺失的电影与剧集 |
 | Emby媒体库封面生成 | 1.0.2 | [Kioo / wio-ki](https://github.com/wio-ki) | 为 Emby / Jellyfin 媒体库生成动态或静态封面，内置多种样式 |
 | 金山文档订阅添加 | 1.2.0 | [jinyuhao-886](https://github.com/jinyuhao-886) | 每天 21:01 扫描金山文档（KDocs）追剧表，自动把三个区段内的在播新剧添加到 MP 订阅 |
+| 夸克网盘搬家 | 0.1.0 | zoom521241 | 把夸克网盘指定目录中的影片搬迁到 115 网盘指定目录，扫码登录、串行限速 |
 
 ## Releases 发版
 
@@ -34,10 +35,60 @@ GitHub Actions（`.github/workflows/release.yml`）会自动检测版本号，�
 | 插件 | Release |
 | --- | --- |
 | 金山文档订阅添加 | `Doc911Subscribe_v1.2.0` |
-| 115网盘储存 | `P115Disk_v3.0.4` |
-| 115网盘STRM助手 | `P115StrmHelper_v2.8.74.5` |
+| 115网盘储存 | `P115Disk_v3.0.5` |
+| 115网盘STRM助手 | `P115StrmHelper_v2.8.74.6` |
 | 115网盘订阅追更 | `P115StrgmSub_v1.5.9` |
 | Emby媒体库封面生成 | `MediaCoverGenerator_v1.0.2` |
+| 夸克网盘搬家 | `QuarkTo115_v0.1.0` |
+
+## 仓库结构
+
+```text
+package.v3.json     V3 清单，全部 6 个插件都在这里
+plugins.v3/         V3 插件源码，依赖按 PEP 621 写在各自的 pyproject.toml
+package.v2.json     已置空，只保留 V2 回退位
+tests/              离线回归测试
+.github/workflows/  Releases 自动发版
+```
+
+全部插件都是面向 MoviePilot V3 的，源码统一放在 `plugins.v3/`。MoviePilot 在 V3 上会先查
+`package.v3.json`，查不到才按代际回退到 `package.v2.json`，所以把条目放回
+`package.v2.json` 即可让插件重新被 V2 识别。
+
+Release 的 tag 格式是 `<插件ID>_v<版本号>`，**只认版本号、与清单写在 v2 还是 v3 无关**。
+因此只搬目录和清单、不动版本号时，已发布安装包的 URL 与内容完全不变，MoviePilot 不会
+判定有更新；只有真正改了依赖或代码并升版本号才会重新打包。
+
+## 仅支持 V3
+
+本仓库全部插件限定 MoviePilot V3，V2 环境下**不会出现在插件市场里**。这是两道闸门叠加的结果：
+
+| 闸门 | 位置 | 作用 |
+| --- | --- | --- |
+| `system_version: ">=3.0.0"` | 每个插件条目 | 版本不满足直接拒绝安装 |
+| `v2: false` | 每个插件条目 | MP 的 `is_plugin_generation_compatible()` 在 V2 环境读到该条目时剔除它 |
+| 清单位于 `package.v3.json` | 仓库结构 | V2 不会主动读取 v3 清单 |
+
+三条都在容器里用 MoviePilot 自己的函数实测过：V3（v3.0.10-1）下 6 个插件全部可见可装，
+模拟 V2 环境下 6 个全部隐藏。要恢复 V2 可见性，把条目放回 `package.v2.json` 并去掉 `v2: false`
+即可，但源码里的 V3 专有写法（如 `MessageType`、新的 Subscribe 导入路径）需要另行处理。
+
+## 依赖清单必须写全
+
+MoviePilot 的插件依赖清单是**二选一，不是合并**：
+
+```python
+# app/adapters/system/plugin/manifest.py
+def select_dependency_manifest(plugin_dir):
+    pyproject_file = plugin_dir / PYPROJECT_FILENAME
+    if pyproject_file.is_file():
+        return pyproject_file        # 有 pyproject.toml 就直接返回，不看 requirements.txt
+```
+
+也就是说只要插件目录下存在 `pyproject.toml`，同目录的 `requirements.txt` 会被**完全忽略**
+且不会回退。曾经因为 115网盘储存 的 `pyproject.toml` 漏写了 `python-concurrenttools`，
+而它同时又有 `requirements.txt`，导致这条关键约束从未生效。改动依赖后请确认写在了生效的
+那份清单里，并且**记得升版本号**，否则不会重新打包。
 
 ## 各插件与原版差异
 
@@ -58,15 +109,16 @@ GitHub Actions（`.github/workflows/release.yml`）会自动检测版本号，�
 - 显示名称由「911文档订阅添加」更名为「金山文档订阅添加」，配置表单标签与日志前缀同步更新。
   插件 ID 仍为 `Doc911Subscribe`，已保存的配置不受影响。
 
-### 115网盘储存 3.0.4
+### 115网盘储存 3.0.5
 
 替换 MoviePilot 内置的 115 存储实现，要求 MoviePilot V3。相比原版的调整：
 
+- **修好依赖约束被吞的问题**（3.0.5）。本插件同时带 `pyproject.toml` 和 `requirements.txt`，而 MoviePilot 二选一只认 `pyproject.toml`，里面却漏了 `python-concurrenttools==0.1.8`。这是三个 115 插件里唯一没锁住 concurrenttools 的，容器重建或重装依赖时一旦装到 0.1.9，p115client 依赖的 `threadpool_map` / `taskgroup_map` 就没了，115 调用会失效。现已补进 `pyproject.toml`。
 - 修复并发场景下限流等待时间不断翻倍（2 秒变 4、8、16 秒）导致整理卡住的问题。
 - 云盘移动成功后改用稳定的文件 ID 完成重命名，不再依赖可能尚未更新的路径查询结果。
 - 目录 ID 统一按整数处理，避免把非根目录误判为根目录；严格存在性查询直接读取远端状态，网络错误仍按未知处理。
 
-### 115网盘STRM助手 2.8.74.5
+### 115网盘STRM助手 2.8.74.6
 
 负责资源整理与 STRM 生成。相比原版的调整：
 
@@ -91,21 +143,6 @@ GitHub Actions（`.github/workflows/release.yml`）会自动检测版本号，�
 - 入库事件交给可停止的后台队列处理，同一批次、同一媒体库合并生成，不再阻塞 V3 的整理后处理流程。
 - Emby 无法下载远程背景图时，回退使用同一媒体项的海报，避免反复等待不可用的资源。
 - 停止任务后取消待处理事件及后续上传，不影响用户已有的配置与封面样式。
-
-## 仓库结构
-
-```text
-package.v2.json     V2 兼容清单（4 个 115/Emby 插件）
-plugins.v2/         V2 布局的插件源码
-package.v3.json     V3 清单（金山文档订阅添加）
-plugins.v3/         V3 插件源码，按 PEP 621 带 pyproject.toml 依赖声明
-tests/              离线回归测试
-.github/workflows/  Releases 自动发版
-```
-
-`plugins.v3/` 下的插件会因为 `release: true` 走 Release 安装包安装，
-`plugins.v2/` 下的插件在 V3 中通过兼容索引发现。其中 115网盘储存与 Emby媒体库封面生成
-声明 `system_version >=3.0.0`，需要 V3 环境。
 
 ## 安装
 
