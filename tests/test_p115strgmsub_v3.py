@@ -270,7 +270,7 @@ class TestEnterBlocked(unittest.TestCase):
 
 class TestVersion(unittest.TestCase):
     def test_version_bumped(self):
-        self.assertEqual(P115StrgmSub.plugin_version, "1.5.8")
+        self.assertEqual(P115StrgmSub.plugin_version, "1.5.9")
 
     def test_site_constants(self):
         self.assertEqual(P115StrgmSub._SITE_115_ID, -1)
