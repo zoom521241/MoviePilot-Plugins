@@ -1,3 +1,4 @@
+import re
 from time import strftime, localtime, time
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
@@ -657,8 +658,117 @@ class MediaSyncDelHelper:
                 # 调用 MP 模块删除媒体文件和空媒体目录
                 self.storagechain.delete_media_file(fileitem=fileitem)
                 logger.info(f"【同步删除】{media_name} 删除网盘媒体文件：{file_path}")
+                # 一并清理同目录的附属文件（字幕/图片/元数据）与空目录
+                self.__cleanup_p115_media_attachments(
+                    storage=storage,
+                    file_path=fileitem.path or file_path,
+                    media_name=media_name,
+                )
         except Exception as e:
             logger.error(f"【同步删除】{media_name} 删除网盘媒体 {file_path} 失败: {e}")
+
+    def __cleanup_p115_media_attachments(
+        self, storage: str, file_path: str, media_name: str
+    ):
+        """
+        清理网盘媒体所在目录的附属文件（字幕/图片/元数据），并在目录不再包含媒体文件时删除空目录
+
+        MP 的 delete_media_file 只删除媒体文件本身，且当目录位于媒体库结构中时会跳过空目录清理，
+        导致字幕等附属文件残留、目录无法删除，这里做补充清理。
+
+        :param storage (str): 储存类型
+        :param file_path (str): 已删除的媒体文件路径
+        :param media_name (str): 媒体名称
+        """
+        # 附属文件后缀（字幕 / 图片 / 元数据），这些文件随媒体一起删除
+        attachment_exts = {
+            # 字幕
+            "ass", "srt", "ssa", "sub", "idx", "smi", "vtt", "sup", "mks", "ttml",
+            # 图片
+            "jpg", "jpeg", "png", "webp", "bmp", "gif", "tbn",
+            # 元数据
+            "nfo",
+        }
+        media_exts = {
+            ext.lstrip(".").lower() for ext in (settings.RMT_MEDIAEXT or [])
+        }
+        try:
+            media_path = Path(file_path)
+            parent_path = media_path.parent
+            parent_item = self.storagechain.get_file_item(
+                storage=storage, path=Path(parent_path)
+            )
+            if not parent_item or parent_item.type != "dir":
+                return
+
+            items = self.storagechain.list_files(parent_item) or []
+
+            # 目录中仍有其它媒体文件（如多版本共存），说明不是该媒体独占目录，不做清理
+            other_media = [
+                item
+                for item in items
+                if item.basename != media_path.name
+                and Path(item.basename).suffix.lstrip(".").lower() in media_exts
+            ]
+            if other_media:
+                logger.info(
+                    f"【同步删除】{media_name} 目录中仍存在其它媒体文件，跳过附属文件清理"
+                )
+                return
+
+            # 删除附属文件
+            for item in items:
+                basename = item.basename or ""
+                suffix = Path(basename).suffix.lstrip(".").lower()
+                is_attachment = (
+                    suffix in attachment_exts
+                    or basename.lower().endswith("-mediainfo.json")
+                )
+                if not is_attachment:
+                    continue
+                if self.storagechain.delete_file(item):
+                    logger.info(
+                        f"【同步删除】{media_name} 删除网盘附属文件：{item.path}"
+                    )
+
+            # 向上清理空目录（仅限媒体名目录与季目录，避免误删分类目录）
+            dir_item = parent_item
+            depth = 0
+            while dir_item and depth < 3:
+                if self.storagechain.list_files(dir_item, recursion=False):
+                    break
+                if not self.__dir_belongs_to_media(dir_item.name, media_name):
+                    break
+                if not self.storagechain.delete_file(dir_item):
+                    break
+                logger.info(
+                    f"【同步删除】{media_name} 删除网盘空目录：{dir_item.path}"
+                )
+                dir_item = self.storagechain.get_parent_item(dir_item)
+                depth += 1
+        except Exception as e:
+            logger.error(f"【同步删除】{media_name} 清理网盘附属文件失败: {e}")
+
+    @staticmethod
+    def __dir_belongs_to_media(dir_name: str, media_name: str) -> bool:
+        """
+        判断目录是否属于该媒体（媒体名目录或季目录），避免误删分类目录
+
+        :param dir_name (str): 目录名
+        :param media_name (str): 媒体名称
+        """
+        if not dir_name:
+            return False
+        name = dir_name.strip()
+        # 季目录 / Specials
+        if re.match(r"^(season|s)\s*\d+$", name.lower()) or "special" in name.lower():
+            return True
+        # 媒体名目录：忽略空格、括号、年份符号等差异后互相包含即可
+        norm = lambda x: re.sub(r"[\s()（）\[\]【】\-_.:：]", "", x).lower()
+        d, m = norm(name), norm(media_name)
+        if not d or not m:
+            return False
+        return m in d or d in m
 
     def sync_del_by_webhook(
         self,
