@@ -702,34 +702,69 @@ class MediaSyncDelHelper:
                 return
 
             items = self.storagechain.list_files(parent_item) or []
+            media_stem = media_path.stem.lower()
 
-            # 目录中仍有其它媒体文件（如多版本共存），说明不是该媒体独占目录，不做清理
-            other_media = [
+            def is_attachment_file(filename: str) -> bool:
+                """是否为附属文件（字幕 / 图片 / 元数据）"""
+                suffix = Path(filename).suffix.lstrip(".").lower()
+                return suffix in attachment_exts or filename.lower().endswith(
+                    "-mediainfo.json"
+                )
+
+            def stem_related(filename: str, target_stem: str) -> bool:
+                """文件名主体是否与目标媒体相关（同片多版本或同集派生文件）"""
+                stem = Path(filename).stem.lower()
+                return (
+                    stem == target_stem
+                    or stem.startswith(target_stem)
+                    or target_stem.startswith(stem)
+                )
+
+            # 同一媒体的其它版本（如 1080p 与 1080p(1)）可能共用字幕等附属文件，保守跳过清理
+            same_media_versions = [
                 item
                 for item in items
                 if item.basename != media_path.name
-                and Path(item.basename).suffix.lstrip(".").lower() in media_exts
+                and Path(item.basename or "").suffix.lstrip(".").lower() in media_exts
+                and stem_related(item.basename or "", media_stem)
             ]
-            if other_media:
+            if same_media_versions:
                 logger.info(
-                    f"【同步删除】{media_name} 目录中仍存在其它媒体文件，跳过附属文件清理"
+                    f"【同步删除】{media_name} 目录中存在同媒体的其它版本，跳过附属文件清理"
                 )
                 return
 
-            # 删除附属文件
+            # 仅清理与被删媒体同名的附属文件（含同名派生，如 xxx.ass / xxx-thumb.jpg），
+            # 电视剧单集删除时不会影响其它集的字幕、图片等文件
             for item in items:
                 basename = item.basename or ""
-                suffix = Path(basename).suffix.lstrip(".").lower()
-                is_attachment = (
-                    suffix in attachment_exts
-                    or basename.lower().endswith("-mediainfo.json")
-                )
-                if not is_attachment:
+                if basename == media_path.name or not is_attachment_file(basename):
+                    continue
+                if not stem_related(basename, media_stem):
                     continue
                 if self.storagechain.delete_file(item):
                     logger.info(
                         f"【同步删除】{media_name} 删除网盘附属文件：{item.path}"
                     )
+
+            # 目录中仍有其它媒体文件（其它集 / 其它影片）时保留目录，不做进一步清理
+            remaining = self.storagechain.list_files(parent_item, recursion=False) or []
+            if any(
+                Path(i.basename or "").suffix.lstrip(".").lower() in media_exts
+                for i in remaining
+            ):
+                logger.info(
+                    f"【同步删除】{media_name} 目录中仍存在其它媒体文件，保留目录"
+                )
+                return
+
+            # 目录已无媒体文件：清理剩余的无主附属文件，随后删除空目录
+            for item in remaining:
+                if is_attachment_file(item.basename or ""):
+                    if self.storagechain.delete_file(item):
+                        logger.info(
+                            f"【同步删除】{media_name} 删除网盘残留附属文件：{item.path}"
+                        )
 
             # 向上清理空目录（仅限媒体名目录与季目录，避免误删分类目录）
             dir_item = parent_item
