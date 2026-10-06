@@ -7,7 +7,7 @@
 | 插件 | 版本 | 原作者 | 作用 |
 | --- | --- | --- | --- |
 | 115网盘储存 | 3.0.5 | [DDSRem](https://github.com/DDSRem) | 作为 MoviePilot 的存储模块接入 115 网盘，提供文件列表、上传下载、快照等能力 |
-| 115网盘STRM助手 | 2.8.74.6 | [DDSRem](https://github.com/DDSRem) | 把 115 网盘资源整理到媒体库目录并生成 `.strm` 文件，供 Emby / Jellyfin 直链播放 |
+| 115网盘STRM助手 | 2.8.74.9 | [DDSRem](https://github.com/DDSRem) | 把 115 网盘资源整理到媒体库目录并生成 `.strm` 文件，供 Emby / Jellyfin 直链播放 |
 | 115网盘订阅追更 | 1.5.9 | [mrtian2016](https://github.com/mrtian2016) | 结合 MoviePilot 订阅，自动搜索 115 网盘资源并转存缺失的电影与剧集 |
 | Emby媒体库封面生成 | 1.0.2 | [Kioo / wio-ki](https://github.com/wio-ki) | 为 Emby / Jellyfin 媒体库生成动态或静态封面，内置多种样式 |
 | 金山文档订阅添加 | 1.2.0 | [jinyuhao-886](https://github.com/jinyuhao-886) | 每天 21:01 扫描金山文档（KDocs）追剧表，自动把三个区段内的在播新剧添加到 MP 订阅 |
@@ -36,7 +36,7 @@ GitHub Actions（`.github/workflows/release.yml`）会自动检测版本号，�
 | --- | --- |
 | 金山文档订阅添加 | `Doc911Subscribe_v1.2.0` |
 | 115网盘储存 | `P115Disk_v3.0.5` |
-| 115网盘STRM助手 | `P115StrmHelper_v2.8.74.6` |
+| 115网盘STRM助手 | `P115StrmHelper_v2.8.74.9` |
 | 115网盘订阅追更 | `P115StrgmSub_v1.5.9` |
 | Emby媒体库封面生成 | `MediaCoverGenerator_v1.0.2` |
 | 夸克网盘搬家 | `QuarkTo115_v0.1.0` |
@@ -118,10 +118,13 @@ def select_dependency_manifest(plugin_dir):
 - 云盘移动成功后改用稳定的文件 ID 完成重命名，不再依赖可能尚未更新的路径查询结果。
 - 目录 ID 统一按整数处理，避免把非根目录误判为根目录；严格存在性查询直接读取远端状态，网络错误仍按未知处理。
 
-### 115网盘STRM助手 2.8.74.6
+### 115网盘STRM助手 2.8.74.9
 
 负责资源整理与 STRM 生成。相比原版的调整：
 
+- **同步删除适配 MoviePilot V3 的转移记录查询**（2.8.74.7）。V3 的 `TransferHistoryOper.get_by()` 已移除 `tmdbid` 参数，`transferhistory` 表改用 `media_source` + `media_id` 记录媒体身份，插件继续传 `tmdbid` 会抛 `TypeError: unexpected keyword argument 'tmdbid'`，表现为「Emby 里删了媒体、网盘文件却删不掉」。现在优先按 `MediaSource.TMDB` + `media_id` 查询，失败回退旧参数，V2/V3 通用；同时修正 `transfer_chain` 补丁里同样失效的 `get_by_type_tmdbid` 与 `transferhis.tmdbid` 读取。
+- **同步删除时一并清理附属文件与空目录**（2.8.74.8）。原先只删除媒体文件本身，同目录的字幕（ass/srt 等）、图片、nfo、mediainfo.json 会残留；且 MoviePilot 的 `delete_media_file` 在目录位于媒体库结构中时会跳过空目录清理，导致删完媒体后网盘留下空目录。现于删除媒体文件后补充清理。
+- **附属文件清理按归属精准匹配**（2.8.74.9）。上一版在目录存在其它媒体文件时整体跳过清理，导致被删那一集的字幕清不掉，也无法区分「同目录其它集」与「同片多版本」。现改为只清理与被删媒体同名的附属文件（`xxx.ass` / `xxx.zh.ass` / `xxx-thumb.jpg` / `xxx.nfo` / `xxx-mediainfo.json`），同目录存在同一媒体的其它版本（`1080p` 与 `1080p(1)`）时保守跳过，目录里还有其它集或其它影片时只保留目录、绝不触碰其它文件；仅当目录已无任何媒体文件时才清理无主附属文件并删除空目录。集号边界（`S01E01` 不误匹配 `S01E02` / `S01E010`）已用离线用例覆盖。
 - **修复 V3 启动即崩溃**（2.8.74.5）。原插件写的是 `from app.core import global_vars`，而 V3 把 `app.core` 收敛为只导出 `config`，该导入在 V3 下直接抛 `ImportError`，插件加载失败。现改为先尝试 `app.core.config.global_vars`，失败再回退 V2 的 `app.core.global_vars`，两个版本都能用同一份源码。
 - 整目录转存时子文件往往延迟才可见，原先会因为少扫到文件而漏整理。改为先收集再复扫：每轮间隔 10 秒，至少观察 30 秒且连续两次完整比较不变才认定稳定，最多 6 轮并设 120 秒软时限；到时限仍未收敛就只提交已收集到的有效文件，保留记录待核查，不无限重试。
 - 兼容 MoviePilot V3 的持久化整理结算，原先绕过宿主自行入队会导致同一任务被重复提交，现在交由宿主原生流程执行。
