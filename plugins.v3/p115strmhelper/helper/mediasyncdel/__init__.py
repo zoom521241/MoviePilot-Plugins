@@ -11,7 +11,7 @@ from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.db.plugindata_oper import PluginDataOper
 from app.helper.downloader import DownloaderHelper
 from app.chain.storage import StorageChain
-from app.schemas.types import MediaType, MediaImageType, NotificationType
+from app.schemas.types import MediaType, MediaImageType, NotificationType, MediaSource
 from app.schemas.mediaserver import WebhookEventInfo
 
 from ...core.config import configer
@@ -488,6 +488,51 @@ class MediaSyncDelHelper:
             return None
         return msg
 
+    def __get_by_compat(
+        self,
+        mtype: MediaType,
+        tmdb_id: Optional[int] = None,
+        season: Optional[str] = None,
+        episode: Optional[str] = None,
+        dest: Optional[str] = None,
+    ) -> List[TransferHistory]:
+        """
+        查询转移记录（兼容 MoviePilot V2 / V3）
+
+        V3 起 TransferHistoryOper.get_by() 已移除 tmdbid 参数，改为
+        media_source + media_id 的身份查询方式，继续传 tmdbid 会抛
+        TypeError: unexpected keyword argument 'tmdbid'。
+        这里优先按 V3 方式查询，失败时回退到 V2 方式。
+
+        :param mtype (MediaType): 媒体类型
+        :param tmdb_id (int): TMDB ID
+        :param season (str): 季，如 S01
+        :param episode (str): 集，如 E01
+        :param dest (str): 转移目标路径
+        """
+        kwargs: Dict[str, Any] = {"mtype": mtype.value}
+        if season is not None:
+            kwargs["season"] = season
+        if episode is not None:
+            kwargs["episode"] = episode
+        if dest is not None:
+            kwargs["dest"] = dest
+
+        if not tmdb_id:
+            return self.transferhis.get_by(**kwargs)
+
+        try:
+            # MoviePilot V3：按媒体身份查询
+            return self.transferhis.get_by(
+                media_source=MediaSource.TMDB, media_id=str(tmdb_id), **kwargs
+            )
+        except TypeError:
+            # MoviePilot V2：按 tmdbid 查询
+            logger.debug(
+                f"【同步删除】当前环境不支持按媒体身份查询，回退为 tmdbid 查询: {tmdb_id}"
+            )
+            return self.transferhis.get_by(tmdbid=tmdb_id, **kwargs)
+
     def __get_transfer_his(
         self,
         media_type: str,
@@ -532,14 +577,14 @@ class MediaSyncDelHelper:
         # 删除电影
         elif mtype == MediaType.MOVIE:
             msg = f"电影 {media_name} {tmdb_id}"
-            transfer_history: List[TransferHistory] = self.transferhis.get_by(
-                tmdbid=tmdb_id, mtype=mtype.value, dest=media_path
+            transfer_history: List[TransferHistory] = self.__get_by_compat(
+                mtype=mtype, tmdb_id=tmdb_id, dest=media_path
             )
         # 删除电视剧
         elif mtype == MediaType.TV and not season_num and not episode_num:
             msg = f"剧集 {media_name} {tmdb_id}"
-            transfer_history: List[TransferHistory] = self.transferhis.get_by(
-                tmdbid=tmdb_id, mtype=mtype.value
+            transfer_history: List[TransferHistory] = self.__get_by_compat(
+                mtype=mtype, tmdb_id=tmdb_id
             )
         # 季处理为集（多版本季删除）
         elif (
@@ -561,8 +606,8 @@ class MediaSyncDelHelper:
                 logger.error(f"【同步删除】{media_name} 季同步删除失败，未获取到具体季")
                 return "", []
             msg = f"剧集 {media_name} S{season_num} {tmdb_id}"
-            transfer_history: List[TransferHistory] = self.transferhis.get_by(
-                tmdbid=tmdb_id, mtype=mtype.value, season=f"S{season_num}"
+            transfer_history: List[TransferHistory] = self.__get_by_compat(
+                mtype=mtype, tmdb_id=tmdb_id, season=f"S{season_num}"
             )
         # 删除集
         elif mtype == MediaType.TV and season_num and episode_num:
@@ -575,9 +620,9 @@ class MediaSyncDelHelper:
                 logger.error(f"【同步删除】{media_name} 集同步删除失败，未获取到具体集")
                 return "", []
             msg = f"剧集 {media_name} S{season_num}E{episode_num} {tmdb_id}"
-            transfer_history: List[TransferHistory] = self.transferhis.get_by(
-                tmdbid=tmdb_id,
-                mtype=mtype.value,
+            transfer_history: List[TransferHistory] = self.__get_by_compat(
+                mtype=mtype,
+                tmdb_id=tmdb_id,
                 season=f"S{season_num}",
                 episode=f"E{episode_num}",
                 dest=media_path,
@@ -878,7 +923,9 @@ class MediaSyncDelHelper:
                 title = transferhis.title
                 if title not in media_name:
                     logger.warn(
-                        f"【同步删除】当前转移记录 {transferhis.id} {title} {transferhis.tmdbid} 与删除媒体 {media_name} 不符，防误删，暂不自动删除"
+                        f"【同步删除】当前转移记录 {transferhis.id} {title} "
+                        f"{getattr(transferhis, 'media_id', None) or getattr(transferhis, 'tmdbid', '')} "
+                        f"与删除媒体 {media_name} 不符，防误删，暂不自动删除"
                     )
                     continue
                 image = transferhis.image or image

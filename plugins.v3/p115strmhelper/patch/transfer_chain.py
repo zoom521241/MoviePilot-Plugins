@@ -265,9 +265,26 @@ class TransferChainPatcher:
 
             # 如果未开启新增已入库媒体是否跟随TMDB信息变化则根据tmdbid查询之前的title
             if not settings.SCRAP_FOLLOW_TMDB:
-                transfer_history = transferhis.get_by_type_tmdbid(
-                    tmdbid=mediainfo.tmdb_id, mtype=mediainfo.type.value
-                )
+                # MoviePilot V3 已移除 get_by_type_tmdbid / tmdbid 参数，
+                # 改为 media_source + media_id 的媒体身份查询，这里做兼容处理
+                transfer_history = None
+                try:
+                    from app.schemas.types import MediaSource
+
+                    histories = transferhis.get_by(
+                        media_source=MediaSource.TMDB,
+                        media_id=str(mediainfo.tmdb_id),
+                        mtype=mediainfo.type.value,
+                    )
+                    if histories:
+                        transfer_history = histories[0]
+                except (TypeError, AttributeError, ImportError):
+                    try:
+                        transfer_history = transferhis.get_by_type_tmdbid(
+                            tmdbid=mediainfo.tmdb_id, mtype=mediainfo.type.value
+                        )
+                    except Exception as e:
+                        logger.debug(f"【整理接管】查询转移历史失败: {e}")
                 if transfer_history and mediainfo.title != transfer_history.title:
                     mediainfo.title = transfer_history.title
                     mediainfo_changed = True
