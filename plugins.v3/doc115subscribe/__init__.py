@@ -39,6 +39,7 @@ try:
     from . import doc_parser, subscribe_sync
     from .doc_client import DocError, TencentDocsClient
     from .doc_index import DocIndex
+    from .link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
     from .p115_transfer import P115Error, P115Transfer, extract_hash
     from .qrlogin_browser import BrowserQrLogin, QrLoginError
 except ImportError:
@@ -46,6 +47,7 @@ except ImportError:
     import subscribe_sync
     from doc_client import DocError, TencentDocsClient
     from doc_index import DocIndex
+    from link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
     from p115_transfer import P115Error, P115Transfer, extract_hash
     from qrlogin_browser import BrowserQrLogin, QrLoginError
 
@@ -55,7 +57,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.4.1"
+    plugin_version = "0.4.2"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -392,6 +394,14 @@ class Doc115Subscribe(_PluginBase):
             return False
 
     def do_transfer(self, rec: Dict[str, Any], to: str = "") -> Tuple[bool, str]:
+        try:
+            return self._do_transfer_inner(rec, to)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"115文档订阅与查询：转存异常 {rec.get('title')} -> "
+                         f"{type(exc).__name__}: {exc}", exc_info=True)
+            return False, f"{rec.get('title')} 转存异常：{type(exc).__name__}: {exc}"
+
+    def _do_transfer_inner(self, rec: Dict[str, Any], to: str = "") -> Tuple[bool, str]:
         """把一条记录转存到 115：115 分享走转存、磁力/ed2k 走离线下载。
 
         成功后写入 MP 下载历史，让 MP 的整理流程（含 P115StrmHelper 接管）接手。
@@ -415,10 +425,11 @@ class Doc115Subscribe(_PluginBase):
                     if kind in (LINK_MAGNET, LINK_ED2K):
                         self.add_pending_offline(rec, target, save_path, url)
                         offline_added.append(kind)
-            except P115Error as exc:
+            except Exception as exc:  # noqa: BLE001
                 errs.append(str(exc))
                 logger.warning(
-                    f"115文档订阅与查询：链接处理失败 {rec.get('title')} [{kind}] {url} -> {exc}")
+                    f"115文档订阅与查询：链接处理失败 {rec.get('title')} [{kind}] {url} -> "
+                    f"{type(exc).__name__}: {exc}", exc_info=True)
         if not ok_msgs:
             reason = "；".join(errs) or "未知错误"
             if any("失效" in e or "取消" in e or "过期" in e for e in errs):
