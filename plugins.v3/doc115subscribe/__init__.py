@@ -53,7 +53,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -324,8 +324,13 @@ class Doc115Subscribe(_PluginBase):
                     first_url = first_url or url
             except P115Error as exc:
                 errs.append(str(exc))
+                logger.warning(
+                    f"115文档订阅与查询：链接处理失败 {rec.get('title')} [{kind}] {url} -> {exc}")
         if not ok_msgs:
-            return False, f"{rec.get('title')} 转存失败：{'；'.join(errs) or '未知错误'}"
+            reason = "；".join(errs) or "未知错误"
+            if any("失效" in e or "取消" in e or "过期" in e for e in errs):
+                reason += "。文档里的这条分享已被分享者取消或过期，请换一条链接"
+            return False, f"{rec.get('title')} 转存失败：{reason}"
         logged = self.record_download_history(rec, target, save_path, first_url)
         tail = "，已通知 MP 整理" if logged else "（下载历史写入失败，整理可能不会触发）"
         return True, f"{rec.get('title')} -> {save_path}（{'；'.join(ok_msgs)}）{tail}"

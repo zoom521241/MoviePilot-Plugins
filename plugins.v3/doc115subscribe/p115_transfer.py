@@ -110,8 +110,35 @@ class P115Transfer:
         return cur
 
     # -- 转存 ---------------------------------------------------------------
+    def check_share(self, share_url: str) -> Tuple[bool, str]:
+        """只读校验分享是否可用，返回 (是否可用, 不可用原因)。
+
+        115 对「分享已取消 / 已过期 / 提取码错误」等情况，在转存接口里只回一句
+        「参数错误」，很难排查；先用 share_info 探一次，就能给出确切原因。
+        """
+        url = normalize_115_share(share_url)
+        info = share_extract_payload(url)
+        code = info.get("share_code")
+        if not code:
+            return False, "无法解析分享链接"
+        try:
+            self._limiter.wait()
+            resp = self.client.share_info({
+                "share_code": code,
+                "receive_code": info.get("receive_code") or "",
+            })
+        except Exception:  # noqa: BLE001
+            return True, ""      # 预检本身异常就不拦，交给正式转存去判断
+        if (resp or {}).get("state"):
+            return True, ""
+        err = str((resp or {}).get("error") or (resp or {}).get("errno") or "分享不可用")
+        return False, err
+
     def share_receive(self, share_url: str, save_path: str) -> bool:
         """把 115 分享链接整体转存到目标目录。"""
+        ok, reason = self.check_share(share_url)
+        if not ok:
+            raise P115Error(f"分享已失效（{reason}）")
         url = normalize_115_share(share_url)
         payload_info = share_extract_payload(url)
         share_code = payload_info.get("share_code")
