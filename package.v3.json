@@ -3,7 +3,7 @@
     "name": "115文档订阅与查询",
     "description": "读取腾讯文档追更表：定时为电影订阅把资源转存到 115 网盘，并支持插件内跨表搜索、一键转存。文档禁用导出也能读取；支持微信扫码登录、115 分享转存与磁力/ed2k 离线下载。",
     "labels": "文档,腾讯文档,115网盘,订阅,搜索,自动订阅,V3",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
@@ -11,6 +11,7 @@
     "level": 1,
     "v3": true,
     "history": {
+      "v0.1.2": "修正 115 Cookie 的复用来源。原先只读 plugin.P115Disk 的 cookie 字段，但实测多数环境并未配置「115网盘储存」，115 Cookie 实际保存在「115网盘STRM助手」(plugin.P115StrmHelper) 的 cookies 字段里，导致复用失败、转存时报缺少 Cookie。现改为按顺序复用：plugin.P115StrmHelper.cookies（115网盘STRM助手）→ plugin.P115Disk.cookie（115网盘储存）→ plugin.P115StrgmSub.cookies（115网盘订阅追更），本插件自行填写的 Cookie 始终优先。",
       "v0.1.1": "修复安装后加载失败：MoviePilot V3 以「包」的形式加载插件（app.plugins.<插件id>），插件目录不在 sys.path 上，而 subscribe_sync.py / p115_transfer.py 使用了绝对导入（import doc_parser / from link_router import ...），导致 ModuleNotFoundError: No module named 'doc_parser'（异常被 __init__ 的兜底分支再次抛出，表现为安装失败）。现统一改为相对导入并保留脚本场景兜底。同时修正插件图标地址（原 icons/115.png 为 404）。",
       "v0.1.0": "首个版本。① 通过腾讯文档前端 dop-api 接口直读在线表格（base64+zlib+protobuf 解码），文档关闭「导出/下载」也能读取，不需要浏览器；② 插件详情页提供微信扫码登录，扫码后自动保存腾讯文档 Cookie（纯接口实现）；③ 本地索引缓存，每天定时刷新，搜索走缓存；④ 跨表搜索并标注电影/电视剧，优先用 TMDBID 精准识别；⑤ 一键转存到 115：115 分享链接走分享转存，磁力/ed2k 走 115 离线下载；⑥ 电影订阅同步（仅电影，优先 TMDBID 匹配，选片规则 4K+中文优先、否则取最新一条）；⑦ 115 Cookie 默认复用「115网盘Plus」(P115Disk)。"
     },

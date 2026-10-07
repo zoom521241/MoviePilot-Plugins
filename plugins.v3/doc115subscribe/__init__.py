@@ -51,7 +51,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -125,17 +125,30 @@ class Doc115Subscribe(_PluginBase):
     def get_state(self) -> bool:
         return bool(self._enabled and self._tencent_cookie)
 
+    # 本插件未单独填 115 Cookie 时，按顺序复用其它 115 插件的已保存 Cookie
+    _P115_COOKIE_SOURCES = (
+        ("plugin.P115StrmHelper", "cookies"),   # 115网盘STRM助手
+        ("plugin.P115Disk", "cookie"),          # 115网盘储存（115网盘Plus）
+        ("plugin.P115StrgmSub", "cookies"),     # 115网盘订阅追更
+    )
+
     def get_p115_cookie(self) -> str:
-        """115 Cookie：优先本插件配置，否则复用「115网盘Plus」(P115Disk)。"""
+        """115 Cookie：本插件配置优先，否则复用其它 115 插件已保存的 Cookie。"""
         if self._p115_cookie:
             return self._p115_cookie
         try:
             from app.db.systemconfig_oper import SystemConfigOper
-            cfg = SystemConfigOper().get("plugin.P115Disk") or {}
-            return cfg.get("cookie") or ""
+            oper = SystemConfigOper()
+            for key, field in self._P115_COOKIE_SOURCES:
+                cfg = oper.get(key) or {}
+                if isinstance(cfg, dict):
+                    val = (cfg.get(field) or "").strip()
+                    if val:
+                        logger.info(f"115文档订阅与查询：复用 {key}.{field} 的 115 Cookie")
+                        return val
         except Exception as exc:  # noqa: BLE001
-            logger.debug(f"115文档订阅与查询：读取 P115Disk 配置失败：{exc}")
-            return ""
+            logger.debug(f"115文档订阅与查询：读取其它插件 115 Cookie 失败：{exc}")
+        return ""
 
     def _current_config(self) -> Dict[str, Any]:
         return {
