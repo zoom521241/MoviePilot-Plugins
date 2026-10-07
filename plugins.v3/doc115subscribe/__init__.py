@@ -53,7 +53,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.2.8"
+    plugin_version = "0.3.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -71,6 +71,8 @@ class Doc115Subscribe(_PluginBase):
     _subscribe_cron = "0 21 * * *"
     _index_cron = "0 6 * * *"
     _use_agent = True
+    _create_subdir = True      # 转存时按「片名 (年份)」建子目录
+    _record_history = True     # 转存后写入 MP 下载历史（触发整理/STRM）
 
     _scheduler: Optional[BackgroundScheduler] = None
     _index: Optional[DocIndex] = None
@@ -105,6 +107,8 @@ class Doc115Subscribe(_PluginBase):
             self._subscribe_cron = config.get("subscribe_cron") or self.__class__._subscribe_cron
             self._index_cron = config.get("index_cron") or self.__class__._index_cron
             self._use_agent = bool(config.get("use_agent", True))
+            self._create_subdir = bool(config.get("create_subdir", True))
+            self._record_history = bool(config.get("record_history", True))
 
         self.stop_service()
         self._load_index()
@@ -169,6 +173,8 @@ class Doc115Subscribe(_PluginBase):
             "subscribe_cron": self._subscribe_cron,
             "index_cron": self._index_cron,
             "use_agent": self._use_agent,
+            "create_subdir": self._create_subdir,
+            "record_history": self._record_history,
         }
 
     def resolve_media_type(self, rec: Dict[str, Any]) -> str:
@@ -247,85 +253,82 @@ class Doc115Subscribe(_PluginBase):
             logger.error(f"115文档订阅与查询：初始化 115 客户端失败：{exc}")
             return None
 
+    def build_save_path(self, rec: Dict[str, Any], target: str) -> str:
+        """转存目标目录：默认按「片名 (年份)」建子目录，便于 MP 整理识别。"""
+        base = self._movie_path if target == "movie" else self._tv_path
+        if not self._create_subdir:
+            return base
+        title = (rec.get("title") or "").strip()
+        year = str(rec.get("year") or "").strip()
+        if not title:
+            return base
+        name = f"{title} ({year})" if year else title
+        # 去掉 115 不允许的字符
+        for ch in '\\/:*?"<>|':
+            name = name.replace(ch, "_")
+        return f"{base}/{name[:80]}"
+
+    def record_download_history(self, rec: Dict[str, Any], target: str,
+                                save_path: str, url: str) -> bool:
+        """写入 MP 下载历史 —— 这是让后续「整理 / STRM 生成 / 媒体库刷新」接上的关键。
+
+        不写的话 MP 根本不知道有这次转存：文件会一直躺在下载目录里不被整理，
+        P115StrmHelper 的生活事件/转移监控也不会触发。
+        """
+        if not self._record_history:
+            return False
+        try:
+            try:
+                from app.db.downloadhistory_oper import DownloadHistoryOper
+            except ImportError:
+                from app.db.oper.downloadhistory import DownloadHistoryOper  # type: ignore
+            DownloadHistoryOper().add(
+                path=save_path,
+                type="电影" if target == "movie" else "电视剧",
+                title=(rec.get("title") or "").strip(),
+                year=str(rec.get("year") or "").strip() or None,
+                downloader="115网盘",
+                download_hash=url,
+                torrent_name=(rec.get("title") or "").strip(),
+                torrent_description=(rec.get("qtext") or "")[:200],
+                torrent_site="115网盘",
+                username="Doc115Subscribe",
+                date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                note={"source": "Doc115Subscribe", "sheet": rec.get("sheet"), "url": url},
+            )
+            logger.info(f"115文档订阅与查询：已写入下载历史，等待 MP 整理：{rec.get('title')} -> {save_path}")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"115文档订阅与查询：写入下载历史失败（不影响转存本身）：{exc}")
+            return False
+
     def do_transfer(self, rec: Dict[str, Any], to: str = "") -> Tuple[bool, str]:
-        """把一条记录转存到 115：to = movie / tv（留空按识别结果）。"""
+        """把一条记录转存到 115：115 分享走转存、磁力/ed2k 走离线下载。
+
+        成功后写入 MP 下载历史，让 MP 的整理流程（含 P115StrmHelper 接管）接手。
+        """
         links = [(k, u) for k, u in doc_parser.iter_links(rec) if k and u]
         if not links:
             return False, "该条目没有可用链接"
         target = to or self.resolve_media_type(rec)
-        save_path = self._movie_path if target == "movie" else self._tv_path
+        save_path = self.build_save_path(rec, target)
         tr = self._transfers()
         if not tr:
-            return False, "未配置 115 Cookie（可在插件配置填写，或先装好115网盘Plus）"
-        ok_msgs, errs = [], []
+            return False, "未配置 115 Cookie（可在插件配置填写，或先装好 115 网盘相关插件）"
+        ok_msgs, errs, first_url = [], [], ""
         for kind, url in links:
             try:
                 ok, msg = tr.add_resource(kind, url, save_path)
                 if ok:
                     ok_msgs.append(msg)
+                    first_url = first_url or url
             except P115Error as exc:
                 errs.append(str(exc))
-        if ok_msgs:
-            return True, f"{rec.get('title')} -> {save_path}（{'；'.join(ok_msgs)}）"
-        return False, f"{rec.get('title')} 转存失败：{'；'.join(errs) or '未知错误'}"
-
-    # ---- 订阅同步（仅电影） ------------------------------------------------
-    def _get_movie_subscribes(self) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        try:
-            from app.db.subscribe_oper import SubscribeOper
-            for sub in SubscribeOper().list() or []:
-                stype = str(getattr(sub, "type", "") or "")
-                is_movie = ("MOVIE" in stype.upper()) or (stype in ("电影", "movie"))
-                if not is_movie:
-                    continue
-                out.append({
-                    "tmdbid": getattr(sub, "tmdbid", None),
-                    "title": getattr(sub, "name", "") or "",
-                    "year": str(getattr(sub, "year", "") or ""),
-                })
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"115文档订阅与查询：读取 MP 订阅失败：{exc}")
-        return out
-
-    def run_subscribe(self) -> Dict[str, Any]:
-        if not self._tencent_cookie:
-            return {"code": 1, "msg": "缺少腾讯文档 Cookie"}
-        if not self._index:
-            self._load_index()
-        if not self._index:
-            return {"code": 1, "msg": "本地索引为空，请先刷新索引"}
-
-        subs = self._get_movie_subscribes()
-        if not subs:
-            logger.info("115文档订阅与查询：没有电影订阅，跳过")
-            return {"code": 0, "data": {"matched": 0, "transferred": 0}}
-
-        records = subscribe_sync.movie_records(self._index.records)
-        pairs = subscribe_sync.match_subscriptions(records, subs)
-        logger.info(f"115文档订阅与查询：订阅 {len(subs)} 条，文档命中 {len(pairs)} 条")
-
-        history: List[Dict[str, Any]] = self.get_data("history") or []
-        done_keys = {h.get("key") for h in history}
-        added = 0
-        for sub, rec in pairs:
-            key = subscribe_sync.transfer_key(sub, rec)
-            if key in done_keys:
-                continue
-            ok, msg = self.do_transfer(rec, to="movie")
-            if ok:
-                added += 1
-                done_keys.add(key)
-                history.append({"key": key, "title": rec.get("title"),
-                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-                logger.info(f"115文档订阅与查询：{msg}")
-            else:
-                logger.warning(f"115文档订阅与查询：{msg}")
-        self.save_data("history", history[-500:])
-        if added:
-            self.post_message(mtype=_MsgType.Plugin, title="【115文档订阅与查询】",
-                              text=f"本轮为 {added} 部电影订阅完成转存")
-        return {"code": 0, "data": {"matched": len(pairs), "transferred": added}}
+        if not ok_msgs:
+            return False, f"{rec.get('title')} 转存失败：{'；'.join(errs) or '未知错误'}"
+        logged = self.record_download_history(rec, target, save_path, first_url)
+        tail = "，已通知 MP 整理" if logged else "（下载历史写入失败，整理可能不会触发）"
+        return True, f"{rec.get('title')} -> {save_path}（{'；'.join(ok_msgs)}）{tail}"
 
     # ---- 表单 / 页面（Vue 联邦模式） --------------------------------------
     @staticmethod
