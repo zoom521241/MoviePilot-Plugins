@@ -3,7 +3,7 @@
     "name": "115文档订阅与查询",
     "description": "读取腾讯文档追更表：定时为电影订阅把资源转存到 115 网盘，并支持插件内跨表搜索、一键转存。文档禁用导出也能读取；支持微信扫码登录、115 分享转存与磁力/ed2k 离线下载。",
     "labels": "文档,腾讯文档,115网盘,订阅,搜索,自动订阅,V3",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
@@ -11,6 +11,7 @@
     "level": 1,
     "v3": true,
     "history": {
+      "v0.2.2": "扫码登录改为浏览器实现，修复「Cookie 获取失败」。原因：观察 bind-wx-quick-login.html 的脚本可知，该页面不发任何网络请求，只是把 code 用 postMessage 交给父页面，真正换取登录态的是父页面——所以纯 HTTP 请求 redirect_uri 永远拿不到 Cookie。现改用容器内自带的 Chromium（/moviepilot/.cloakbrowser）+ playwright：打开文档页→点立即登录→勾选协议→截二维码→后台轮询登录态→导出 Cookie，二维码过期会自动换新。已验证容器内可正常出码。",
       "v0.2.1": "扫码登录体验修复：① 详情页新增关闭按钮；② 二维码不再是“一次性固定码”——页面上「换一张二维码」可随时生成新码，二维码过期或本次登录失败时后端会自动换新码并推给前端；③ 前端每 3 秒自动检查扫码状态，扫完即自动完成登录（无需再手动点检查）；④ 换取 Cookie 失败时返回详细诊断（HTTP 状态、已获 Cookie、响应片段）便于定位。",
       "v0.2.0": "详情页改为 Vue 联邦组件（get_render_mode -> vue），真正可用的搜索框与扫码登录界面。原因：MoviePilot 的 Vuetify 页面 schema 只是把 props 原样渲染、events 的 params 也是静态值（见前端 PageRender.vue），无法把输入框内容传给后端，因此搜索框能显示却无法提交。现改用官方推荐的 Vue 联邦：dist/assets 内置 remoteEntry.js，Page 组件提供搜索/转存/扫码登录/刷新索引，Config 组件提供设置表单。新增接口：/status、/get_config、/save_config、/run_subscribe，并调整 /search、/transfer 支持 JSON body。",
       "v0.1.5": "详情页在插件未启用时不再只显示一句提示（那样会导致扫码、搜索等所有入口全部不可见），改为照常渲染完整界面，仅在顶部给出「尚未启用」的提示与操作指引。",

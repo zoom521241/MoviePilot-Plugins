@@ -36,14 +36,14 @@ try:
     from .doc_client import DocError, TencentDocsClient
     from .doc_index import DocIndex
     from .p115_transfer import P115Error, P115Transfer
-    from .qrlogin import QrLoginError, TencentDocsQrLogin
+    from .qrlogin_browser import BrowserQrLogin, QrLoginError
 except ImportError:
     import doc_parser
     import subscribe_sync
     from doc_client import DocError, TencentDocsClient
     from doc_index import DocIndex
     from p115_transfer import P115Error, P115Transfer
-    from qrlogin import QrLoginError, TencentDocsQrLogin
+    from qrlogin_browser import BrowserQrLogin, QrLoginError
 
 
 class Doc115Subscribe(_PluginBase):
@@ -51,7 +51,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.2.1"
+    plugin_version = "0.2.2"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -72,7 +72,7 @@ class Doc115Subscribe(_PluginBase):
 
     _scheduler: Optional[BackgroundScheduler] = None
     _index: Optional[DocIndex] = None
-    _qr: Optional[TencentDocsQrLogin] = None
+    _qr: Optional[BrowserQrLogin] = None
     _qr_img: str = ""
     _search_results: List[Dict[str, Any]] = []
     _page_msg: str = ""
@@ -422,60 +422,58 @@ class Doc115Subscribe(_PluginBase):
     def api_run_subscribe(self) -> Dict[str, Any]:
         return self.run_subscribe()
 
-    def _qr_image_data_url(self) -> str:
-        return "data:image/jpeg;base64," + base64.b64encode(self._qr.qr_image()).decode()
-
     def api_qr_start(self) -> Dict[str, Any]:
-        """生成一张全新的二维码（旧码扫过一次即失效，重复调用会换新码）。"""
+        """打开登录弹窗并返回二维码（每次都重新开一个会话，旧码扫过即失效）。"""
         try:
-            self._qr = TencentDocsQrLogin()
-            info = self._qr.start()
-            img = self._qr_image_data_url()
+            self._qr = BrowserQrLogin(self._doc_url)
+            shot, already = self._qr.start()
         except QrLoginError as exc:
-            return {"code": 1, "msg": str(exc)}
-        return {"code": 0, "data": {"uuid": info["uuid"], "qr_base64": img}}
+            return {"code": 1, "msg": f"获取二维码失败：{exc}"}
+        if already:
+            return self.page_qr_collect()
+        if not shot:
+            return {"code": 1, "msg": "未截取到二维码，请重试"}
+        return {"code": 0, "data": {
+            "qr_base64": "data:image/png;base64," + base64.b64encode(shot).decode()}}
+
+    def page_qr_collect(self) -> Dict[str, Any]:
+        """会话已是登录态时，直接收集 Cookie 并保存。"""
+        st = self._qr.check() if self._qr else {}
+        cookie = (st or {}).get("cookie")
+        if not cookie:
+            return {"code": 1, "msg": "已是登录态但未取到 Cookie，请重试"}
+        self._tencent_cookie = cookie
+        self.update_config(self._current_config())
+        if self._qr:
+            self._qr.close()
+        self._qr = None
+        self.refresh_index()
+        return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True}}
 
     def api_qr_check(self) -> Dict[str, Any]:
-        """查询扫码状态；确认后自动换 Cookie。
-
-        - 二维码过期：自动换新码并把新二维码一起返回；
-        - 换取 Cookie 失败：返回详细诊断，并顺手换一张新码方便立刻重试。
-        """
+        """查询扫码状态；确认后自动保存 Cookie。二维码过期会自动附上新码。"""
         if not self._qr:
             return {"code": 1, "msg": "请先点「获取登录二维码」"}
-        try:
-            st = self._qr.poll()
-        except QrLoginError as exc:
-            return {"code": 1, "msg": str(exc)}
-
-        if st["state"] == "confirmed" and st.get("code"):
-            try:
-                cookie = self._qr.finish(st["code"])
-            except QrLoginError as exc:
-                data: Dict[str, Any] = {"state": "failed"}
-                try:  # 该码已被消费，换新码
-                    self._qr.restart()
-                    data["qr_base64"] = self._qr_image_data_url()
-                except QrLoginError:
-                    pass
-                logger.warning(f"115文档订阅与查询：扫码换 Cookie 失败：{exc}")
-                return {"code": 1, "msg": str(exc), "data": data}
+        st = self._qr.check() or {}
+        state = st.get("state")
+        if state == "confirmed":
+            cookie = st.get("cookie") or ""
+            if not cookie:
+                return {"code": 1, "msg": "登录成功但未取到 Cookie，请重新获取二维码"}
             self._tencent_cookie = cookie
             self.update_config(self._current_config())
+            self._qr.close()
             self._qr = None
             self.refresh_index()
-            return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True}}
-
-        if st["state"] == "expired":
-            data = {"state": "expired"}
-            try:
-                self._qr.restart()
-                data["qr_base64"] = self._qr_image_data_url()
-            except QrLoginError as exc:
-                return {"code": 1, "msg": f"二维码已过期且换码失败：{exc}"}
-            return {"code": 0, "data": data}
-
-        return {"code": 0, "data": {"state": st["state"]}}
+            return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True,
+                                        "count": st.get("count")}}
+        data: Dict[str, Any] = {"state": state or "wait"}
+        if st.get("qr_base64"):
+            data["qr_base64"] = st["qr_base64"]
+        if state == "error":
+            data["msg"] = st.get("msg")
+            return {"code": 1, "msg": st.get("msg") or "检查失败", "data": data}
+        return {"code": 0, "data": data}
 
     def stop_service(self):
         if self._scheduler:
