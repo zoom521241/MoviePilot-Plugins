@@ -51,7 +51,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -233,7 +233,7 @@ class Doc115Subscribe(_PluginBase):
 
     def do_transfer(self, rec: Dict[str, Any], to: str = "") -> Tuple[bool, str]:
         """把一条记录转存到 115：to = movie / tv（留空按识别结果）。"""
-        links = rec.get("links") or []
+        links = [(k, u) for k, u in doc_parser.iter_links(rec) if k and u]
         if not links:
             return False, "该条目没有可用链接"
         target = to or self.resolve_media_type(rec)
@@ -408,8 +408,9 @@ class Doc115Subscribe(_PluginBase):
         for i, r in enumerate(self._search_results):
             mt = self.resolve_media_type(r)
             mt_label = "电影" if mt == "movie" else "电视剧"
-            link_lines = "、".join({"115_share": "115分享", "magnet": "磁力", "ed2k": "ed2k"}.get(l["kind"], l["kind"])
-                                  for l in r.get("links", []))
+            link_labels = {"115_share": "115分享", "magnet": "磁力", "ed2k": "ed2k"}
+            link_lines = "、".join(
+                link_labels.get(k, k) for k, _ in doc_parser.iter_links(r))
             info = (f"{r['title']}"
                     f"{'（' + r['year'] + '）' if r.get('year') else ''}"
                     f"｜{mt_label}"

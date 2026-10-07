@@ -220,6 +220,18 @@ def pick_best(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return min(records, key=lambda r: (-quality_score(r), r.get("row", 0)))
 
 
+def iter_links(rec: Dict[str, Any]):
+    """统一遍历记录的链接，兼容两种形态：
+      * 解析器原始形态：[(kind, url), ...]
+      * 索引/接口形态：[{"kind":..., "url":...}, ...]
+    """
+    for item in (rec.get("links") or []):
+        if isinstance(item, dict):
+            yield item.get("kind"), item.get("url")
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            yield item[0], item[1]
+
+
 def search(records: List[Dict[str, Any]], keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
     """按关键词模糊匹配标题（去空格、忽略大小写）。"""
     kw = re.sub(r"\s+", "", (keyword or "")).lower()
