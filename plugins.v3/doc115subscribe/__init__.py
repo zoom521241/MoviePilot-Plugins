@@ -53,7 +53,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.2.5"
+    plugin_version = "0.2.6"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -356,6 +356,35 @@ class Doc115Subscribe(_PluginBase):
         ]
 
     # --- API 实现 -----------------------------------------------------------
+
+    @staticmethod
+    def _cookie_days_left(cookie: str) -> Optional[float]:
+        """从腾讯文档 Cookie 的 uid_key（内嵌 JWT）里解出过期时间，返回剩余天数。"""
+        if not cookie:
+            return None
+        try:
+            import base64 as _b64
+            import json as _json
+            import re as _re
+            import urllib.parse as _up
+            import time as _time
+            kv = dict(p.split("=", 1) for p in cookie.split("; ") if "=" in p)
+            uk = _up.unquote(kv.get("uid_key") or "")
+            m = _re.search(r"eyJ[A-Za-z0-9_.-]{40,}", uk)
+            if not m:
+                return None
+            parts = m.group(0).split(".")
+            if len(parts) < 2:
+                return None
+            seg = parts[1] + "=" * (-len(parts[1]) % 4)
+            info = _json.loads(_b64.urlsafe_b64decode(seg).decode("utf-8", "ignore"))
+            exp = info.get("exp")
+            if not exp:
+                return None
+            return float(exp) - _time.time()
+        except Exception:  # noqa: BLE001
+            return None
+
     def api_status(self) -> Dict[str, Any]:
         if self._enabled and not self._tencent_cookie:
             try:
@@ -370,6 +399,7 @@ class Doc115Subscribe(_PluginBase):
             "enabled": self._enabled,
             "cookie_ready": bool(self._tencent_cookie),
             "p115_ready": bool(self.get_p115_cookie()),
+            "cookie_days_left": self._cookie_days_left(self._tencent_cookie),
             "record_count": s.get("record_count", 0),
             "sheet_count": s.get("sheet_count", 0),
             "built_at_text": built,
