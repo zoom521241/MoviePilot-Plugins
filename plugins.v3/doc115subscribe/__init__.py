@@ -359,7 +359,11 @@ class Doc115Subscribe(_PluginBase):
 
     @staticmethod
     def _cookie_days_left(cookie: str) -> Optional[float]:
-        """从腾讯文档 Cookie 的 uid_key（内嵌 JWT）里解出过期时间，返回剩余天数。"""
+        """从腾讯文档 Cookie 的 uid_key 里解出登录凭证的过期时间，返回剩余天数。
+
+        uid_key 的结构是「二进制前缀 + base64(含 JWT 的文本)」，所以要先整体 base64 解码，
+        再从解出的文本里取 JWT（eyJ...），最后解 payload 里的 exp。
+        """
         if not cookie:
             return None
         try:
@@ -368,20 +372,30 @@ class Doc115Subscribe(_PluginBase):
             import re as _re
             import urllib.parse as _up
             import time as _time
+
             kv = dict(p.split("=", 1) for p in cookie.split("; ") if "=" in p)
             uk = _up.unquote(kv.get("uid_key") or "")
-            m = _re.search(r"eyJ[A-Za-z0-9_.-]{40,}", uk)
+            if not uk:
+                return None
+            # 去掉可能多出来的 '='
+            uk = uk.rstrip("=")
+            if len(uk) % 4 == 1:
+                uk = uk[:-1]
+            try:
+                text = _b64.urlsafe_b64decode(uk + "=" * (-len(uk) % 4)).decode("utf-8", "ignore")
+            except Exception:  # noqa: BLE001
+                text = uk
+            m = _re.search(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+", text) or \
+                _re.search(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+", uk)
             if not m:
                 return None
-            parts = m.group(0).split(".")
-            if len(parts) < 2:
-                return None
-            seg = parts[1] + "=" * (-len(parts[1]) % 4)
+            seg = m.group(0).split(".")[1]
+            seg += "=" * (-len(seg) % 4)
             info = _json.loads(_b64.urlsafe_b64decode(seg).decode("utf-8", "ignore"))
             exp = info.get("exp")
             if not exp:
                 return None
-            return float(exp) - _time.time()
+            return (float(exp) - _time.time()) / 86400
         except Exception:  # noqa: BLE001
             return None
 
