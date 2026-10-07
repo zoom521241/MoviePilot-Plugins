@@ -21,7 +21,10 @@ except Exception:  # noqa: BLE001
     share_extract_payload = None  # type: ignore
     P115_AVAILABLE = False
 
-from link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
+try:
+    from .link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
+except ImportError:  # 直接作为顶层模块加载（脚本/单测）
+    from link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
 
 
 def normalize_115_share(url: str) -> str:

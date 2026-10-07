@@ -7,7 +7,12 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import doc_parser
+# MoviePilot V3 以「包」的形式加载插件（app.plugins.<插件id>），插件目录不在 sys.path 上，
+# 因此插件内部模块必须用相对导入；绝对导入仅在脚本/单测场景下兜底。
+try:
+    from . import doc_parser
+except ImportError:  # 直接作为顶层模块加载（脚本/单测）
+    import doc_parser
 
 # 用户只要求电影参与订阅
 MOVIE_SHEET_HINT = ("最新电影",)
