@@ -51,7 +51,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.5"
+    plugin_version = "0.2.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -311,191 +311,116 @@ class Doc115Subscribe(_PluginBase):
                               text=f"本轮为 {added} 部电影订阅完成转存")
         return {"code": 0, "data": {"matched": len(pairs), "transferred": added}}
 
-    # ---- 表单 --------------------------------------------------------------
+    # ---- 表单 / 页面（Vue 联邦模式） --------------------------------------
+    @staticmethod
+    def get_render_mode():
+        """声明本插件使用 Vue 联邦组件渲染（Vuetify 页面无法把输入框的值传给接口）。"""
+        return "vue", "dist/assets"
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return [
-            {"component": "VForm", "content": [
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                        {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                        {"component": "VSwitch", "props": {"model": "subscribe_enabled", "label": "启用电影订阅同步"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                        {"component": "VSwitch", "props": {"model": "use_agent", "label": "类型不确定时调用MP智能体"}}]},
-                ]},
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12}, "content": [
-                        {"component": "VTextField", "props": {"model": "doc_url", "label": "腾讯文档链接",
-                                                              "placeholder": "https://docs.qq.com/sheet/xxxx"}}]}]},
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12}, "content": [
-                        {"component": "VTextarea", "props": {"model": "tencent_cookie", "label": "腾讯文档 Cookie",
-                                                             "rows": 3,
-                                                             "hint": "推荐在插件详情页点扫码登录自动获取；也可手动粘贴。仅本地保存"}}]}]},
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12}, "content": [
-                        {"component": "VTextarea", "props": {"model": "p115_cookie",
-                                                             "label": "115 Cookie（留空则自动复用115网盘Plus）",
-                                                             "rows": 2}}]}]},
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VTextField", "props": {"model": "movie_path", "label": "115 电影下载目录"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VTextField", "props": {"model": "tv_path", "label": "115 电视剧下载目录"}}]}]},
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VTextField", "props": {"model": "index_cron", "label": "索引刷新 cron",
-                                                              "placeholder": "0 6 * * *"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VTextField", "props": {"model": "subscribe_cron", "label": "订阅同步 cron",
-                                                              "placeholder": "0 21 * * *"}}]}]},
-            ]}
-        ], self._current_config()
+        """Vue 模式下配置表单由前端组件渲染，这里只返回默认配置模型。"""
+        return [], self._current_config()
 
-    # ---- 详情页 ------------------------------------------------------------
     def get_page(self) -> Optional[List[dict]]:
-        nodes: List[dict] = []
-
-        # 未启用时不再直接返回提示（否则界面全空、看不到任何入口），
-        # 而是把状态与入口照常渲染出来，只在顶部给出明确提示。
-        if not self._enabled:
-            nodes.append({"component": "VAlert", "props": {
-                "type": "warning", "variant": "tonal",
-                "text": "插件尚未启用：请到「设置」页打开「启用插件」并保存；"
-                        "启用后本页的扫码登录、刷新索引、搜索等功能才可正常使用。"}})
-        if self._page_msg:
-            nodes.append({"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "text": self._page_msg}})
-
-        s = self._index.summary() if self._index else {"record_count": 0, "sheet_count": 0}
-        age = f"{self._index.age_hours:.1f} 小时前" if self._index else "尚未建立"
-        nodes.append({"component": "VAlert", "props": {
-            "type": "success" if self._tencent_cookie else "warning",
-            "variant": "tonal",
-            "text": (f"腾讯文档 Cookie：{'已配置' if self._tencent_cookie else '未配置（请用下方扫码登录）'}｜"
-                     f"本地索引：{s['record_count']} 条 / {s['sheet_count']} 张表，更新于 {age}")}})
-        nodes.append({"component": "VRow", "props": {"class": "mb-2", "noGutters": True}, "content": [
-            {"component": "VCol", "props": {"cols": 6, "md": 3}, "content": [
-                {"component": "VBtn", "props": {"color": "primary", "block": True, "text": "刷新索引"},
-                 "events": {"click": {"api": "plugin/Doc115Subscribe/page_refresh_index", "method": "post"}}}]},
-            {"component": "VCol", "props": {"cols": 6, "md": 3}, "content": [
-                {"component": "VBtn", "props": {"color": "primary", "block": True, "text": "获取登录二维码"},
-                 "events": {"click": {"api": "plugin/Doc115Subscribe/page_qr_start", "method": "post"}}}]},
-            {"component": "VCol", "props": {"cols": 6, "md": 3}, "content": [
-                {"component": "VBtn", "props": {"color": "secondary", "block": True, "text": "扫码后点我完成登录"},
-                 "events": {"click": {"api": "plugin/Doc115Subscribe/page_qr_check", "method": "post"}}}]},
-            {"component": "VCol", "props": {"cols": 6, "md": 3}, "content": [
-                {"component": "VBtn", "props": {"color": "secondary", "block": True, "text": "手动同步电影订阅"},
-                 "events": {"click": {"api": "plugin/Doc115Subscribe/page_run_subscribe", "method": "post"}}}]},
-        ]})
-
-        if self._qr_img:
-            nodes.append({"component": "VCard", "props": {"variant": "outlined", "class": "mb-2"}, "content": [
-                {"component": "VCardText", "props": {"class": "text-center"}, "content": [
-                    {"component": "VImg", "props": {"src": self._qr_img, "width": 220, "height": 220,
-                                                    "class": "mx-auto"}},
-                    {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                                     "text": "用微信扫码登录腾讯文档；扫完点上方“扫码后点我完成登录”。"}}]}]})
-
-        nodes.append({"component": "VCard", "props": {"variant": "outlined", "class": "mb-2"}, "content": [
-            {"component": "VCardText", "content": [
-                {"component": "VRow", "props": {"align": "center", "noGutters": True}, "content": [
-                    {"component": "VCol", "props": {"cols": 12, "md": 9}, "content": [
-                        {"component": "VTextField", "props": {"model": "keyword", "label": "输入影视名称搜索",
-                                                             "hideDetails": True, "clearable": True}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                        {"component": "VBtn", "props": {"color": "primary", "block": True, "text": "搜索"},
-                         "events": {"click": {"api": "plugin/Doc115Subscribe/page_search",
-                                              "method": "post",
-                                              "params": {"keyword": "keyword"}}}}]}]}]}]})
-
-        for i, r in enumerate(self._search_results):
-            mt = self.resolve_media_type(r)
-            mt_label = "电影" if mt == "movie" else "电视剧"
-            link_labels = {"115_share": "115分享", "magnet": "磁力", "ed2k": "ed2k"}
-            link_lines = "、".join(
-                link_labels.get(k, k) for k, _ in doc_parser.iter_links(r))
-            info = (f"{r['title']}"
-                    f"{'（' + r['year'] + '）' if r.get('year') else ''}"
-                    f"｜{mt_label}"
-                    f"{'｜TMDB:' + str(r['tmdbid']) if r.get('tmdbid') else ''}"
-                    f"｜4K分:{r.get('quality_score')}"
-                    f"{'｜打包链接' if r.get('bundle') else ''}"
-                    f"｜来源表：{r.get('sheet')}"
-                    f"｜链接：{link_lines}")
-            nodes.append({"component": "VCard", "props": {"variant": "outlined", "class": "mb-2"}, "content": [
-                {"component": "VCardText", "props": {"class": "py-2"}, "content": [
-                    {"component": "VRow", "props": {"align": "center", "noGutters": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
-                            {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                                             "density": "compact", "text": info}}]},
-                        {"component": "VCol", "props": {"cols": 6, "md": 2}, "content": [
-                            {"component": "VBtn", "props": {"color": "primary", "block": True, "size": "small",
-                                                            "text": "转存到电影"},
-                             "events": {"click": {"api": f"plugin/Doc115Subscribe/page_transfer?index={i}&to=movie",
-                                                  "method": "post"}}}]},
-                        {"component": "VCol", "props": {"cols": 6, "md": 2}, "content": [
-                            {"component": "VBtn", "props": {"color": "secondary", "block": True, "size": "small",
-                                                            "text": "转存到电视剧"},
-                             "events": {"click": {"api": f"plugin/Doc115Subscribe/page_transfer?index={i}&to=tv",
-                                                  "method": "post"}}}]}]}]}]})
-        return nodes
+        """Vue 模式下详情页由前端组件渲染。"""
+        return []
 
     # ---- API ---------------------------------------------------------------
     def get_api(self) -> List[Dict[str, Any]]:
         return [
-            {"path": "/refresh_index", "endpoint": self.refresh_index,
+            {"path": "/status", "endpoint": self.api_status,
+             "auth": "bear", "methods": ["GET"], "summary": "插件状态"},
+            {"path": "/get_config", "endpoint": self.api_get_config,
+             "auth": "bear", "methods": ["GET"], "summary": "读取配置"},
+            {"path": "/save_config", "endpoint": self.api_save_config,
+             "auth": "bear", "methods": ["POST"], "summary": "保存配置"},
+            {"path": "/refresh_index", "endpoint": self.api_refresh_index,
              "auth": "bear", "methods": ["POST"], "summary": "刷新本地索引"},
             {"path": "/search", "endpoint": self.api_search,
-             "auth": "bear", "methods": ["GET"], "summary": "搜索文档资源"},
+             "auth": "bear", "methods": ["POST"], "summary": "搜索文档资源"},
             {"path": "/transfer", "endpoint": self.api_transfer,
-             "auth": "bear", "methods": ["POST"], "summary": "按链接转存到115（movie/tv）"},
+             "auth": "bear", "methods": ["POST"], "summary": "转存到 115"},
+            {"path": "/run_subscribe", "endpoint": self.api_run_subscribe,
+             "auth": "bear", "methods": ["POST"], "summary": "手动同步电影订阅"},
             {"path": "/qr_start", "endpoint": self.api_qr_start,
              "auth": "bear", "methods": ["GET"], "summary": "生成扫码登录二维码"},
-            {"path": "/qr_status", "endpoint": self.api_qr_status,
-             "auth": "bear", "methods": ["GET"], "summary": "查询扫码状态（成功后自动保存Cookie）"},
-            {"path": "/page_refresh_index", "endpoint": self.page_refresh_index,
-             "auth": "bear", "methods": ["POST"], "summary": "详情页-刷新索引"},
-            {"path": "/page_qr_start", "endpoint": self.page_qr_start,
-             "auth": "bear", "methods": ["POST"], "summary": "详情页-获取二维码"},
-            {"path": "/page_qr_check", "endpoint": self.page_qr_check,
-             "auth": "bear", "methods": ["POST"], "summary": "详情页-检查扫码结果"},
-            {"path": "/page_search", "endpoint": self.page_search,
-             "auth": "bear", "methods": ["POST"], "summary": "详情页-搜索"},
-            {"path": "/page_transfer", "endpoint": self.page_transfer,
-             "auth": "bear", "methods": ["POST"], "summary": "详情页-转存"},
-            {"path": "/page_run_subscribe", "endpoint": self.page_run_subscribe,
-             "auth": "bear", "methods": ["POST"], "summary": "详情页-手动同步电影订阅"},
+            {"path": "/qr_status", "endpoint": self.api_qr_check,
+             "auth": "bear", "methods": ["GET"], "summary": "查询扫码状态"},
         ]
 
-    # --- JSON API -----------------------------------------------------------
-    def api_search(self, keyword: str = "") -> Dict[str, Any]:
+    # --- API 实现 -----------------------------------------------------------
+    def api_status(self) -> Dict[str, Any]:
+        s = self._index.summary() if self._index else {"record_count": 0, "sheet_count": 0}
+        built = "尚未建立"
+        if self._index and self._index.built_at:
+            built = datetime.fromtimestamp(self._index.built_at).strftime("%Y-%m-%d %H:%M")
+        return {"code": 0, "data": {
+            "enabled": self._enabled,
+            "cookie_ready": bool(self._tencent_cookie),
+            "p115_ready": bool(self.get_p115_cookie()),
+            "record_count": s.get("record_count", 0),
+            "sheet_count": s.get("sheet_count", 0),
+            "built_at_text": built,
+        }}
+
+    def api_get_config(self) -> Dict[str, Any]:
+        return {"code": 0, "data": self._current_config()}
+
+    def api_save_config(self, payload: dict = None) -> Dict[str, Any]:
+        conf = dict(payload or {})
+        if not conf:
+            return {"code": 1, "msg": "没有收到配置内容"}
+        merged = self._current_config()
+        merged.update(conf)
+        self.update_config(merged)
+        # 让新配置立即生效（与 MP 的 init 流程一致）
+        try:
+            self.init_plugin(merged)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"115文档订阅与查询：重新初始化失败：{exc}")
+        return {"code": 0, "msg": "配置已保存", "data": self._current_config()}
+
+    def api_refresh_index(self) -> Dict[str, Any]:
+        return self.refresh_index()
+
+    def api_search(self, keyword: str = "", payload: dict = None) -> Dict[str, Any]:
+        kw = (keyword or (payload or {}).get("keyword") or "").strip()
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}
         if not self._index:
-            return {"code": 1, "msg": "本地索引尚未建立，请先刷新索引"}
-        results = self._index.search(keyword)
+            return {"code": 1, "msg": "本地索引尚未建立，请先点「刷新索引」"}
+        if not kw:
+            return {"code": 1, "msg": "请输入影视名称"}
+        results = self._index.search(kw, limit=30)
         for r in results:
             r["media_type"] = self.resolve_media_type(r)
         return {"code": 0, "data": results}
 
-    def api_transfer(self, keyword: str = "", to: str = "", index: int = -1) -> Dict[str, Any]:
-        """按关键词搜索后转存最优一条，或按 index 转存上次搜索结果。"""
-        if not self._index:
-            return {"code": 1, "msg": "本地索引尚未建立"}
+    def api_transfer(self, payload: dict = None, index: int = -1, to: str = "",
+                     keyword: str = "") -> Dict[str, Any]:
+        """前端传 {keyword, index, to}：后端按同样的关键词重跑一次搜索再取下标对应的记录。"""
+        body = payload or {}
+        kw = (body.get("keyword") or keyword or "").strip()
+        target = body.get("to") or to or ""
+        raw_idx = body.get("index", index)
         try:
-            idx = int(index)
+            idx = int(raw_idx)
         except (TypeError, ValueError):
             idx = -1
-        if 0 <= idx < len(self._search_results):
-            rec = self._search_results[idx]
-        else:
-            hits = self._index.search(keyword)
-            if not hits:
-                return {"code": 1, "msg": f"未找到：{keyword}"}
-            rec = doc_parser.pick_best(hits) or hits[0]
-        ok, msg = self.do_transfer(rec, to=to)
+        if not self._enabled:
+            return {"code": 1, "msg": "插件未启用"}
+        if not self._index:
+            return {"code": 1, "msg": "本地索引尚未建立"}
+        if not kw:
+            return {"code": 1, "msg": "缺少搜索关键词"}
+        hits = self._index.search(kw, limit=30)
+        if idx < 0 or idx >= len(hits):
+            return {"code": 1, "msg": "结果已失效，请重新搜索"}
+        ok, msg = self.do_transfer(hits[idx], to=target)
         return {"code": 0 if ok else 1, "msg": msg}
+
+    def api_run_subscribe(self) -> Dict[str, Any]:
+        return self.run_subscribe()
 
     def api_qr_start(self) -> Dict[str, Any]:
         try:
@@ -508,87 +433,24 @@ class Doc115Subscribe(_PluginBase):
             "uuid": info["uuid"],
             "qr_base64": "data:image/jpeg;base64," + base64.b64encode(img).decode()}}
 
-    def api_qr_status(self) -> Dict[str, Any]:
-        return self.page_qr_check()
-
-    # --- 详情页动作 ---------------------------------------------------------
-    def page_refresh_index(self) -> Dict[str, Any]:
-        res = self.refresh_index()
-        self._page_msg = ("索引刷新完成" if res.get("code") == 0
-                          else f"索引刷新失败：{res.get('msg')}")
-        return res
-
-    def page_qr_start(self) -> Dict[str, Any]:
-        res = self.api_qr_start()
-        if res.get("code") == 0:
-            self._qr_img = res["data"]["qr_base64"]
-            self._page_msg = "已生成二维码，请用微信扫码（也可先在设置页填 Cookie）"
-        else:
-            self._page_msg = f"获取二维码失败：{res.get('msg')}"
-        return res
-
-    def page_qr_check(self) -> Dict[str, Any]:
+    def api_qr_check(self) -> Dict[str, Any]:
         if not self._qr:
-            self._page_msg = "请先点击“获取登录二维码”"
-            return {"code": 1, "msg": self._page_msg}
+            return {"code": 1, "msg": "请先点「获取登录二维码」"}
         try:
             st = self._qr.poll()
         except QrLoginError as exc:
-            self._page_msg = f"检查失败：{exc}"
-            return {"code": 1, "msg": self._page_msg}
+            return {"code": 1, "msg": str(exc)}
         if st["state"] != "confirmed" or not st.get("code"):
-            self._page_msg = {"wait": "尚未扫描，请用微信扫码",
-                              "scanned": "已扫描，请在手机上确认登录",
-                              "expired": "二维码已过期，请重新获取"}.get(st["state"], "等待中")
             return {"code": 0, "data": {"state": st["state"]}}
         try:
             cookie = self._qr.finish(st["code"])
         except QrLoginError as exc:
-            self._page_msg = f"换取 Cookie 失败：{exc}"
-            return {"code": 1, "msg": self._page_msg}
+            return {"code": 1, "msg": f"换取 Cookie 失败：{exc}"}
         self._tencent_cookie = cookie
         self.update_config(self._current_config())
         self._qr = None
-        self._qr_img = ""
-        self._page_msg = "登录成功，Cookie 已保存；正在刷新索引…"
         self.refresh_index()
-        self._page_msg = "登录成功，Cookie 已保存，索引已刷新"
         return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True}}
-
-    def page_search(self, keyword: str = "", **kwargs) -> Dict[str, Any]:
-        kw = keyword or (kwargs.get("data") or {}).get("keyword") or ""
-        if not self._index:
-            self._page_msg = "索引尚未建立，请先点“刷新索引”"
-            self._search_results = []
-            return {"code": 1, "msg": self._page_msg}
-        if not kw:
-            self._page_msg = "请输入影视名称"
-            self._search_results = []
-            return {"code": 1, "msg": self._page_msg}
-        self._search_results = self._index.search(kw, limit=30)
-        self._page_msg = f"“{kw}” 找到 {len(self._search_results)} 条结果"
-        return {"code": 0, "data": {"count": len(self._search_results)}}
-
-    def page_transfer(self, index: int = -1, to: str = "") -> Dict[str, Any]:
-        try:
-            idx = int(index)
-        except (TypeError, ValueError):
-            idx = -1
-        if idx < 0 or idx >= len(self._search_results):
-            self._page_msg = "结果已失效，请重新搜索"
-            return {"code": 1, "msg": self._page_msg}
-        ok, msg = self.do_transfer(self._search_results[idx], to=to)
-        self._page_msg = ("OK " if ok else "FAIL ") + msg
-        return {"code": 0 if ok else 1, "msg": msg}
-
-    def page_run_subscribe(self) -> Dict[str, Any]:
-        res = self.run_subscribe()
-        if res.get("code") == 0:
-            self._page_msg = (f"订阅同步完成：命中 {res.get('data', {}).get('matched', 0)} 条，"
-                              f"转存 {res.get('data', {}).get('transferred', 0)} 条")
-        else:
-            self._page_msg = f"订阅同步失败：{res.get('msg')}"
-        return res
 
     def stop_service(self):
         if self._scheduler:
