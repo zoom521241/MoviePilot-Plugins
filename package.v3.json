@@ -3,7 +3,7 @@
     "name": "115文档订阅与查询",
     "description": "读取腾讯文档追更表：定时为电影订阅把资源转存到 115 网盘，并支持插件内跨表搜索、一键转存。文档禁用导出也能读取；支持微信扫码登录、115 分享转存与磁力/ed2k 离线下载。",
     "labels": "文档,腾讯文档,115网盘,订阅,搜索,自动订阅,V3",
-    "version": "0.1.3",
+    "version": "0.1.4",
     "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
@@ -11,6 +11,7 @@
     "level": 1,
     "v3": true,
     "history": {
+      "v0.1.4": "修复小工作表整张读不到的问题。取主数据段时原先只认长度 >10000 字节的字段，行数少的工作表整段都不足该阈值，会被误判为「空表或接口已变更」而整张跳过（实测 90 张表里有 29 张命中，含部分剧集/合集表）。现改为阈值优先、取不到时退回选「最大的主数据段」，小表也能正常解析。",
       "v0.1.3": "修复转存与详情页渲染对链接数据形态不一致的问题。本地索引/接口输出的 links 是 [{\"kind\":..,\"url\":..}]（字典），而转存逻辑按 [(kind,url)]（元组）解包，导致转存时把字典键名当成链接类型（表现为「不支持的链接类型」而静默失败），详情页渲染原始记录时也会抛 TypeError。现新增 doc_parser.iter_links() 统一兼容两种形态，转存与详情页均改用它。",
       "v0.1.2": "修正 115 Cookie 的复用来源。原先只读 plugin.P115Disk 的 cookie 字段，但实测多数环境并未配置「115网盘储存」，115 Cookie 实际保存在「115网盘STRM助手」(plugin.P115StrmHelper) 的 cookies 字段里，导致复用失败、转存时报缺少 Cookie。现改为按顺序复用：plugin.P115StrmHelper.cookies（115网盘STRM助手）→ plugin.P115Disk.cookie（115网盘储存）→ plugin.P115StrgmSub.cookies（115网盘订阅追更），本插件自行填写的 Cookie 始终优先。",
       "v0.1.1": "修复安装后加载失败：MoviePilot V3 以「包」的形式加载插件（app.plugins.<插件id>），插件目录不在 sys.path 上，而 subscribe_sync.py / p115_transfer.py 使用了绝对导入（import doc_parser / from link_router import ...），导致 ModuleNotFoundError: No module named 'doc_parser'（异常被 __init__ 的兜底分支再次抛出，表现为安装失败）。现统一改为相对导入并保留脚本场景兜底。同时修正插件图标地址（原 icons/115.png 为 404）。",

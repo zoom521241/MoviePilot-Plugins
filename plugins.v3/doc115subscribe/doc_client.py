@@ -144,10 +144,20 @@ def _decode_block(related_b64: str) -> Tuple[List[Tuple[int, int, int, int]], Li
     top = pb_msg(raw, 1)
     if top is None:
         raise DocError("数据块结构不符预期")
+    # 主数据段通常是长度最大的那个 f5；小表（行数少）可能整段都不足 POOL_MIN_LEN，
+    # 所以先按阈值挑，挑不到就退回“最大的那个 f5”，否则小表会被误判为空表。
     big = None
+    fallback = None
     for field, kind, value in pb_fields(top):
-        if field == 5 and kind == "l" and len(value) > POOL_MIN_LEN:
+        if field != 5 or kind != "l":
+            continue
+        if len(value) > POOL_MIN_LEN:
             big = value
+            break
+        if fallback is None or len(value) > len(fallback):
+            fallback = value
+    if big is None:
+        big = fallback
     if big is None:
         raise DocError("数据块里找不到主数据段（空表或接口已变更）")
     node = pb_msg(big, 19)
