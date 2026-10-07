@@ -1,30 +1,31 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
 
-const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createTextVNode:_createTextVNode,toDisplayString:_toDisplayString,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,normalizeClass:_normalizeClass,createBlock:_createBlock,withKeys:_withKeys,renderList:_renderList,Fragment:_Fragment} = await importShared('vue');
+const {toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,createElementVNode:_createElementVNode,createVNode:_createVNode,createElementBlock:_createElementBlock,normalizeClass:_normalizeClass,withKeys:_withKeys,renderList:_renderList,Fragment:_Fragment} = await importShared('vue');
 
 
 const _hoisted_1 = { class: "doc115-page" };
-const _hoisted_2 = {
+const _hoisted_2 = { class: "text-subtitle-1 font-weight-medium" };
+const _hoisted_3 = {
   key: 0,
   class: "font-weight-medium"
 };
-const _hoisted_3 = { class: "text-primary font-weight-medium" };
 const _hoisted_4 = { class: "text-primary font-weight-medium" };
-const _hoisted_5 = ["src"];
-const _hoisted_6 = { class: "text-caption mt-2" };
-const _hoisted_7 = { class: "font-weight-bold text-body-1 text-primary" };
-const _hoisted_8 = {
+const _hoisted_5 = { class: "text-primary font-weight-medium" };
+const _hoisted_6 = ["src"];
+const _hoisted_7 = { class: "text-caption mt-2" };
+const _hoisted_8 = { class: "font-weight-bold text-body-1 text-primary" };
+const _hoisted_9 = {
   key: 0,
   class: "text-medium-emphasis font-weight-regular"
 };
-const _hoisted_9 = { class: "text-caption mt-1" };
-const _hoisted_10 = { class: "text-purple-darken-2" };
-const _hoisted_11 = {
+const _hoisted_10 = { class: "text-caption mt-1" };
+const _hoisted_11 = { class: "text-purple-darken-2" };
+const _hoisted_12 = {
   key: 1,
   class: "text-grey-darken-1"
 };
-const _hoisted_12 = { class: "text-caption mt-1" };
 const _hoisted_13 = { class: "text-caption mt-1" };
+const _hoisted_14 = { class: "text-caption mt-1" };
 
 const {computed,onBeforeUnmount,onMounted,reactive,ref,watch} = await importShared('vue');
 
@@ -44,7 +45,7 @@ const props = __props;
 const emit = __emit;
 
 const status = reactive({
-  cookie_ready: false, p115_ready: false, cookie_days_left: null,
+  version: '', cookie_ready: false, p115_ready: false, cookie_days_left: null,
   record_count: 0, sheet_count: 0, built_at_text: '尚未建立',
 });
 const msg = ref('');
@@ -98,10 +99,16 @@ const cookieAlertType = computed(() => {
 });
 
 // ---- 字段配色 ----
-const LINK_COLORS = { '115_share': 'deep-purple', magnet: 'blue-darken-2', ed2k: 'teal-darken-2', http: 'grey' };
-const LINK_NAMES = { '115_share': '115分享', magnet: '磁力', ed2k: 'ed2k', http: '网页' };
-function linkColor(kind) { return LINK_COLORS[kind] || 'grey' }
-function linkName(kind) { return LINK_NAMES[kind] || kind }
+// 链接类型：颜色 + 图标双重区分，一眼能看出是 115 分享还是磁力
+const LINK_STYLE = {
+  '115_share': { color: 'deep-purple', name: '115分享', icon: 'mdi-cloud-download' },
+  magnet: { color: 'blue-darken-3', name: '磁力', icon: 'mdi-magnet' },
+  ed2k: { color: 'teal-darken-3', name: 'ed2k', icon: 'mdi-link-variant' },
+  http: { color: 'grey-darken-2', name: '网页', icon: 'mdi-web' },
+};
+function linkColor(kind) { return (LINK_STYLE[kind] || {}).color || 'grey' }
+function linkName(kind) { return (LINK_STYLE[kind] || {}).name || kind }
+function linkIcon(kind) { return (LINK_STYLE[kind] || {}).icon || 'mdi-link' }
 
 const SPEC_RE = /(4K|2160[pP]|1080[pP]|720[pP]|REMUX|UHD|HDR10\+?|HDR|杜比视界|Dolby\s?Vision|Atmos|蓝光原盘|原盘|中文字幕|简繁|简体|繁体|国语|双语|粤语|无中字)/gi;
 function specTokens(text) {
@@ -349,6 +356,7 @@ onMounted(loadStatus);
 onBeforeUnmount(stopQrTimer);
 
 return (_ctx, _cache) => {
+  const _component_v_chip = _resolveComponent("v-chip");
   const _component_v_col = _resolveComponent("v-col");
   const _component_v_icon = _resolveComponent("v-icon");
   const _component_v_btn = _resolveComponent("v-btn");
@@ -357,7 +365,6 @@ return (_ctx, _cache) => {
   const _component_v_card_text = _resolveComponent("v-card-text");
   const _component_v_card = _resolveComponent("v-card");
   const _component_v_text_field = _resolveComponent("v-text-field");
-  const _component_v_chip = _resolveComponent("v-chip");
   const _component_v_spacer = _resolveComponent("v-spacer");
   const _component_v_btn_toggle = _resolveComponent("v-btn-toggle");
   const _component_v_card_title = _resolveComponent("v-card-title");
@@ -371,9 +378,25 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_col, { cols: "10" }, {
-          default: _withCtx(() => [...(_cache[11] || (_cache[11] = [
-            _createElementVNode("div", { class: "text-subtitle-1 font-weight-medium" }, "115文档订阅与查询", -1)
-          ]))]),
+          default: _withCtx(() => [
+            _createElementVNode("div", _hoisted_2, [
+              _cache[11] || (_cache[11] = _createTextVNode(" 115文档订阅与查询 ", -1)),
+              (status.version)
+                ? (_openBlock(), _createBlock(_component_v_chip, {
+                    key: 0,
+                    size: "x-small",
+                    color: "grey-darken-1",
+                    variant: "flat",
+                    class: "ml-1"
+                  }, {
+                    default: _withCtx(() => [
+                      _createTextVNode(" 前端 v" + _toDisplayString(status.version), 1)
+                    ]),
+                    _: 1
+                  }))
+                : _createCommentVNode("", true)
+            ])
+          ]),
           _: 1
         }),
         _createVNode(_component_v_col, {
@@ -414,14 +437,14 @@ return (_ctx, _cache) => {
         _createElementVNode("div", null, [
           _createTextVNode(" 腾讯文档 Cookie：" + _toDisplayString(cookieText.value) + " ", 1),
           (cookieDays.value !== null && cookieDays.value <= 5)
-            ? (_openBlock(), _createElementBlock("span", _hoisted_2, " —— 即将到期，请重新扫码登录 "))
+            ? (_openBlock(), _createElementBlock("span", _hoisted_3, " —— 即将到期，请重新扫码登录 "))
             : _createCommentVNode("", true)
         ]),
         _createElementVNode("div", null, [
           _cache[13] || (_cache[13] = _createTextVNode(" 本地索引：", -1)),
-          _createElementVNode("span", _hoisted_3, _toDisplayString(status.record_count), 1),
+          _createElementVNode("span", _hoisted_4, _toDisplayString(status.record_count), 1),
           _cache[14] || (_cache[14] = _createTextVNode(" 条 / ", -1)),
-          _createElementVNode("span", _hoisted_4, _toDisplayString(status.sheet_count), 1),
+          _createElementVNode("span", _hoisted_5, _toDisplayString(status.sheet_count), 1),
           _createTextVNode(" 张表， 更新于 " + _toDisplayString(status.built_at_text) + " ｜115 Cookie：", 1),
           _createElementVNode("span", {
             class: _normalizeClass(status.p115_ready ? 'text-green-darken-2' : 'text-red-darken-2')
@@ -566,8 +589,8 @@ return (_ctx, _cache) => {
                   src: qrImage.value,
                   style: {"width":"220px","height":"220px","display":"block","margin":"0 auto"},
                   alt: "扫码登录"
-                }, null, 8, _hoisted_5),
-                _createElementVNode("div", _hoisted_6, "用微信扫码登录腾讯文档（" + _toDisplayString(qrTip.value) + "）", 1),
+                }, null, 8, _hoisted_6),
+                _createElementVNode("div", _hoisted_7, "用微信扫码登录腾讯文档（" + _toDisplayString(qrTip.value) + "）", 1),
                 _cache[19] || (_cache[19] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 二维码约 2~3 分钟过期，过期会自动换新；扫过一次后旧码即失效。 ", -1))
               ]),
               _: 1
@@ -765,13 +788,13 @@ return (_ctx, _cache) => {
                                 md: "8"
                               }, {
                                 default: _withCtx(() => [
-                                  _createElementVNode("div", _hoisted_7, [
+                                  _createElementVNode("div", _hoisted_8, [
                                     _createTextVNode(_toDisplayString(r.title) + " ", 1),
                                     (r.year)
-                                      ? (_openBlock(), _createElementBlock("span", _hoisted_8, "（" + _toDisplayString(r.year) + "）", 1))
+                                      ? (_openBlock(), _createElementBlock("span", _hoisted_9, "（" + _toDisplayString(r.year) + "）", 1))
                                       : _createCommentVNode("", true)
                                   ]),
-                                  _createElementVNode("div", _hoisted_9, [
+                                  _createElementVNode("div", _hoisted_10, [
                                     _createVNode(_component_v_chip, {
                                       size: "x-small",
                                       color: r.media_type === 'movie' ? 'indigo' : 'teal',
@@ -795,12 +818,12 @@ return (_ctx, _cache) => {
                                           _: 1
                                         }))
                                       : _createCommentVNode("", true),
-                                    _createElementVNode("span", _hoisted_10, "来源：" + _toDisplayString(r.sheet), 1),
+                                    _createElementVNode("span", _hoisted_11, "来源：" + _toDisplayString(r.sheet), 1),
                                     (r.tmdbid)
-                                      ? (_openBlock(), _createElementBlock("span", _hoisted_11, "｜TMDB：" + _toDisplayString(r.tmdbid), 1))
+                                      ? (_openBlock(), _createElementBlock("span", _hoisted_12, "｜TMDB：" + _toDisplayString(r.tmdbid), 1))
                                       : _createCommentVNode("", true)
                                   ]),
-                                  _createElementVNode("div", _hoisted_12, [
+                                  _createElementVNode("div", _hoisted_13, [
                                     _cache[29] || (_cache[29] = _createElementVNode("span", { class: "text-medium-emphasis" }, "规格：", -1)),
                                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(specTokens(r.qtext), (tk, ti) => {
                                       return (_openBlock(), _createElementBlock("span", {
@@ -809,20 +832,22 @@ return (_ctx, _cache) => {
                                       }, _toDisplayString(tk.text), 3))
                                     }), 128))
                                   ]),
-                                  _createElementVNode("div", _hoisted_13, [
+                                  _createElementVNode("div", _hoisted_14, [
                                     _cache[30] || (_cache[30] = _createElementVNode("span", { class: "text-medium-emphasis" }, "链接：", -1)),
                                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList((r.links || []), (lk, li) => {
                                       return (_openBlock(), _createBlock(_component_v_chip, {
                                         key: li,
-                                        size: "x-small",
+                                        size: "small",
+                                        variant: "flat",
                                         color: linkColor(lk.kind),
+                                        "prepend-icon": linkIcon(lk.kind),
                                         class: "mr-1"
                                       }, {
                                         default: _withCtx(() => [
                                           _createTextVNode(_toDisplayString(linkName(lk.kind)), 1)
                                         ]),
                                         _: 2
-                                      }, 1032, ["color"]))
+                                      }, 1032, ["color", "prepend-icon"]))
                                     }), 128))
                                   ])
                                 ]),
