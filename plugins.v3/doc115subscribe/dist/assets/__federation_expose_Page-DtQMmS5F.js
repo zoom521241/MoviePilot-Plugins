@@ -60,6 +60,17 @@ function linkNames(links) {
   return (links || []).map((l) => map[l.kind] || l.kind).join('、') || '无'
 }
 
+function describeError(e) {
+  if (!e) return '未知错误'
+  const parts = [];
+  if (e.message) parts.push(e.message);
+  if (e.response && e.response.status) parts.push(`HTTP ${e.response.status}`);
+  if (e.response && e.response.data) {
+    try { parts.push(JSON.stringify(e.response.data).slice(0, 200)); } catch (_) { /* ignore */ }
+  }
+  return parts.join(' | ') || String(e)
+}
+
 function unwrap(res) {
   if (res && typeof res === 'object' && 'code' in res) return res
   return { code: 0, msg: '', data: res }
@@ -78,7 +89,7 @@ async function refreshIndex() {
   busy.refresh = true;
   setMsg('正在刷新索引（90 张表，约 4~5 分钟），请稍候…');
   try {
-    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/refresh_index'));
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/refresh_index', {}, { timeout: 900000 }));
     if (res.code === 0) {
       const d = res.data || {};
       setMsg(`索引刷新完成：${d.record_count || 0} 条记录 / ${d.sheet_count || 0} 张表`, 'success');
@@ -87,7 +98,7 @@ async function refreshIndex() {
       setMsg(res.msg || '索引刷新失败', 'error');
     }
   } catch (e) {
-    setMsg(`索引刷新失败：${e.message || e}`, 'error');
+    setMsg(`索引刷新失败：${describeError(e)}`, 'error');
   } finally {
     busy.refresh = false;
     emit('action');
@@ -118,28 +129,32 @@ function startQrTimer() {
 }
 
 async function startQr(silent = false) {
+  if (silent !== true) silent = false;
   busy.qr = !silent;
+  stopQrTimer();
+  if (!silent) setMsg('正在打开登录页并生成二维码（约 10~20 秒），请稍候…');
   try {
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_start'));
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_start', { timeout: 180000 }));
     if (res.code === 0 && res.data && res.data.qr_base64) {
       qrImage.value = res.data.qr_base64;
       qrTip.value = '等待扫码';
-      if (!silent) setMsg('二维码已生成，请用微信扫码（扫完会自动完成登录）');
+      setMsg('二维码已生成，请用微信扫码（扫完会自动完成登录）');
       startQrTimer();
-    } else if (!silent) {
+    } else {
       setMsg(res.msg || '获取二维码失败', 'error');
     }
   } catch (e) {
-    if (!silent) setMsg(`获取二维码失败：${e.message || e}`, 'error');
+    setMsg(`获取二维码失败：${describeError(e)}`, 'error');
   } finally {
     busy.qr = false;
   }
 }
 
 async function checkQr(silent = false) {
-  if (!silent) busy.check = true;
+  if (silent !== true) silent = false;
+  busy.check = !silent;
   try {
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_status'));
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_status', { timeout: 120000 }));
     const data = res.data || {};
     if (res.code === 0 && data.state === 'confirmed') {
       stopQrTimer();
@@ -167,7 +182,7 @@ async function checkQr(silent = false) {
     qrTip.value = map[data.state] || '等待扫码';
     if (!silent && data.state) setMsg(map[data.state] || '');
   } catch (e) {
-    if (!silent) setMsg(`检查失败：${e.message || e}`, 'error');
+    if (!silent) setMsg(`检查失败：${describeError(e)}`, 'error');
   } finally {
     busy.check = false;
   }
@@ -177,7 +192,7 @@ async function checkQr(silent = false) {
 async function runSubscribe() {
   busy.subscribe = true;
   try {
-    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/run_subscribe'));
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/run_subscribe', {}, { timeout: 900000 }));
     if (res.code === 0) {
       const d = res.data || {};
       setMsg(`订阅同步完成：命中 ${d.matched || 0} 条，转存 ${d.transferred || 0} 条`, 'success');
@@ -185,7 +200,7 @@ async function runSubscribe() {
       setMsg(res.msg || '订阅同步失败', 'error');
     }
   } catch (e) {
-    setMsg(`订阅同步失败：${e.message || e}`, 'error');
+    setMsg(`订阅同步失败：${describeError(e)}`, 'error');
   } finally {
     busy.subscribe = false;
     emit('action');
@@ -201,7 +216,7 @@ async function doSearch() {
   busy.search = true;
   searched.value = true;
   try {
-    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/search', { keyword: kw }));
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/search', { keyword: kw }, { timeout: 120000 }));
     if (res.code === 0) {
       results.value = res.data || [];
       setMsg(`「${kw}」找到 ${results.value.length} 条结果`);
@@ -210,7 +225,7 @@ async function doSearch() {
       setMsg(res.msg || '搜索失败', 'error');
     }
   } catch (e) {
-    setMsg(`搜索失败：${e.message || e}`, 'error');
+    setMsg(`搜索失败：${describeError(e)}`, 'error');
   } finally {
     busy.search = false;
     emit('action');
@@ -227,7 +242,7 @@ async function transfer(index, to) {
     }));
     setMsg(res.msg || (res.code === 0 ? '转存完成' : '转存失败'), res.code === 0 ? 'success' : 'error');
   } catch (e) {
-    setMsg(`转存失败：${e.message || e}`, 'error');
+    setMsg(`转存失败：${describeError(e)}`, 'error');
   } finally {
     emit('action');
   }
@@ -256,7 +271,7 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_col, { cols: "10" }, {
-          default: _withCtx(() => [...(_cache[1] || (_cache[1] = [
+          default: _withCtx(() => [...(_cache[6] || (_cache[6] = [
             _createElementVNode("div", { class: "text-subtitle-1 font-weight-medium" }, "115文档订阅与查询", -1)
           ]))]),
           _: 1
@@ -275,7 +290,7 @@ return (_ctx, _cache) => {
             }, {
               default: _withCtx(() => [
                 _createVNode(_component_v_icon, null, {
-                  default: _withCtx(() => [...(_cache[2] || (_cache[2] = [
+                  default: _withCtx(() => [...(_cache[7] || (_cache[7] = [
                     _createTextVNode("mdi-close", -1)
                   ]))]),
                   _: 1
@@ -331,9 +346,9 @@ return (_ctx, _cache) => {
               color: "primary",
               loading: busy.refresh,
               "prepend-icon": "mdi-database-refresh",
-              onClick: refreshIndex
+              onClick: _cache[0] || (_cache[0] = $event => (refreshIndex()))
             }, {
-              default: _withCtx(() => [...(_cache[3] || (_cache[3] = [
+              default: _withCtx(() => [...(_cache[8] || (_cache[8] = [
                 _createTextVNode(" 刷新索引 ", -1)
               ]))]),
               _: 1
@@ -351,7 +366,7 @@ return (_ctx, _cache) => {
               color: "primary",
               loading: busy.qr,
               "prepend-icon": "mdi-qrcode",
-              onClick: startQr
+              onClick: _cache[1] || (_cache[1] = $event => (startQr()))
             }, {
               default: _withCtx(() => [
                 _createTextVNode(_toDisplayString(qrImage.value ? '换一张二维码' : '获取登录二维码'), 1)
@@ -371,9 +386,9 @@ return (_ctx, _cache) => {
               color: "secondary",
               loading: busy.check,
               "prepend-icon": "mdi-check-decagram",
-              onClick: checkQr
+              onClick: _cache[2] || (_cache[2] = $event => (checkQr()))
             }, {
-              default: _withCtx(() => [...(_cache[4] || (_cache[4] = [
+              default: _withCtx(() => [...(_cache[9] || (_cache[9] = [
                 _createTextVNode(" 检查扫码状态 ", -1)
               ]))]),
               _: 1
@@ -391,9 +406,9 @@ return (_ctx, _cache) => {
               color: "secondary",
               loading: busy.subscribe,
               "prepend-icon": "mdi-sync",
-              onClick: runSubscribe
+              onClick: _cache[3] || (_cache[3] = $event => (runSubscribe()))
             }, {
-              default: _withCtx(() => [...(_cache[5] || (_cache[5] = [
+              default: _withCtx(() => [...(_cache[10] || (_cache[10] = [
                 _createTextVNode(" 手动同步电影订阅 ", -1)
               ]))]),
               _: 1
@@ -419,7 +434,7 @@ return (_ctx, _cache) => {
                   alt: "扫码登录"
                 }, null, 8, _hoisted_2),
                 _createElementVNode("div", _hoisted_3, " 用微信扫码登录腾讯文档（" + _toDisplayString(qrTip.value) + "） ", 1),
-                _cache[6] || (_cache[6] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 二维码约 2~3 分钟过期，过期会自动换新；扫过一次后旧码即失效，需点「换一张二维码」。 ", -1))
+                _cache[11] || (_cache[11] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 二维码约 2~3 分钟过期，过期会自动换新；扫过一次后旧码即失效，需点「换一张二维码」。 ", -1))
               ]),
               _: 1
             })
@@ -446,7 +461,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: keyword.value,
-                      "onUpdate:modelValue": _cache[0] || (_cache[0] = $event => ((keyword).value = $event)),
+                      "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((keyword).value = $event)),
                       label: "输入影视名称搜索（跨全部工作表）",
                       variant: "outlined",
                       density: "comfortable",
@@ -467,9 +482,9 @@ return (_ctx, _cache) => {
                       color: "primary",
                       "prepend-icon": "mdi-magnify",
                       loading: busy.search,
-                      onClick: doSearch
+                      onClick: _cache[5] || (_cache[5] = $event => (doSearch()))
                     }, {
-                      default: _withCtx(() => [...(_cache[7] || (_cache[7] = [
+                      default: _withCtx(() => [...(_cache[12] || (_cache[12] = [
                         _createTextVNode(" 搜索 ", -1)
                       ]))]),
                       _: 1
@@ -559,7 +574,7 @@ return (_ctx, _cache) => {
                                     color: "primary",
                                     onClick: $event => (transfer(i, 'movie'))
                                   }, {
-                                    default: _withCtx(() => [...(_cache[8] || (_cache[8] = [
+                                    default: _withCtx(() => [...(_cache[13] || (_cache[13] = [
                                       _createTextVNode("转存到电影", -1)
                                     ]))]),
                                     _: 1
@@ -578,7 +593,7 @@ return (_ctx, _cache) => {
                                     color: "secondary",
                                     onClick: $event => (transfer(i, 'tv'))
                                   }, {
-                                    default: _withCtx(() => [...(_cache[9] || (_cache[9] = [
+                                    default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
                                       _createTextVNode("转存到电视剧", -1)
                                     ]))]),
                                     _: 1
@@ -608,7 +623,7 @@ return (_ctx, _cache) => {
             type: "info",
             variant: "tonal"
           }, {
-            default: _withCtx(() => [...(_cache[10] || (_cache[10] = [
+            default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
               _createTextVNode("没有找到匹配的资源，换个关键词试试。", -1)
             ]))]),
             _: 1
