@@ -1,4 +1,20 @@
 {
+  "Doc115Subscribe": {
+    "name": "115文档订阅与查询",
+    "description": "读取腾讯文档追更表：定时为电影订阅把资源转存到 115 网盘，并支持插件内跨表搜索、一键转存。文档禁用导出也能读取；支持微信扫码登录、115 分享转存与磁力/ed2k 离线下载。",
+    "labels": "文档,腾讯文档,115网盘,订阅,搜索,自动订阅,V3",
+    "version": "0.1.0",
+    "release": true,
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/115.png",
+    "author": "zoom521241",
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "v3": true,
+    "history": {
+      "v0.1.0": "首个版本。① 通过腾讯文档前端 dop-api 接口直读在线表格（base64+zlib+protobuf 解码），文档关闭「导出/下载」也能读取，不需要浏览器；② 插件详情页提供微信扫码登录，扫码后自动保存腾讯文档 Cookie（纯接口实现）；③ 本地索引缓存，每天定时刷新，搜索走缓存；④ 跨表搜索并标注电影/电视剧，优先用 TMDBID 精准识别；⑤ 一键转存到 115：115 分享链接走分享转存，磁力/ed2k 走 115 离线下载；⑥ 电影订阅同步（仅电影，优先 TMDBID 匹配，选片规则 4K+中文优先、否则取最新一条）；⑦ 115 Cookie 默认复用「115网盘Plus」(P115Disk)。"
+    },
+    "v2": false
+  },
   "Doc911Subscribe": {
     "name": "金山文档订阅添加",
     "description": "每天21:01扫描金山文档（KDocs），自动添加「本月更新【国产剧】」「本月更新【国外剧】」「本月更新【综艺】」在播新剧到MP订阅。可配置文档链接，TMDB识别失败时发送通知提醒。（V3 修复移植版）",
