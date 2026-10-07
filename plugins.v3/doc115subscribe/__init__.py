@@ -53,7 +53,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.2.6"
+    plugin_version = "0.2.7"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -207,6 +207,15 @@ class Doc115Subscribe(_PluginBase):
             logger.info(f"115文档订阅与查询：已加载本地索引 {self._index.summary()}")
 
     # ---- 索引 --------------------------------------------------------------
+    def _ensure_index(self):
+        """内存里没有索引时，从磁盘已保存的文件加载（避免重启/重载后又要重建）。"""
+        if self._index is None:
+            try:
+                self._load_index()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"115文档订阅与查询：加载本地索引失败：{exc}")
+        return self._index
+
     def refresh_index(self) -> Dict[str, Any]:
         if not self._tencent_cookie:
             logger.error("115文档订阅与查询：缺少腾讯文档 Cookie，跳过索引刷新")
@@ -405,10 +414,11 @@ class Doc115Subscribe(_PluginBase):
                 self.prewarm_qr()          # 页面打开即在后台备好二维码
             except Exception:  # noqa: BLE001
                 pass
-        s = self._index.summary() if self._index else {"record_count": 0, "sheet_count": 0}
+        idx = self._ensure_index()
+        s = idx.summary() if idx else {"record_count": 0, "sheet_count": 0}
         built = "尚未建立"
-        if self._index and self._index.built_at:
-            built = datetime.fromtimestamp(self._index.built_at).strftime("%Y-%m-%d %H:%M")
+        if idx and idx.built_at:
+            built = datetime.fromtimestamp(idx.built_at).strftime("%Y-%m-%d %H:%M")
         return {"code": 0, "data": {
             "enabled": self._enabled,
             "cookie_ready": bool(self._tencent_cookie),
@@ -443,7 +453,7 @@ class Doc115Subscribe(_PluginBase):
         kw = (keyword or (payload or {}).get("keyword") or "").strip()
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}
-        if not self._index:
+        if not self._ensure_index():
             return {"code": 1, "msg": "本地索引尚未建立，请先点「刷新索引」"}
         if not kw:
             return {"code": 1, "msg": "请输入影视名称"}
@@ -465,7 +475,7 @@ class Doc115Subscribe(_PluginBase):
             idx = -1
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}
-        if not self._index:
+        if not self._ensure_index():
             return {"code": 1, "msg": "本地索引尚未建立"}
         if not kw:
             return {"code": 1, "msg": "缺少搜索关键词"}
@@ -563,9 +573,11 @@ class Doc115Subscribe(_PluginBase):
             self._qr = None
             with self._qr_lock:
                 self._qr_img = b""
-            self.refresh_index()
+            # 索引构建约 4~5 分钟，放后台跑，避免这次请求超时
+            threading.Thread(target=self.refresh_index, daemon=True,
+                             name="doc115-index-after-login").start()
             return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True,
-                                        "count": st.get("count")}}
+                                        "count": st.get("count"), "index_refreshing": True}}
         data: Dict[str, Any] = {"state": state or "wait"}
         if st.get("qr_base64"):
             data["qr_base64"] = st["qr_base64"]
