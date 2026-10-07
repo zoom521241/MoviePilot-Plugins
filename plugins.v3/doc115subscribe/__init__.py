@@ -51,7 +51,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -354,11 +354,15 @@ class Doc115Subscribe(_PluginBase):
 
     # ---- 详情页 ------------------------------------------------------------
     def get_page(self) -> Optional[List[dict]]:
-        if not self._enabled:
-            return [{"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "text": "插件未启用，请先在设置页启用并保存。"}}]
-
         nodes: List[dict] = []
+
+        # 未启用时不再直接返回提示（否则界面全空、看不到任何入口），
+        # 而是把状态与入口照常渲染出来，只在顶部给出明确提示。
+        if not self._enabled:
+            nodes.append({"component": "VAlert", "props": {
+                "type": "warning", "variant": "tonal",
+                "text": "插件尚未启用：请到「设置」页打开「启用插件」并保存；"
+                        "启用后本页的扫码登录、刷新索引、搜索等功能才可正常使用。"}})
         if self._page_msg:
             nodes.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "text": self._page_msg}})
