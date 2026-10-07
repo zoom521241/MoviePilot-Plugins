@@ -1,11 +1,14 @@
-"""腾讯文档「微信扫码登录」——浏览器实现（使用容器内自带 Chromium）。
+"""腾讯文档「微信扫码登录」——浏览器实现（常驻浏览器 + 可预热）。
 
-为什么不用纯 HTTP：观察 `bind-wx-quick-login.html` 的脚本可知，那个页面**不发起任何网络请求**，
-它只是把 `code` 通过 `postMessage({type:'wxLoginSuccess', code})` 交给父页面，
-真正换取登录态的是父页面。所以纯 HTTP 直接请求 redirect_uri 拿不到 Cookie。
+速度优化：
+1. **浏览器常驻**：playwright 与 Chromium 首次启动后复用（playwright 同步 API 有线程亲和性，
+   因此所有浏览器操作都收敛到唯一一个后台线程）；
+2. **二维码预热**：详情页打开时（/status）后台就开始生成二维码，用户点「获取登录二维码」时直接返回，
+   等于秒出；
+3. **截图尺寸自校验**：真二维码约 18KB、占位图约 5.5KB，截到小图就继续等，避免拿到空白页。
 
-这里改用真实浏览器：打开文档页 → 点「立即登录」→ 勾选协议 → 截取二维码 →
-后台轮询登录态 → 登录成功后导出 Cookie。浏览器在后台线程常驻，供分步调用。
+为什么必须用浏览器：`bind-wx-quick-login.html` 不发任何网络请求，只把 code 通过 postMessage
+交给父页面，真正的登录交换由文档页完成 —— 纯 HTTP 请求 redirect_uri 拿不到 Cookie。
 """
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ import os
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -25,8 +28,9 @@ CHROME_CANDIDATES = [
     "/moviepilot/.cloakbrowser/chromium-146.0.7680.177.5/chrome-linux/chrome",
     "/moviepilot/.cloakbrowser/chromium-1179/chrome-linux/chrome",
 ]
-QR_REFRESH_SECONDS = 100     # 二维码约 2~3 分钟过期，超过就重截
-SESSION_TIMEOUT = 15 * 60    # 整个会话最长 15 分钟
+QR_REFRESH_SECONDS = 100
+SESSION_TIMEOUT = 15 * 60
+MIN_QR_BYTES = 10000          # 占位图约 5.5KB，真二维码约 18KB
 
 
 class QrLoginError(RuntimeError):
@@ -41,151 +45,146 @@ def _find_chromium() -> Optional[str]:
     return hits[0] if hits else None
 
 
-def _png_data_url(data: bytes) -> str:
+def png_data_url(data: bytes) -> str:
     return "data:image/png;base64," + base64.b64encode(data).decode()
 
 
-class BrowserQrLogin:
-    """常驻的浏览器扫码登录会话（一个实例 = 一个后台线程 + 一个浏览器）。"""
+class _Worker:
+    """唯一的浏览器工作线程：playwright + Chromium 常驻，按指令服务。"""
 
-    def __init__(self, doc_url: str):
-        self.doc_url = doc_url
-        self._cmd_q: "queue.Queue" = queue.Queue()
-        self._thread: Optional[threading.Thread] = None
-        self._started_at = 0.0
+    def __init__(self):
+        self.q: "queue.Queue" = queue.Queue()
+        self.ready = threading.Event()
+        self.error: Optional[str] = None
+        self._ctx = None
+        self._page = None
         self._last_shot = 0.0
-
-    # ---- 对外 -------------------------------------------------------------
-    def start(self) -> Tuple[bytes, bool]:
-        """（重新）打开登录弹窗，返回 (二维码PNG字节, 会话是否已是登录态)。"""
-        self.close()
-        time.sleep(0.3)
-        self._thread = threading.Thread(target=self._worker, daemon=True, name="doc115-qrlogin")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="doc115-browser")
         self._thread.start()
-        self._started_at = time.time()
-        return self._call("start", timeout=180)
+        self.ready.wait(timeout=90)
 
-    def check(self) -> Dict[str, Any]:
-        """查询登录状态。返回 state ∈ wait / confirmed / expired / error。"""
-        if not self._thread or not self._thread.is_alive():
-            return {"state": "expired"}
-        if time.time() - self._started_at > SESSION_TIMEOUT:
-            self.close()
-            return {"state": "expired"}
-        try:
-            return self._call("check", timeout=120)
-        except QrLoginError as exc:
-            return {"state": "error", "msg": str(exc)}
-
-    def close(self):
-        if self._thread and self._thread.is_alive():
-            try:
-                self._call("quit", timeout=40)
-            except Exception:  # noqa: BLE001
-                pass
-        self._thread = None
-
-    # ---- 内部 -------------------------------------------------------------
-    def _call(self, cmd: str, timeout: float = 60) -> Any:
+    def submit(self, cmd: str, payload: Any = None, timeout: float = 180) -> Any:
+        if self.error:
+            raise QrLoginError(self.error)
         box: "queue.Queue" = queue.Queue()
-        self._cmd_q.put((cmd, box))
+        self.q.put((cmd, payload, box))
         try:
-            ok, payload = box.get(timeout=timeout)
+            ok, data = box.get(timeout=timeout)
         except queue.Empty as exc:
             raise QrLoginError(f"浏览器操作超时（{cmd}）") from exc
         if not ok:
-            raise QrLoginError(str(payload))
-        return payload
+            raise QrLoginError(str(data))
+        return data
 
-    def _worker(self):
+    # ---- 线程主体 ---------------------------------------------------------
+    def _run(self):
         exe = _find_chromium()
         if not exe:
-            self._fail_all("容器内未找到 Chromium（/moviepilot/.cloakbrowser）")
+            self.error = "容器内未找到 Chromium（/moviepilot/.cloakbrowser）"
+            self.ready.set()
             return
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            self._fail_all("未安装 playwright，无法使用扫码登录")
+            self.error = "未安装 playwright，无法使用扫码登录"
+            self.ready.set()
             return
-
         try:
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(
-                    executable_path=exe, headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage"],
-                )
-                try:
-                    ctx = browser.new_context(
-                        user_agent=UA, viewport={"width": 1280, "height": 900}, locale="zh-CN")
-                    page = ctx.new_page()
-                    self._loop(ctx, page)
-                finally:
-                    try:
-                        browser.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+            pw = sync_playwright().start()
+            browser = pw.chromium.launch(
+                executable_path=exe, headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"])
         except Exception as exc:  # noqa: BLE001
-            self._fail_all(f"启动浏览器失败：{exc}")
-
-    def _loop(self, ctx, page):
-        while True:
-            cmd, box = self._cmd_q.get()
-            if cmd == "quit":
-                box.put((True, None))
-                return
+            self.error = f"启动浏览器失败：{exc}"
+            self.ready.set()
+            return
+        self._browser = browser
+        self.ready.set()
+        try:
+            while True:
+                cmd, payload, box = self.q.get()
+                if cmd == "quit":
+                    box.put((True, None))
+                    break
+                try:
+                    if cmd == "start":
+                        box.put((True, self._start(payload)))
+                    elif cmd == "check":
+                        box.put((True, self._check()))
+                    elif cmd == "end_session":
+                        self._end_session()
+                        box.put((True, None))
+                    else:
+                        box.put((False, f"未知指令 {cmd}"))
+                except Exception as exc:  # noqa: BLE001
+                    box.put((False, str(exc)))
+        finally:
             try:
-                if cmd == "start":
-                    box.put((True, self._do_start(ctx, page)))
-                elif cmd == "check":
-                    box.put((True, self._do_check(ctx, page)))
-                else:
-                    box.put((False, f"未知指令 {cmd}"))
-            except Exception as exc:  # noqa: BLE001
-                box.put((False, str(exc)))
+                browser.close()
+                pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
 
-    def _fail_all(self, msg: str):
-        # 把后续所有请求都回以同一个错误
-        while True:
+    # ---- 会话 -------------------------------------------------------------
+    def _end_session(self):
+        if self._ctx is not None:
             try:
-                _, box = self._cmd_q.get_nowait()
-                box.put((False, msg))
-            except queue.Empty:
-                break
-        self._cmd_q.put(("quit", _ErrorBox(msg)))
+                self._ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._ctx = None
+        self._page = None
 
-    # ---- 具体动作 ---------------------------------------------------------
-    def _do_start(self, ctx, page) -> Tuple[bytes, bool]:
-        page.goto(self.doc_url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
-        if self._has_uid(ctx):
+    def _start(self, doc_url: str) -> Tuple[bytes, bool]:
+        self._end_session()
+        self._ctx = self._browser.new_context(
+            user_agent=UA, viewport={"width": 1280, "height": 900}, locale="zh-CN")
+        page = self._ctx.new_page()
+        self._page = page
+        page.goto(doc_url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(2500)          # 页面初始化（太短会导致弹窗不完整、二维码不渲染）
+        if self._has_uid(self._ctx):
             return b"", True
-        page.locator("text=立即登录").first.click(timeout=8000)
-        page.wait_for_timeout(2500)
-        # 勾选协议，否则不显示二维码
-        page.locator("text=我已阅读并接受").first.click(timeout=5000, force=True)
-        page.wait_for_timeout(4000)
-        shot = self._shoot_qr(page)
-        self._last_shot = time.time()
-        return shot, False
+        btn = page.locator("text=立即登录").first
+        try:
+            btn.click(timeout=8000)
+        except Exception:  # noqa: BLE001
+            try:
+                btn.dispatch_event("click")
+            except Exception:  # noqa: BLE001
+                pass
+        page.wait_for_timeout(1800)
+        try:  # 协议勾选（必须点，勾了才会出码；不做幂等判断，避免误判导致跳过）
+            page.locator("text=我已阅读并接受").first.click(timeout=5000, force=True)
+        except Exception:  # noqa: BLE001
+            pass
+        page.wait_for_timeout(2000)
+        return self._shoot_qr(), False
 
-    def _shoot_qr(self, page) -> bytes:
+    def _shoot_qr(self) -> bytes:
+        page = self._page
         frame = None
-        for _ in range(20):
+        deadline = time.time() + 20
+        while time.time() < deadline:
             frame = next((f for f in page.frames if "qrconnect" in f.url), None)
             if frame:
                 break
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(150)
         if not frame:
             raise QrLoginError("未找到二维码 iframe（腾讯页面可能已改版）")
-        for _ in range(15):
+        best = b""
+        for _ in range(20):
             try:
-                img = frame.locator("img.js_qrcode_img").first
-                if img.count() and img.get_attribute("src"):
-                    break
+                best = frame.locator("body").first.screenshot()
             except Exception:  # noqa: BLE001
-                pass
-            page.wait_for_timeout(1000)
-        return frame.locator("body").first.screenshot()
+                page.wait_for_timeout(300)
+                continue
+            if len(best) >= MIN_QR_BYTES:
+                self._last_shot = time.time()
+                return best
+            page.wait_for_timeout(300)
+        self._last_shot = time.time()
+        raise QrLoginError(f"二维码未渲染完成（截图仅 {len(best)} 字节，疑似占位图），请点「换一张二维码」重试")
 
     def _has_uid(self, ctx) -> bool:
         try:
@@ -193,8 +192,11 @@ class BrowserQrLogin:
         except Exception:  # noqa: BLE001
             return False
 
-    def _do_check(self, ctx, page) -> Dict[str, Any]:
-        cookies: List[Dict[str, Any]] = ctx.cookies()
+    def _check(self) -> Dict[str, Any]:
+        ctx = self._ctx
+        if ctx is None:
+            return {"state": "expired"}
+        cookies = ctx.cookies()
         names = {c.get("name") for c in cookies}
         if "uid" in names:
             parts = [f"{c['name']}={c['value']}" for c in cookies
@@ -202,22 +204,50 @@ class BrowserQrLogin:
             return {"state": "confirmed", "cookie": "; ".join(parts), "count": len(parts)}
         if time.time() - self._last_shot > QR_REFRESH_SECONDS:
             try:
-                shot = self._shoot_qr(page)
-                self._last_shot = time.time()
-                return {"state": "wait", "qr_base64": _png_data_url(shot), "refreshed": True}
+                shot = self._shoot_qr()
+                return {"state": "wait", "qr_base64": png_data_url(shot), "refreshed": True}
             except Exception:  # noqa: BLE001
                 return {"state": "wait"}
         return {"state": "wait"}
 
 
-class _ErrorBox:
-    """给 _fail_all 用的占位盒子（避免后续 _call 永久阻塞）。"""
+_WORKER_LOCK = threading.Lock()
+_WORKER: Optional[_Worker] = None
 
-    def __init__(self, msg: str):
-        self._msg = msg
 
-    def put(self, item):
-        pass
+def _get_worker() -> _Worker:
+    global _WORKER
+    with _WORKER_LOCK:
+        if _WORKER is None or _WORKER.error or not _WORKER._thread.is_alive():
+            _WORKER = _Worker()
+        return _WORKER
 
-    def get(self, timeout=None):
-        return (False, self._msg)
+
+class BrowserQrLogin:
+    """一次登录会话的句柄；底层浏览器常驻复用。"""
+
+    def __init__(self, doc_url: str):
+        self.doc_url = doc_url
+        self._started_at = 0.0
+
+    def start(self) -> Tuple[bytes, bool, float]:
+        """返回 (二维码PNG, 是否已登录, 耗时秒)。"""
+        t0 = time.time()
+        shot, already = _get_worker().submit("start", self.doc_url, timeout=180)
+        self._started_at = time.time()
+        return shot, already, time.time() - t0
+
+    def check(self) -> Dict[str, Any]:
+        if time.time() - self._started_at > SESSION_TIMEOUT:
+            self.close()
+            return {"state": "expired"}
+        try:
+            return _get_worker().submit("check", None, timeout=120)
+        except QrLoginError as exc:
+            return {"state": "wait"} if "超时" in str(exc) else {"state": "error", "msg": str(exc)}
+
+    def close(self):
+        try:
+            _get_worker().submit("end_session", None, timeout=40)
+        except Exception:  # noqa: BLE001
+            pass

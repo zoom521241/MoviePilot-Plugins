@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import base64
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,7 +53,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.2.3"
+    plugin_version = "0.2.4"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -73,6 +75,9 @@ class Doc115Subscribe(_PluginBase):
     _scheduler: Optional[BackgroundScheduler] = None
     _index: Optional[DocIndex] = None
     _qr: Optional[BrowserQrLogin] = None
+    _qr_img: bytes = b""          # 预热好的二维码（PNG）
+    _qr_ts: float = 0.0            # 预热时间
+    _qr_lock: Any = None
     _qr_img: str = ""
     _search_results: List[Dict[str, Any]] = []
     _page_msg: str = ""
@@ -84,7 +89,9 @@ class Doc115Subscribe(_PluginBase):
         self._scheduler = None
         self._index = None
         self._qr = None
-        self._qr_img = ""
+        self._qr_img = b""
+        self._qr_ts = 0.0
+        self._qr_lock = threading.Lock()
         self._search_results = []
         self._page_msg = ""
         if config:
@@ -350,6 +357,11 @@ class Doc115Subscribe(_PluginBase):
 
     # --- API 实现 -----------------------------------------------------------
     def api_status(self) -> Dict[str, Any]:
+        if self._enabled and not self._tencent_cookie:
+            try:
+                self.prewarm_qr()          # 页面打开即在后台备好二维码
+            except Exception:  # noqa: BLE001
+                pass
         s = self._index.summary() if self._index else {"record_count": 0, "sheet_count": 0}
         built = "尚未建立"
         if self._index and self._index.built_at:
@@ -422,19 +434,58 @@ class Doc115Subscribe(_PluginBase):
     def api_run_subscribe(self) -> Dict[str, Any]:
         return self.run_subscribe()
 
+    QR_FRESH_SECONDS = 90
+
     def api_qr_start(self) -> Dict[str, Any]:
-        """打开登录弹窗并返回二维码（每次都重新开一个会话，旧码扫过即失效）。"""
+        """返回二维码。若页面打开时已预热好，则**秒出**；否则现生成（约 7 秒）。"""
+        # 预热命中
+        with self._qr_lock:
+            if self._qr and self._qr_img and (time.time() - self._qr_ts) < self.QR_FRESH_SECONDS:
+                return {"code": 0, "data": {
+                    "qr_base64": "data:image/png;base64," + base64.b64encode(self._qr_img).decode(),
+                    "cached": True}}
+        return self._start_qr_now()
+
+    def _start_qr_now(self) -> Dict[str, Any]:
         try:
-            self._qr = BrowserQrLogin(self._doc_url)
-            shot, already = self._qr.start()
+            if self._qr:
+                self._qr.close()
+            qr = BrowserQrLogin(self._doc_url)
+            shot, already, cost = qr.start()
         except QrLoginError as exc:
             return {"code": 1, "msg": f"获取二维码失败：{exc}"}
         if already:
+            self._qr = qr
             return self.page_qr_collect()
         if not shot:
             return {"code": 1, "msg": "未截取到二维码，请重试"}
+        with self._qr_lock:
+            self._qr = qr
+            self._qr_img = shot
+            self._qr_ts = time.time()
+        logger.info(f"115文档订阅与查询：二维码生成完成，耗时 {cost:.1f}s")
         return {"code": 0, "data": {
-            "qr_base64": "data:image/png;base64," + base64.b64encode(shot).decode()}}
+            "qr_base64": "data:image/png;base64," + base64.b64encode(shot).decode(),
+            "cost": round(cost, 1)}}
+
+    def prewarm_qr(self):
+        """后台预热二维码：详情页打开时调用，用户点按钮即可秒出。"""
+        with self._qr_lock:
+            if self._qr and self._qr_img and (time.time() - self._qr_ts) < self.QR_FRESH_SECONDS:
+                return
+            if getattr(self, "_qr_warming", False):
+                return
+            self._qr_warming = True
+
+        def _run():
+            try:
+                self._start_qr_now()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"115文档订阅与查询：二维码预热失败：{exc}")
+            finally:
+                self._qr_warming = False
+
+        threading.Thread(target=_run, daemon=True, name="doc115-qrprewarm").start()
 
     def page_qr_collect(self) -> Dict[str, Any]:
         """会话已是登录态时，直接收集 Cookie 并保存。"""
@@ -447,6 +498,8 @@ class Doc115Subscribe(_PluginBase):
         if self._qr:
             self._qr.close()
         self._qr = None
+        with self._qr_lock:
+            self._qr_img = b""
         self.refresh_index()
         return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True}}
 
@@ -464,6 +517,8 @@ class Doc115Subscribe(_PluginBase):
             self.update_config(self._current_config())
             self._qr.close()
             self._qr = None
+            with self._qr_lock:
+                self._qr_img = b""
             self.refresh_index()
             return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True,
                                         "count": st.get("count")}}
