@@ -163,7 +163,7 @@ def parse_sheet(sheet_id: str, sheet_name: str,
         for ci in (res_col, sub_col):
             if ci is not None and ci < len(row) and (row[ci] or "").strip():
                 q_parts.append(row[ci].strip())
-        qtext = " ".join(q_parts) or spec
+        qtext = clean_display(" ".join(q_parts) or spec)
 
         for _, url in links:
             link_counter[url] = link_counter.get(url, 0) + 1
@@ -177,7 +177,7 @@ def parse_sheet(sheet_id: str, sheet_name: str,
             "year": year,
             "tmdbid": tmdbid,
             "spec": spec[:300],
-            "qtext": qtext[:200],
+            "qtext": qtext,
             "links": links,
         })
 
@@ -192,6 +192,16 @@ def parse_sheet(sheet_id: str, sheet_name: str,
 # ---------------------------------------------------------------------------
 # 选片排序：4K + 中文 优先，其次 4K / 中文，都不满足取最新（行号最小）
 # ---------------------------------------------------------------------------
+_LINK_NOISE = re.compile(r"(https?://\S+|magnet:\S+|ed2k://\S+)")
+
+
+def clean_display(text: str, limit: int = 90) -> str:
+    """把整行文本整理成适合展示的「规格」：去掉链接、压缩空白、限长。"""
+    t = _LINK_NOISE.sub(" ", text or "")
+    t = re.sub(r"\s+", " ", t).strip(" -|,，、")
+    return t[:limit]
+
+
 def has_chinese(qtext: str) -> bool:
     """判断是否含中文字幕/语言；「无中字」要判为否。"""
     t = qtext or ""
