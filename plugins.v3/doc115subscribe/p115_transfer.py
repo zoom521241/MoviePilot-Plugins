@@ -27,6 +27,17 @@ except ImportError:  # 直接作为顶层模块加载（脚本/单测）
     from link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
 
 
+_MAGNET_HASH = __import__("re").compile(r"btih:([0-9a-fA-F]{32,40})")
+_ED2K_HASH = __import__("re").compile(r"ed2k://\|file\|[^|]*\|\d+\|([0-9a-fA-F]{32})\|")
+
+
+def extract_hash(url: str) -> str:
+    """从磁力/ed2k 链接里取信息哈希，用于和 115 离线任务匹配。"""
+    u = (url or "").strip()
+    m = _MAGNET_HASH.search(u) or _ED2K_HASH.search(u)
+    return m.group(1).lower() if m else ""
+
+
 def normalize_115_share(url: str) -> str:
     """把 115cdn.com 的分享链接规范成 115.com，便于解析分享码。"""
     u = (url or "").strip()
@@ -172,10 +183,13 @@ class P115Transfer:
         raise P115Error(f"转存失败：{last_err}")
 
     # -- 离线下载 -----------------------------------------------------------
+    _DUP_WORDS = ("已推送", "已经推送", "推送过", "重复", "已存在", "已添加")
+
     def offline_add(self, url: str, save_path: str) -> bool:
-        """把磁力 / ed2k（或其它直链）提交给 115 离线下载。"""
+        """把磁力 / ed2k 提交给 115 离线下载。已推送过的视为成功（幂等）。"""
         cid = self.path_to_id(save_path, mkdir=True)
         resp = None
+        last_err = ""
         for attempt in range(3):
             try:
                 self._limiter.wait()
@@ -183,19 +197,40 @@ class P115Transfer:
                     "url[0]": url.strip(),
                     "wp_path_id": cid,
                 })
-                if resp.get("state") or resp.get("errno") in (0, None):
-                    if resp.get("state") is False:
-                        raise P115Error(str(resp.get("error") or resp))
+                if resp.get("state"):
+                    return True
+                err = str(resp.get("error") or resp.get("errno") or resp)
+                last_err = err
+                # 115 对「同一个种子重复推送」会返回失败，但语义上已是我们要的结果
+                if any(w in err for w in self._DUP_WORDS):
                     return True
                 if resp.get("errno") in (990001, 990002, 990009):
                     time.sleep((attempt + 1) * 2)
                     continue
                 break
             except Exception as exc:  # noqa: BLE001
+                last_err = str(exc)
+                if any(w in last_err for w in self._DUP_WORDS):
+                    return True
                 if attempt >= 2:
                     raise P115Error(f"离线下载提交失败：{exc}") from exc
                 time.sleep((attempt + 1) * 1.5)
-        raise P115Error(f"离线下载提交失败：{resp}")
+        raise P115Error(f"离线下载提交失败：{last_err or resp}")
+
+    def list_tasks(self, page_size: int = 100) -> list:
+        """列出 115 离线下载任务（含 info_hash / percentDone / file_id）。"""
+        out: list = []
+        page = 1
+        while page <= 10:
+            self._limiter.wait()
+            resp = self.client.clouddownload_task_list({"page": page, "page_size": page_size})
+            tasks = (resp or {}).get("tasks") or []
+            out.extend(tasks)
+            total = (resp or {}).get("count") or 0
+            if len(out) >= total or not tasks:
+                break
+            page += 1
+        return out
 
     # -- 统一入口 -----------------------------------------------------------
     def add_resource(self, kind: str, url: str, save_path: str) -> Tuple[bool, str]:

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import threading
 import time
 from datetime import datetime
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.log import logger
 from app.plugins import _PluginBase
@@ -37,14 +39,14 @@ try:
     from . import doc_parser, subscribe_sync
     from .doc_client import DocError, TencentDocsClient
     from .doc_index import DocIndex
-    from .p115_transfer import P115Error, P115Transfer
+    from .p115_transfer import P115Error, P115Transfer, extract_hash
     from .qrlogin_browser import BrowserQrLogin, QrLoginError
 except ImportError:
     import doc_parser
     import subscribe_sync
     from doc_client import DocError, TencentDocsClient
     from doc_index import DocIndex
-    from p115_transfer import P115Error, P115Transfer
+    from p115_transfer import P115Error, P115Transfer, extract_hash
     from qrlogin_browser import BrowserQrLogin, QrLoginError
 
 
@@ -53,7 +55,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.3.1"
+    plugin_version = "0.4.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -129,6 +131,11 @@ class Doc115Subscribe(_PluginBase):
                 trigger=CronTrigger.from_crontab(self._subscribe_cron, timezone="Asia/Shanghai"),
                 name="115文档订阅与查询-订阅同步",
             )
+        self._scheduler.add_job(
+            self.check_offline_tasks,
+            trigger=IntervalTrigger(minutes=10),
+            name="115文档订阅与查询-离线任务整理",
+        )
         self._scheduler.start()
         logger.info("115文档订阅与查询：已启用，定时任务已注册")
 
@@ -213,6 +220,88 @@ class Doc115Subscribe(_PluginBase):
             logger.info(f"115文档订阅与查询：已加载本地索引 {self._index.summary()}")
 
     # ---- 索引 --------------------------------------------------------------
+    @property
+    def pending_path(self):
+        return self.get_data_path_local() / "pending_offline.json"
+
+    def _load_pending(self) -> List[Dict[str, Any]]:
+        try:
+            p = self.pending_path
+            if p.exists():
+                return json.loads(p.read_text(encoding="utf-8")) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"115文档订阅与查询：读取待整理离线任务失败：{exc}")
+        return []
+
+    def _save_pending(self, items: List[Dict[str, Any]]) -> None:
+        try:
+            self.pending_path.parent.mkdir(parents=True, exist_ok=True)
+            self.pending_path.write_text(
+                json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"115文档订阅与查询：保存待整理离线任务失败：{exc}")
+
+    def add_pending_offline(self, rec: Dict[str, Any], target: str,
+                            save_path: str, url: str) -> None:
+        """登记离线任务：磁力/ed2k 提交后文件还没落盘，等下载完成再通知 MP 整理。"""
+        h = extract_hash(url)
+        if not h:
+            return
+        items = self._load_pending()
+        if any(i.get("hash") == h for i in items):
+            return
+        items.append({
+            "hash": h,
+            "title": rec.get("title"),
+            "year": rec.get("year"),
+            "type": "movie" if target == "movie" else "tv",
+            "save_path": save_path,
+            "url": url,
+            "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        self._save_pending(items)
+        logger.info(f"115文档订阅与查询：已登记离线任务，待下载完成后触发整理："
+                    f"{rec.get('title')} [{h[:12]}]")
+
+    def check_offline_tasks(self) -> Dict[str, Any]:
+        """检查离线下载是否完成；完成的写入 MP 下载历史，进而触发整理与 STRM 生成。"""
+        items = self._load_pending()
+        if not items:
+            return {"code": 0, "data": {"pending": 0, "finished": 0}}
+        tr = self._transfers()
+        if not tr:
+            return {"code": 1, "msg": "未配置 115 Cookie"}
+        try:
+            tasks = tr.list_tasks()
+        except P115Error as exc:
+            return {"code": 1, "msg": f"查询 115 离线任务失败：{exc}"}
+        done: Dict[str, Dict[str, Any]] = {}
+        for t in tasks:
+            h = str(t.get("info_hash") or "").lower()
+            try:
+                pct = float(t.get("percentDone") or 0)
+            except (TypeError, ValueError):
+                pct = 0
+            if h and pct >= 100:
+                done[h] = t
+        finished, remain = 0, []
+        for it in items:
+            t = done.get(it.get("hash") or "")
+            if not t:
+                remain.append(it)
+                continue
+            rec = {"title": it.get("title"), "year": it.get("year"),
+                   "sheet": "离线下载", "qtext": str(t.get("name") or "")[:80]}
+            if self.record_download_history(rec, it.get("type") or "movie",
+                                            it.get("save_path") or "", it.get("url") or ""):
+                finished += 1
+                logger.info(f"115文档订阅与查询：离线下载完成，已通知 MP 整理：{it.get('title')}")
+            else:
+                remain.append(it)
+        if finished:
+            self._save_pending(remain)
+        return {"code": 0, "data": {"pending": len(remain), "finished": finished}}
+
     def _ensure_index(self):
         """内存里没有索引时，从磁盘已保存的文件加载（避免重启/重载后又要重建）。"""
         if self._index is None:
@@ -316,12 +405,16 @@ class Doc115Subscribe(_PluginBase):
         if not tr:
             return False, "未配置 115 Cookie（可在插件配置填写，或先装好 115 网盘相关插件）"
         ok_msgs, errs, first_url = [], [], ""
+        offline_added = []
         for kind, url in links:
             try:
                 ok, msg = tr.add_resource(kind, url, save_path)
                 if ok:
                     ok_msgs.append(msg)
                     first_url = first_url or url
+                    if kind in (LINK_MAGNET, LINK_ED2K):
+                        self.add_pending_offline(rec, target, save_path, url)
+                        offline_added.append(kind)
             except P115Error as exc:
                 errs.append(str(exc))
                 logger.warning(
@@ -331,6 +424,10 @@ class Doc115Subscribe(_PluginBase):
             if any("失效" in e or "取消" in e or "过期" in e for e in errs):
                 reason += "。文档里的这条分享已被分享者取消或过期，请换一条链接"
             return False, f"{rec.get('title')} 转存失败：{reason}"
+        is_offline_only = bool(offline_added) and all(m == "已提交离线下载" for m in ok_msgs)
+        if is_offline_only:
+            return True, (f"{rec.get('title')} -> {save_path}（{'；'.join(ok_msgs)}）"
+                          f"，下载完成后会自动通知 MP 整理")
         logged = self.record_download_history(rec, target, save_path, first_url)
         tail = "，已通知 MP 整理" if logged else "（下载历史写入失败，整理可能不会触发）"
         return True, f"{rec.get('title')} -> {save_path}（{'；'.join(ok_msgs)}）{tail}"
@@ -364,6 +461,8 @@ class Doc115Subscribe(_PluginBase):
              "auth": "bear", "methods": ["POST"], "summary": "搜索文档资源"},
             {"path": "/transfer", "endpoint": self.api_transfer,
              "auth": "bear", "methods": ["POST"], "summary": "转存到 115"},
+            {"path": "/check_offline", "endpoint": self.api_check_offline,
+             "auth": "bear", "methods": ["POST"], "summary": "检查离线下载并通知整理"},
             {"path": "/run_subscribe", "endpoint": self.api_run_subscribe,
              "auth": "bear", "methods": ["POST"], "summary": "手动同步电影订阅"},
             {"path": "/qr_start", "endpoint": self.api_qr_start,
@@ -492,6 +591,9 @@ class Doc115Subscribe(_PluginBase):
             return {"code": 1, "msg": "结果已失效，请重新搜索"}
         ok, msg = self.do_transfer(hits[idx], to=target)
         return {"code": 0 if ok else 1, "msg": msg}
+
+    def api_check_offline(self) -> Dict[str, Any]:
+        return self.check_offline_tasks()
 
     def api_run_subscribe(self) -> Dict[str, Any]:
         return self.run_subscribe()
