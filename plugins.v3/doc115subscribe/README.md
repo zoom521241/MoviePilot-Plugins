@@ -83,8 +83,16 @@ doc115subscribe/
 ├── doc_parser.py    # 网格 -> 资源记录；类型判定；选片排序；搜索
 ├── doc_index.py     # 本地索引：构建 / 持久化 / 搜索
 ├── link_router.py   # 链接类型识别与分派
+├── p115_transfer.py # 115 转存 / 离线下载
+├── subscribe_sync.py# 订阅匹配（纯逻辑）
+├── qrlogin_browser.py # 浏览器扫码登录
+├── dist/            # 前端**编译产物**（运行期 MP 加载的就是它）
+├── ui/              # 前端**源码工程**（Vue3 + Vuetify3 + Vite 模块联邦）
 └── pyproject.toml
 ```
+
+> 改前端 UI 请改 `ui/src/`，然后 `cd ui && npm install --ignore-scripts && npm run build`，
+> 再把 `ui/dist/assets/*` 复制到 `dist/assets/`。详见 [ui/README.md](./ui/README.md)。
 
 ---
 

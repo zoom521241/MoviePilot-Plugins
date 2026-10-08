@@ -1,0 +1,21 @@
+{
+  "name": "doc115subscribe-ui",
+  "private": true,
+  "version": "0.5.2",
+  "type": "module",
+  "description": "115文档订阅与查询 (Doc115Subscribe) 插件前端：Vue3 + Vuetify3 + Vite 模块联邦",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.38",
+    "vuetify": "^3.7.3"
+  },
+  "devDependencies": {
+    "@originjs/vite-plugin-federation": "^1.3.5",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "vite": "^5.4.8"
+  }
+}
