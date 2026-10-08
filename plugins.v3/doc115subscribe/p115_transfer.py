@@ -154,13 +154,12 @@ class P115Transfer:
         err = str((resp or {}).get("error") or (resp or {}).get("errno") or "分享不可用")
         return False, err
 
-    def _share_item_ids(self, share_code: str, receive_code: str) -> List[str]:
-        """取分享内所有条目的 id（文件夹取 ``cid``、文件取 ``fid``）。
+    def share_items(self, share_code: str, receive_code: str) -> List[Dict[str, Any]]:
+        """读分享内的条目列表：[{"id": 真实id, "name": 名称, "is_dir": 是否文件夹}]。
 
-        ⚠️ 转存时 ``file_id`` 必须传这些**真实 id**。传 ``"0"`` 只在部分单文件分享上凑巧可用；
-        当分享里是**文件夹**（例如整季剧集）时会直接返回「参数错误」。
+        115 转存需要**真实条目 id**（文件夹取 ``cid``、文件取 ``fid``）。只读接口。
         """
-        ids: List[str] = []
+        out: List[Dict[str, Any]] = []
         try:
             self._limiter.wait()
             resp = self.client.share_snap({
@@ -173,10 +172,22 @@ class P115Transfer:
             for it in ((resp or {}).get("data") or {}).get("list") or []:
                 fid = it.get("fid") or it.get("id") or it.get("cid")
                 if fid:
-                    ids.append(str(fid))
+                    out.append({
+                        "id": str(fid),
+                        "name": str(it.get("n") or it.get("fn") or ""),
+                        "is_dir": str(it.get("fc")) == "0",
+                    })
         except Exception:  # noqa: BLE001
             pass
-        return ids
+        return out
+
+    def _share_item_ids(self, share_code: str, receive_code: str) -> List[str]:
+        """取分享内所有条目的 id（文件夹取 ``cid``、文件取 ``fid``）。
+
+        ⚠️ 转存时 ``file_id`` 必须传这些**真实 id**。传 ``"0"`` 只在部分单文件分享上凑巧可用；
+        当分享里是**文件夹**（例如整季剧集）时会直接返回「参数错误」。
+        """
+        return [it["id"] for it in self.share_items(share_code, receive_code)]
 
     def share_receive(self, share_url: str, save_path: str) -> bool:
         """把 115 分享链接整体转存到目标目录。"""
@@ -191,7 +202,8 @@ class P115Transfer:
             raise P115Error(f"无法解析分享链接：{share_url}")
         cid = self.path_to_id(save_path, mkdir=True)
         # 分享内的真实条目 id（文件夹取 cid、文件取 fid）；取不到时退回 "0"
-        item_ids = self._share_item_ids(share_code, receive_code)
+        items = self.share_items(share_code, receive_code)
+        item_ids = [it["id"] for it in items]
         file_id = ",".join(item_ids) if item_ids else "0"
         last_err = ""
         for attempt in range(3):
@@ -205,9 +217,12 @@ class P115Transfer:
                     "is_check": 0,
                 })
                 if resp.get("state"):
+                    # 记下实际转存进去的条目名，供「是否已整理」回填用
+                    self.last_share_names = [i["name"] for i in items if i.get("name")]
                     return True
                 last_err = str(resp.get("error") or resp.get("errno") or resp)
                 if "重复" in last_err or "已存在" in last_err:
+                    self.last_share_names = [i["name"] for i in items if i.get("name")]
                     return True
                 if resp.get("errno") in (990001, 990002, 990009):
                     time.sleep((attempt + 1) * 2)

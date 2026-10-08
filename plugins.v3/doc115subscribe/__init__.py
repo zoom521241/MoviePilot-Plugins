@@ -59,7 +59,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.7.3"
+    plugin_version = "0.7.4"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -435,13 +435,14 @@ class Doc115Subscribe(_PluginBase):
                 break
             checked += 1
             try:
-                name = str(r.get("item_name") or "")
-                if name:
-                    gone = not tr.path_exists(f"{final}/{name}")
+                names = [str(n) for n in (r.get("item_names") or []) if n]
+                if not names and r.get("item_name"):
+                    names = [str(r["item_name"])]
+                if names:
+                    # 有真实条目名 → 精确判断（磁力搬运 / 新版 115 分享转存）
+                    gone = not any(tr.path_exists(f"{final}/{n}") for n in names)
                 else:
-                    # 老记录没记文件名：只对"经暂存目录搬过来"的磁力条目做模糊认领
-                    if str(r.get("staging_path") or "") == final:
-                        continue           # 115 分享转存直接落最终目录，无法判断整理
+                    # 老记录没记名字：拿片名前 8 字去最终目录里模糊认领
                     key = self._norm_key(str(r.get("title") or ""))
                     if not key:
                         continue
@@ -728,6 +729,8 @@ class Doc115Subscribe(_PluginBase):
                             "staging_path": final_path, "final_path": final_path,
                             "status": "done",
                             "message": f"已转存到 {final_path}；整理由 115 助手接管",
+                            # 记下真实转存进去的条目名，供「是否已整理」回填用
+                            "item_names": list(getattr(tr, "last_share_names", []) or []),
                         })
             except Exception as exc:  # noqa: BLE001
                 errs.append(str(exc))

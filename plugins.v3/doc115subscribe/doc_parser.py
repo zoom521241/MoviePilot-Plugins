@@ -41,6 +41,14 @@ RES_HEADS = ("分辨率", "清晰度", "画质", "规格")
 SUB_HEADS = ("字幕", "语言", "中字")
 SKIP_SHEETS = ("wpsreserved_cellimgl",)  # 腾讯文档内部表
 
+# 片名里的「剧集」特征：第N季 / 全N集 / 共N集 / S01E02 / S01 / Season 1
+_TV_TITLE_RE = re.compile(
+    r"(第[一二三四五六七八九十\d]+季|全\s*\d+\s*集|共\s*\d+\s*集|"
+    r"(?<![A-Za-z0-9])S\d{1,2}E\d{1,3}(?![0-9])|(?<![A-Za-z0-9])S\d{1,2}(?![0-9])|"
+    r"Season\s*\d+)",
+    re.I,
+)
+
 _QUALITY_4K = re.compile(r"(4k|2160|uhd|杜比视界|dolby\s*vision)", re.I)
 _QUALITY_1080 = re.compile(r"(1080p|1080)", re.I)
 _CN_SUB = re.compile(r"(中文|中字|国语|简中|繁中|简繁)", re.I)
@@ -64,15 +72,18 @@ def is_skippable_sheet(sheet_name: str) -> bool:
 
 
 def media_type_of(sheet_name: str, title: str = "") -> str:
-    """返回 'movie' 或 'tv'：先看工作表名，再看片名特征。"""
+    """返回 'movie' 或 'tv'。
+
+    ⚠️ **片名特征优先于工作表名**：工作表名常常不可靠（例如「蚂蚁和 rb4k」这类复合表里
+    既有电影也有剧集），只看表名会把「洛基 第二季[全6集]」判成电影。
+    """
+    t = title or ""
+    if _TV_TITLE_RE.search(t):
+        return "tv"
     kind = classify_sheet(sheet_name)
     if kind == "movie":
         return "movie"
     if kind in ("tv", "anime", "variety"):
-        return "tv"
-    # 名称特征兜底
-    t = (title or "")
-    if re.search(r"(第[一二三四五六七八九十\d]+季|S\d{1,2}E\d|第\d+集|全\d+集|Season\s*\d)", t, re.I):
         return "tv"
     return "movie"
 

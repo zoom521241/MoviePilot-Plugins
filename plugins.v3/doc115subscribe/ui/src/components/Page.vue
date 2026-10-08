@@ -139,7 +139,7 @@
                   <span v-if="r.year" class="text-medium-emphasis font-weight-regular">（{{ r.year }}）</span>
                 </div>
                 <div class="text-caption mt-1">
-                  <v-chip size="x-small" :color="r.media_type === 'movie' ? 'indigo' : 'teal'" class="mr-1">
+                  <v-chip size="x-small" variant="flat" :color="r.media_type === 'movie' ? 'deep-purple' : 'blue-darken-2'" class="mr-1">
                     {{ r.media_type === 'movie' ? '电影' : '电视剧' }}
                   </v-chip>
                   <v-chip v-if="r.bundle" size="x-small" color="deep-orange" class="mr-1">打包链接</v-chip>
@@ -240,7 +240,7 @@
             <v-card-text class="py-2">
               <div class="d-flex align-center flex-wrap">
                 <span class="font-weight-bold text-body-1 text-primary">{{ r.title }}</span>
-                <v-chip size="x-small" :color="r.type === 'movie' ? 'indigo' : 'teal'" class="ml-2">
+                <v-chip size="x-small" variant="flat" :color="r.type === 'movie' ? 'deep-purple' : 'blue-darken-2'" class="ml-2">
                   {{ r.type === 'movie' ? '电影' : '电视剧' }}
                 </v-chip>
                 <v-chip size="x-small" variant="flat" :color="kindColor(r.kind)" class="ml-1">

@@ -952,7 +952,8 @@ return (_ctx, _cache) => {
                                         _createElementVNode("div", _hoisted_10, [
                                           _createVNode(_component_v_chip, {
                                             size: "x-small",
-                                            color: r.media_type === 'movie' ? 'indigo' : 'teal',
+                                            variant: "flat",
+                                            color: r.media_type === 'movie' ? 'deep-purple' : 'blue-darken-2',
                                             class: "mr-1"
                                           }, {
                                             default: _withCtx(() => [
@@ -1203,7 +1204,8 @@ return (_ctx, _cache) => {
                             _createElementVNode("span", _hoisted_17, _toDisplayString(r.title), 1),
                             _createVNode(_component_v_chip, {
                               size: "x-small",
-                              color: r.type === 'movie' ? 'indigo' : 'teal',
+                              variant: "flat",
+                              color: r.type === 'movie' ? 'deep-purple' : 'blue-darken-2',
                               class: "ml-2"
                             }, {
                               default: _withCtx(() => [
