@@ -154,6 +154,30 @@ class P115Transfer:
         err = str((resp or {}).get("error") or (resp or {}).get("errno") or "分享不可用")
         return False, err
 
+    def _share_item_ids(self, share_code: str, receive_code: str) -> List[str]:
+        """取分享内所有条目的 id（文件夹取 ``cid``、文件取 ``fid``）。
+
+        ⚠️ 转存时 ``file_id`` 必须传这些**真实 id**。传 ``"0"`` 只在部分单文件分享上凑巧可用；
+        当分享里是**文件夹**（例如整季剧集）时会直接返回「参数错误」。
+        """
+        ids: List[str] = []
+        try:
+            self._limiter.wait()
+            resp = self.client.share_snap({
+                "share_code": share_code,
+                "receive_code": receive_code,
+                "cid": 0,
+                "limit": 200,
+                "offset": 0,
+            })
+            for it in ((resp or {}).get("data") or {}).get("list") or []:
+                fid = it.get("fid") or it.get("id") or it.get("cid")
+                if fid:
+                    ids.append(str(fid))
+        except Exception:  # noqa: BLE001
+            pass
+        return ids
+
     def share_receive(self, share_url: str, save_path: str) -> bool:
         """把 115 分享链接整体转存到目标目录。"""
         ok, reason = self.check_share(share_url)
@@ -166,6 +190,9 @@ class P115Transfer:
         if not share_code:
             raise P115Error(f"无法解析分享链接：{share_url}")
         cid = self.path_to_id(save_path, mkdir=True)
+        # 分享内的真实条目 id（文件夹取 cid、文件取 fid）；取不到时退回 "0"
+        item_ids = self._share_item_ids(share_code, receive_code)
+        file_id = ",".join(item_ids) if item_ids else "0"
         last_err = ""
         for attempt in range(3):
             try:
@@ -173,7 +200,7 @@ class P115Transfer:
                 resp = self.client.share_receive({
                     "share_code": share_code,
                     "receive_code": receive_code,
-                    "file_id": "0",
+                    "file_id": file_id,
                     "cid": cid,
                     "is_check": 0,
                 })
@@ -189,7 +216,7 @@ class P115Transfer:
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)
                 time.sleep((attempt + 1) * 1.5)
-        raise P115Error(f"转存失败：{last_err}")
+        raise P115Error(f"转存失败：{last_err}（file_id={file_id[:80]}）")
 
     # -- 离线下载 -----------------------------------------------------------
     _DUP_WORDS = ("已推送", "已经推送", "推送过", "重复", "已存在", "已添加")
