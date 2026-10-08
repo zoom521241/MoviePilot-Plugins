@@ -32,7 +32,8 @@ MoviePilot V3 插件「115文档订阅与查询」的详情页 / 设置页前端
 
 ```bash
 npm install --ignore-scripts   # 直接 npm install 可能因 esbuild postinstall 在 Windows 报 EBUSY
-npm run build
+npm run build                  # 生产构建（联邦远程模块，不含 Vuetify 样式）
+npm run build:preview          # 独立可打开的预览版（自带 Vuetify，产物在 dist-preview/）
 ```
 
 构建产物在 `ui/dist/assets/`。发布时把 `ui/dist/assets/*` 复制到插件目录
@@ -41,16 +42,18 @@ npm run build
 ## 本地预览
 
 ```bash
-npm run dev
+npm run dev            # 开发态（Vite dev server，自动带 Vuetify）
+npm run build:preview  # 或构建成一份可离线打开的静态页（dist-preview/index.html）
 ```
-`src/App.vue` 是开发态壳子（注入桩 api）；真实数据要在 MoviePilot 里看。
+`src/App.vue` 是开发态壳子（注入桩 api），按钮会因没有后端而报错，但布局/交互与线上一致；
+真实数据要在 MoviePilot 里看。
 
 ## 目录结构
 
 ```
 ui/
 ├── index.html                     开发/构建入口
-├── vite.config.ts                 联邦配置 + 过滤 Vuetify 组件样式（css.postcss）
+├── vite.config.ts                 联邦配置（远程名 / exposes / shared）
 ├── package.json
 └── src/
     ├── main.js                    开发态挂载（createVuetify）
@@ -65,8 +68,10 @@ ui/
 
 ## 注意
 
-- `vite.config.ts` 里的 `dropVuetifyComponents`（postcss 插件）必须挂在 `css.postcss` 下才生效；
-  它把 `.v-*`（Vuetify 组件样式）过滤掉，避免与宿主重复。
+- **样式来源**：线上 `v-*` 组件的样式与 Vue/Vuetify 运行时都由 MoviePilot 宿主提供（联邦共享）。
+  所以 `src/main.js` 里装配 Vuetify 的那段**只在 DEV 生效**，生产构建会被摇掉，
+  产物里不含 Vuetify 全量样式（否则会与宿主重复、体积多几百 KB）。
+  组件里的 `v-btn` / `v-card` 等是 `resolveComponent` 解析宿主全局注册的组件，无需自己 import。
 - 构建保持 `minify: false`：产物未压缩、可读，便于线上排查与紧急热修（与历史产物一致）。
 - 结果卡片里「大包」（`sheet_bundle` / `bundle` / `no_link`）条目**不显示转存按钮**，
   只显示可点击的 115/磁力 链接与提示文案（与后端 `do_transfer` 的拦截保持一致）。
