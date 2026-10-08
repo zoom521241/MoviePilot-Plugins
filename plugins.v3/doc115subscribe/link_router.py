@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import re
+import html
 from typing import List, Optional, Tuple
+from urllib.parse import urlsplit
 
 LINK_115_SHARE = "115_share"
 LINK_MAGNET = "magnet"
@@ -23,11 +25,11 @@ LINK_ED2K = "ed2k"
 LINK_OTHER_HTTP = "http"
 
 # 通用资源链接（不含 ed2k：ed2k 用 `|` 分隔，单独匹配）
-_URL_RE = re.compile(r"(?:https?://|magnet:\?)[^\s\"'<>]{6,600}")
+_URL_RE = re.compile(r"(?:https?://|magnet:\?)[^\s\"'<>，。；！？）】》]+", re.I)
 # ed2k 专用：允许 `|`
 _ED2K_FULL_RE = re.compile(r"ed2k://[^\s\"'<>]+", re.I)
 # 115 分享链接的域名（分享页可能用 115.com 或 115cdn.com）
-_115_SHARE_RE = re.compile(r"^https?://(?:www\.)?115(?:cdn)?\.com/s/[A-Za-z0-9]+", re.I)
+_115_HOSTS = {"115.com", "www.115.com", "115cdn.com", "www.115cdn.com"}
 _MAGNET_RE = re.compile(r"^magnet:\?", re.I)
 _ED2K_RE = re.compile(r"^ed2k://", re.I)
 
@@ -37,7 +39,7 @@ def normalize_url(url: str) -> str:
 
     正常的 ``https://115.com/s/...`` 不受影响。
     """
-    u = (url or "").strip()
+    u = html.unescape(url or "").strip()
     while True:
         low = u.lower()
         if low.startswith("https://") and low[8:].startswith(("ed2k://", "magnet:")):
@@ -59,13 +61,18 @@ def classify_link(url: str) -> Optional[str]:
         return LINK_MAGNET
     if _ED2K_RE.match(u):
         return LINK_ED2K
-    if _115_SHARE_RE.match(u):
-        return LINK_115_SHARE
-    if u.startswith(("http://", "https://")):
-        # 115 分享的其它写法（如 115.com/s/ 短链被重定向域名）
-        if "115.com/s/" in u or "115cdn.com/s/" in u:
-            return LINK_115_SHARE
-        return LINK_OTHER_HTTP
+    try:
+        parsed = urlsplit(u)
+        if parsed.scheme.lower() in ("http", "https") and parsed.hostname:
+            # 只能按 URL 的真实主机判断，不能匹配路径、查询或伪造域名中的 115.com。
+            if (parsed.hostname.lower() in _115_HOSTS
+                    and not parsed.username and not parsed.password
+                    and parsed.port in (None, 80, 443)
+                    and re.fullmatch(r"/s/[A-Za-z0-9]+/?", parsed.path)):
+                return LINK_115_SHARE
+            return LINK_OTHER_HTTP
+    except ValueError:
+        return None
     return None
 
 

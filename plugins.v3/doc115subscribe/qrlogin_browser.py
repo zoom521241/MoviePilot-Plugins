@@ -16,9 +16,12 @@ import base64
 import glob
 import os
 import queue
+import re
 import threading
 import time
+import uuid
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -49,6 +52,25 @@ def png_data_url(data: bytes) -> str:
     return "data:image/png;base64," + base64.b64encode(data).decode()
 
 
+def _validate_doc_url(doc_url: str) -> str:
+    """Only a Tencent document URL may be opened by the login browser."""
+    try:
+        parsed = urlparse(str(doc_url or "").strip())
+        valid = (parsed.scheme == "https" and parsed.hostname == "docs.qq.com"
+                 and not parsed.username and not parsed.password and parsed.port in (None, 443)
+                 and re.fullmatch(r"/sheet/[A-Za-z0-9_-]+/?", parsed.path))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise QrLoginError("扫码登录仅支持 https://docs.qq.com/sheet/ 文档链接")
+    return parsed.geturl()
+
+
+def _tencent_cookie(cookie: Dict[str, Any]) -> bool:
+    domain = str(cookie.get("domain", "")).lstrip(".").lower()
+    return domain == "qq.com" or domain.endswith(".qq.com")
+
+
 class _Worker:
     """唯一的浏览器工作线程：playwright + Chromium 常驻，按指令服务。"""
 
@@ -59,6 +81,7 @@ class _Worker:
         self._ctx = None
         self._page = None
         self._last_shot = 0.0
+        self._session_id = None
         self._thread = threading.Thread(target=self._run, daemon=True, name="doc115-browser")
         self._thread.start()
         self.ready.wait(timeout=90)
@@ -108,11 +131,11 @@ class _Worker:
                     break
                 try:
                     if cmd == "start":
-                        box.put((True, self._start(payload)))
+                        box.put((True, self._start(payload["doc_url"], payload["session_id"])))
                     elif cmd == "check":
-                        box.put((True, self._check()))
+                        box.put((True, self._check(payload)))
                     elif cmd == "end_session":
-                        self._end_session()
+                        self._end_session(payload)
                         box.put((True, None))
                     else:
                         box.put((False, f"未知指令 {cmd}"))
@@ -126,7 +149,9 @@ class _Worker:
                 pass
 
     # ---- 会话 -------------------------------------------------------------
-    def _end_session(self):
+    def _end_session(self, session_id: Optional[str] = None):
+        if session_id is not None and session_id != self._session_id:
+            return
         if self._ctx is not None:
             try:
                 self._ctx.close()
@@ -134,9 +159,12 @@ class _Worker:
                 pass
         self._ctx = None
         self._page = None
+        self._session_id = None
 
-    def _start(self, doc_url: str) -> Tuple[bytes, bool]:
+    def _start(self, doc_url: str, session_id: str) -> Tuple[bytes, bool]:
+        doc_url = _validate_doc_url(doc_url)
         self._end_session()
+        self._session_id = session_id
         self._ctx = self._browser.new_context(
             user_agent=UA, viewport={"width": 1280, "height": 900}, locale="zh-CN")
         page = self._ctx.new_page()
@@ -166,7 +194,9 @@ class _Worker:
         frame = None
         deadline = time.time() + 20
         while time.time() < deadline:
-            frame = next((f for f in page.frames if "qrconnect" in f.url), None)
+            frame = next((f for f in page.frames
+                          if urlparse(f.url).hostname in ("open.weixin.qq.com", "open.wechat.com")
+                          and "qrconnect" in urlparse(f.url).path), None)
             if frame:
                 break
             page.wait_for_timeout(150)
@@ -188,20 +218,20 @@ class _Worker:
 
     def _has_uid(self, ctx) -> bool:
         try:
-            return any(c.get("name") == "uid" for c in ctx.cookies())
+            return any(c.get("name") == "uid" and _tencent_cookie(c) for c in ctx.cookies())
         except Exception:  # noqa: BLE001
             return False
 
-    def _check(self) -> Dict[str, Any]:
+    def _check(self, session_id: str) -> Dict[str, Any]:
         ctx = self._ctx
-        if ctx is None:
-            return {"state": "expired"}
+        if ctx is None or session_id != self._session_id:
+            return {"state": "expired", "session_id": session_id}
         cookies = ctx.cookies()
+        cookies = [c for c in cookies if _tencent_cookie(c)]
         names = {c.get("name") for c in cookies}
         if "uid" in names:
-            parts = [f"{c['name']}={c['value']}" for c in cookies
-                     if c.get("domain") and "qq.com" in c["domain"]]
-            return {"state": "confirmed", "cookie": "; ".join(parts), "count": len(parts)}
+            parts = [f"{c['name']}={c['value']}" for c in cookies]
+            return {"state": "confirmed", "session_id": session_id, "cookie": "; ".join(parts), "count": len(parts)}
         if time.time() - self._last_shot > QR_REFRESH_SECONDS:
             try:
                 shot = self._shoot_qr()
@@ -227,27 +257,43 @@ class BrowserQrLogin:
     """一次登录会话的句柄；底层浏览器常驻复用。"""
 
     def __init__(self, doc_url: str):
-        self.doc_url = doc_url
+        self.doc_url = _validate_doc_url(doc_url)
+        self.session_id = uuid.uuid4().hex
         self._started_at = 0.0
+        self._worker: Optional[_Worker] = None
+        self._closed = False
 
     def start(self) -> Tuple[bytes, bool, float]:
         """返回 (二维码PNG, 是否已登录, 耗时秒)。"""
+        if self._closed:
+            raise QrLoginError("登录会话已关闭，请重新获取二维码")
         t0 = time.time()
-        shot, already = _get_worker().submit("start", self.doc_url, timeout=180)
+        self._worker = _get_worker()
+        shot, already = self._worker.submit("start", {
+            "doc_url": self.doc_url, "session_id": self.session_id,
+        }, timeout=180)
         self._started_at = time.time()
         return shot, already, time.time() - t0
 
     def check(self) -> Dict[str, Any]:
+        if self._closed or not self._started_at or self._worker is None:
+            return {"state": "expired", "session_id": self.session_id}
         if time.time() - self._started_at > SESSION_TIMEOUT:
             self.close()
             return {"state": "expired"}
         try:
-            return _get_worker().submit("check", None, timeout=120)
+            return self._worker.submit("check", self.session_id, timeout=120)
         except QrLoginError as exc:
             return {"state": "wait"} if "超时" in str(exc) else {"state": "error", "msg": str(exc)}
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        worker = self._worker
+        if worker is None:
+            return
         try:
-            _get_worker().submit("end_session", None, timeout=40)
+            worker.submit("end_session", self.session_id, timeout=40)
         except Exception:  # noqa: BLE001
             pass
