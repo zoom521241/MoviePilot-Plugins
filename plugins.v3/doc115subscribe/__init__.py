@@ -39,6 +39,7 @@ try:
     from . import doc_parser, subscribe_sync
     from .doc_client import DocError, TencentDocsClient
     from .doc_index import DocIndex
+    from .history import RecordStore
     from .link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
     from .p115_transfer import P115Error, P115Transfer, extract_hash
     from .qrlogin_browser import BrowserQrLogin, QrLoginError
@@ -47,6 +48,7 @@ except ImportError:
     import subscribe_sync
     from doc_client import DocError, TencentDocsClient
     from doc_index import DocIndex
+    from history import RecordStore
     from link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
     from p115_transfer import P115Error, P115Transfer, extract_hash
     from qrlogin_browser import BrowserQrLogin, QrLoginError
@@ -57,7 +59,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.5.3"
+    plugin_version = "0.6.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -71,12 +73,13 @@ class Doc115Subscribe(_PluginBase):
     _p115_cookie = ""
     _movie_path = "/115-影视/115-downloads/电影"
     _tv_path = "/115-影视/115-downloads/电视剧"
+    # 磁力/ed2k 先落这个暂存目录，下载完成后再由插件搬到上面的电影/电视剧目录
+    _magnet_staging_path = "/115-影视/115-downloads/磁力链接"
     _subscribe_enabled = True
     _subscribe_cron = "0 21 * * *"
     _index_cron = "0 6 * * *"
     _use_agent = True
     _create_subdir = True      # 转存时按「片名 (年份)」建子目录
-    _record_history = True     # 转存后写入 MP 下载历史（触发整理/STRM）
 
     _scheduler: Optional[BackgroundScheduler] = None
     _index: Optional[DocIndex] = None
@@ -107,12 +110,14 @@ class Doc115Subscribe(_PluginBase):
             self._p115_cookie = config.get("p115_cookie") or ""
             self._movie_path = config.get("movie_path") or self.__class__._movie_path
             self._tv_path = config.get("tv_path") or self.__class__._tv_path
+            self._magnet_staging_path = (
+                config.get("magnet_staging_path") or self.__class__._magnet_staging_path
+            )
             self._subscribe_enabled = bool(config.get("subscribe_enabled", True))
             self._subscribe_cron = config.get("subscribe_cron") or self.__class__._subscribe_cron
             self._index_cron = config.get("index_cron") or self.__class__._index_cron
             self._use_agent = bool(config.get("use_agent", True))
             self._create_subdir = bool(config.get("create_subdir", True))
-            self._record_history = bool(config.get("record_history", True))
 
         self.stop_service()
         self._load_index()
@@ -178,12 +183,12 @@ class Doc115Subscribe(_PluginBase):
             "p115_cookie": self._p115_cookie,
             "movie_path": self._movie_path,
             "tv_path": self._tv_path,
+            "magnet_staging_path": self._magnet_staging_path,
             "subscribe_enabled": self._subscribe_enabled,
             "subscribe_cron": self._subscribe_cron,
             "index_cron": self._index_cron,
             "use_agent": self._use_agent,
             "create_subdir": self._create_subdir,
-            "record_history": self._record_history,
         }
 
     def resolve_media_type(self, rec: Dict[str, Any]) -> str:
@@ -243,66 +248,134 @@ class Doc115Subscribe(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"115文档订阅与查询：保存待整理离线任务失败：{exc}")
 
+    # ---- 转存/离线记录（详情页「转存记录」页）------------------------------
+    @property
+    def history_path(self):
+        return self.get_data_path_local() / "history.json"
+
+    def _records(self) -> RecordStore:
+        return RecordStore(self.history_path)
+
     def add_pending_offline(self, rec: Dict[str, Any], target: str,
-                            save_path: str, url: str) -> None:
-        """登记离线任务：磁力/ed2k 提交后文件还没落盘，等下载完成再通知 MP 整理。"""
+                            submit_path: str, final_path: str, url: str) -> Optional[str]:
+        """登记离线任务：磁力/ed2k 先落暂存目录，下载完成后再搬到最终目录。"""
         h = extract_hash(url)
         if not h:
-            return
+            return None
         items = self._load_pending()
-        if any(i.get("hash") == h for i in items):
-            return
-        items.append({
-            "hash": h,
-            "title": rec.get("title"),
-            "year": rec.get("year"),
-            "type": "movie" if target == "movie" else "tv",
-            "save_path": save_path,
-            "url": url,
-            "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
-        self._save_pending(items)
-        logger.info(f"115文档订阅与查询：已登记离线任务，待下载完成后触发整理："
-                    f"{rec.get('title')} [{h[:12]}]")
+        if not any(i.get("hash") == h for i in items):
+            items.append({
+                "hash": h,
+                "title": rec.get("title"),
+                "year": rec.get("year"),
+                "type": "movie" if target == "movie" else "tv",
+                "staging_path": submit_path,   # 实际提交/落盘目录
+                "final_path": final_path,      # 下载完成后要搬到的目录
+                "url": url,
+                "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            self._save_pending(items)
+        logger.info(f"115文档订阅与查询：已登记离线任务（先落 {submit_path}，"
+                    f"完成后搬到 {final_path}）：{rec.get('title')} [{h[:12]}]")
+        return h
 
     def check_offline_tasks(self) -> Dict[str, Any]:
-        """检查离线下载是否完成；完成的写入 MP 下载历史，进而触发整理与 STRM 生成。"""
+        """检查离线下载进度：完成后从暂存目录搬到最终目录（走 115网盘Plus）。
+
+        整理由 115 生活事件驱动（P115StrmHelper 监控网盘目录变化），本插件不再写 MP 下载历史：
+        文件一旦出现在 电影/电视剧 下载目录，就会产生 115 事件并被整理。
+        """
         items = self._load_pending()
-        if not items:
-            return {"code": 0, "data": {"pending": 0, "finished": 0}}
         tr = self._transfers()
         if not tr:
             return {"code": 1, "msg": "未配置 115 Cookie"}
         try:
             tasks = tr.list_tasks()
-        except P115Error as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"code": 1, "msg": f"查询 115 离线任务失败：{exc}"}
-        done: Dict[str, Dict[str, Any]] = {}
+        by_hash: Dict[str, Dict[str, Any]] = {}
         for t in tasks:
             h = str(t.get("info_hash") or "").lower()
+            if h:
+                by_hash[h] = t
+
+        store = self._records()
+        if not items:
+            return {"code": 0, "data": {"pending": 0, "finished": 0, "moved": 0}}
+
+        moved, finished, remain = 0, 0, []
+        for it in items:
+            h = str(it.get("hash") or "").lower()
+            t = by_hash.get(h) or {}
             try:
-                pct = float(t.get("percentDone") or 0)
+                pct = int(float(t.get("percentDone") or 0))
             except (TypeError, ValueError):
                 pct = 0
-            if h and pct >= 100:
-                done[h] = t
-        finished, remain = 0, []
-        for it in items:
-            t = done.get(it.get("hash") or "")
-            if not t:
+            name = str(t.get("name") or "")
+            staging = str(it.get("staging_path") or "")
+            final = str(it.get("final_path") or "")
+
+            if pct < 100:
+                self._update_record(store, h, status="downloading", progress=pct)
                 remain.append(it)
                 continue
-            rec = {"title": it.get("title"), "year": it.get("year"),
-                   "sheet": "离线下载", "qtext": str(t.get("name") or "")[:80]}
-            if self.record_download_history(rec, it.get("type") or "movie",
-                                            it.get("save_path") or "", it.get("url") or ""):
-                finished += 1
-                logger.info(f"115文档订阅与查询：离线下载完成，已通知 MP 整理：{it.get('title')}")
-            else:
+
+            # 100% —— 校验是否真的落盘到暂存目录（115 偶发"任务完成但文件未落盘"）
+            src = f"{staging}/{name}" if (staging and name) else ""
+            if not src or not tr.path_exists(src):
+                self._update_record(store, h, status="downloading", progress=100,
+                                    message="离线任务已完成，等待文件落盘")
                 remain.append(it)
-        if finished:
+                continue
+
+            self._update_record(store, h, status="moving", progress=100)
+            ok, err = tr.move_via_p115disk(src, final)
+            if ok:
+                moved += 1
+                finished += 1
+                self._update_record(store, h, status="done", progress=100,
+                                    message=f"已搬到 {final}，等待 115 整理")
+                logger.info(f"115文档订阅与查询：离线下载完成并已搬到最终目录（等待 115 整理）："
+                            f"{it.get('title')} -> {final}")
+            else:
+                self._update_record(store, h, status="failed", progress=100, message=err)
+                logger.warning(f"115文档订阅与查询：离线文件搬运失败 {it.get('title')}：{err}")
+                remain.append(it)
+        if moved or finished:
             self._save_pending(remain)
-        return {"code": 0, "data": {"pending": len(remain), "finished": finished}}
+        return {"code": 0, "data": {"pending": len(remain), "finished": finished, "moved": moved}}
+
+    @staticmethod
+    def _update_record(store: RecordStore, info_hash: str, **fields: Any) -> None:
+        rec = store.find_by_hash(info_hash)
+        if rec:
+            store.update(rec["id"], **fields)
+
+    def records_view(self, refresh: bool = True) -> Dict[str, Any]:
+        """详情页「转存记录」页数据：历史记录 + 离线任务实时进度。"""
+        store = self._records()
+        recs = store.list()
+        if refresh:
+            try:
+                tr = self._transfers()
+                if tr:
+                    tasks = {str(t.get("info_hash") or "").lower(): t for t in tr.list_tasks()}
+                    for r in recs:
+                        if r.get("status") not in ("downloading", "moving"):
+                            continue
+                        t = tasks.get(str(r.get("hash") or "").lower())
+                        if not t:
+                            continue
+                        try:
+                            pct = int(float(t.get("percentDone") or 0))
+                        except (TypeError, ValueError):
+                            pct = 0
+                        if pct != r.get("progress"):
+                            store.update(r["id"], progress=pct)
+                            r["progress"] = pct
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"115文档订阅与查询：刷新离线进度失败：{exc}")
+        return {"code": 0, "data": recs}
 
     def _ensure_index(self):
         """内存里没有索引时，从磁盘已保存的文件加载（避免重启/重载后又要重建）。"""
@@ -359,40 +432,6 @@ class Doc115Subscribe(_PluginBase):
             name = name.replace(ch, "_")
         return f"{base}/{name[:80]}"
 
-    def record_download_history(self, rec: Dict[str, Any], target: str,
-                                save_path: str, url: str) -> bool:
-        """写入 MP 下载历史 —— 这是让后续「整理 / STRM 生成 / 媒体库刷新」接上的关键。
-
-        不写的话 MP 根本不知道有这次转存：文件会一直躺在下载目录里不被整理，
-        P115StrmHelper 的生活事件/转移监控也不会触发。
-        """
-        if not self._record_history:
-            return False
-        try:
-            try:
-                from app.db.downloadhistory_oper import DownloadHistoryOper
-            except ImportError:
-                from app.db.oper.downloadhistory import DownloadHistoryOper  # type: ignore
-            DownloadHistoryOper().add(
-                path=save_path,
-                type="电影" if target == "movie" else "电视剧",
-                title=(rec.get("title") or "").strip(),
-                year=str(rec.get("year") or "").strip() or None,
-                downloader="115网盘",
-                download_hash=url,
-                torrent_name=(rec.get("title") or "").strip(),
-                torrent_description=(rec.get("qtext") or "")[:200],
-                torrent_site="115网盘",
-                username="Doc115Subscribe",
-                date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                note={"source": "Doc115Subscribe", "sheet": rec.get("sheet"), "url": url},
-            )
-            logger.info(f"115文档订阅与查询：已写入下载历史，等待 MP 整理：{rec.get('title')} -> {save_path}")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"115文档订阅与查询：写入下载历史失败（不影响转存本身）：{exc}")
-            return False
-
     def do_transfer(self, rec: Dict[str, Any], to: str = "") -> Tuple[bool, str]:
         try:
             return self._do_transfer_inner(rec, to)
@@ -404,7 +443,8 @@ class Doc115Subscribe(_PluginBase):
     def _do_transfer_inner(self, rec: Dict[str, Any], to: str = "") -> Tuple[bool, str]:
         """把一条记录转存到 115：115 分享走转存、磁力/ed2k 走离线下载。
 
-        成功后写入 MP 下载历史，让 MP 的整理流程（含 P115StrmHelper 接管）接手。
+        115 分享直接落到最终目录；磁力/ed2k 先落到「磁力暂存目录」，下载完成后
+        再由本插件搬到最终目录。整理由 115 生活事件驱动，**不再写 MP 下载历史**。
         """
         links = [(k, u) for k, u in doc_parser.iter_links(rec) if k and u]
         if not links:
@@ -415,21 +455,43 @@ class Doc115Subscribe(_PluginBase):
             return False, (f"{rec.get('title')}：该条目是打包链接（大包），已关闭一键转存；"
                            f"请点击结果里的 115/磁力 链接自行查看或转存")
         target = to or self.resolve_media_type(rec)
-        save_path = self.build_save_path(rec, target)
+        final_path = self.build_save_path(rec, target)
+        staging_path = self._magnet_staging_path or final_path
         tr = self._transfers()
         if not tr:
             return False, "未配置 115 Cookie（可在插件配置填写，或先装好 115 网盘相关插件）"
+        store = self._records()
         ok_msgs, errs, first_url = [], [], ""
         offline_added = []
         for kind, url in links:
             try:
-                ok, msg = tr.add_resource(kind, url, save_path)
+                # 磁力/ed2k 先落「磁力暂存目录」，完成后再由插件搬到最终目录；
+                # 115 分享是直接落到最终目录的。
+                submit_path = staging_path if kind in (LINK_MAGNET, LINK_ED2K) else final_path
+                ok, msg = tr.add_resource(kind, url, submit_path)
                 if ok:
                     ok_msgs.append(msg)
                     first_url = first_url or url
                     if kind in (LINK_MAGNET, LINK_ED2K):
-                        self.add_pending_offline(rec, target, save_path, url)
+                        h = self.add_pending_offline(rec, target, submit_path, final_path, url)
                         offline_added.append(kind)
+                        store.add({
+                            "title": rec.get("title"), "year": rec.get("year"),
+                            "type": "movie" if target == "movie" else "tv",
+                            "kind": kind, "url": url, "hash": h or "",
+                            "staging_path": submit_path, "final_path": final_path,
+                            "status": "downloading", "progress": 0,
+                            "message": f"已提交离线下载，先落 {submit_path}",
+                        })
+                    else:
+                        store.add({
+                            "title": rec.get("title"), "year": rec.get("year"),
+                            "type": "movie" if target == "movie" else "tv",
+                            "kind": kind, "url": url, "hash": "",
+                            "staging_path": final_path, "final_path": final_path,
+                            "status": "done",
+                            "message": f"已转存到 {final_path}，等待 115 整理",
+                        })
             except Exception as exc:  # noqa: BLE001
                 errs.append(str(exc))
                 logger.warning(
@@ -442,11 +504,10 @@ class Doc115Subscribe(_PluginBase):
             return False, f"{rec.get('title')} 转存失败：{reason}"
         is_offline_only = bool(offline_added) and all(m == "已提交离线下载" for m in ok_msgs)
         if is_offline_only:
-            return True, (f"{rec.get('title')} -> {save_path}（{'；'.join(ok_msgs)}）"
-                          f"，下载完成后会自动通知 MP 整理")
-        logged = self.record_download_history(rec, target, save_path, first_url)
-        tail = "，已通知 MP 整理" if logged else "（下载历史写入失败，整理可能不会触发）"
-        return True, f"{rec.get('title')} -> {save_path}（{'；'.join(ok_msgs)}）{tail}"
+            return True, (f"{rec.get('title')} -> 先落 {staging_path}（{'；'.join(ok_msgs)}）"
+                          f"，下载完成后会搬到 {final_path}，再由 115 整理")
+        return True, (f"{rec.get('title')} -> {final_path}（{'；'.join(ok_msgs)}），"
+                      f"已转存，等待 115 整理")
 
     # ---- 表单 / 页面（Vue 联邦模式） --------------------------------------
     @staticmethod
@@ -478,7 +539,9 @@ class Doc115Subscribe(_PluginBase):
             {"path": "/transfer", "endpoint": self.api_transfer,
              "auth": "bear", "methods": ["POST"], "summary": "转存到 115"},
             {"path": "/check_offline", "endpoint": self.api_check_offline,
-             "auth": "bear", "methods": ["POST"], "summary": "检查离线下载并通知整理"},
+             "auth": "bear", "methods": ["POST"], "summary": "检查离线下载并搬运到最终目录"},
+            {"path": "/records", "endpoint": self.api_records,
+             "auth": "bear", "methods": ["GET"], "summary": "转存/离线记录与进度"},
             {"path": "/run_subscribe", "endpoint": self.api_run_subscribe,
              "auth": "bear", "methods": ["POST"], "summary": "手动同步电影订阅"},
             {"path": "/qr_start", "endpoint": self.api_qr_start,
@@ -611,6 +674,15 @@ class Doc115Subscribe(_PluginBase):
 
     def api_check_offline(self) -> Dict[str, Any]:
         return self.check_offline_tasks()
+
+    def api_records(self, limit: int = 200) -> Dict[str, Any]:
+        """详情页「转存记录」页：历史转存/离线记录 + 实时进度。"""
+        data = self.records_view(refresh=True).get("data") or []
+        try:
+            n = int(limit)
+        except (TypeError, ValueError):
+            n = 200
+        return {"code": 0, "data": data[:max(1, n)]}
 
     def api_run_subscribe(self) -> Dict[str, Any]:
         return self.run_subscribe()

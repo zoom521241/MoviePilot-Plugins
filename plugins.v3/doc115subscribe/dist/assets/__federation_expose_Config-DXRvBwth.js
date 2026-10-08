@@ -31,12 +31,12 @@ const DEFAULTS = {
   p115_cookie: '',
   movie_path: '/115-影视/115-downloads/电影',
   tv_path: '/115-影视/115-downloads/电视剧',
+  magnet_staging_path: '/115-影视/115-downloads/磁力链接',
   subscribe_enabled: true,
   subscribe_cron: '0 21 * * *',
   index_cron: '0 6 * * *',
   use_agent: true,
   create_subdir: true,
-  record_history: true,
 };
 
 const cfg = reactive({ ...DEFAULTS });
@@ -187,10 +187,7 @@ return (_ctx, _cache) => {
           }),
           _createVNode(_component_v_row, { dense: "" }, {
             default: _withCtx(() => [
-              _createVNode(_component_v_col, {
-                cols: "12",
-                md: "6"
-              }, {
+              _createVNode(_component_v_col, { cols: "12" }, {
                 default: _withCtx(() => [
                   _createVNode(_component_v_switch, {
                     modelValue: cfg.create_subdir,
@@ -201,42 +198,13 @@ return (_ctx, _cache) => {
                   }, null, 8, ["modelValue"])
                 ]),
                 _: 1
-              }),
-              _createVNode(_component_v_col, {
-                cols: "12",
-                md: "6"
-              }, {
-                default: _withCtx(() => [
-                  _createVNode(_component_v_switch, {
-                    modelValue: cfg.record_history,
-                    "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((cfg.record_history) = $event)),
-                    color: "primary",
-                    "hide-details": "",
-                    label: "转存后写入 MP 下载历史（触发整理 / STRM 生成，强烈建议开启）"
-                  }, null, 8, ["modelValue"])
-                ]),
-                _: 1
               })
             ]),
             _: 1
           }),
-          (!cfg.record_history)
-            ? (_openBlock(), _createBlock(_component_v_alert, {
-                key: 1,
-                type: "warning",
-                variant: "tonal",
-                density: "comfortable",
-                class: "mt-3"
-              }, {
-                default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
-                  _createTextVNode(" 关闭「写入下载历史」后，MP 不会知道这次转存，文件会一直留在下载目录、不会被整理， 也不会触发 STRM 生成与媒体库刷新。 ", -1)
-                ]))]),
-                _: 1
-              }))
-            : _createCommentVNode("", true),
           _createVNode(_component_v_text_field, {
             modelValue: cfg.doc_url,
-            "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((cfg.doc_url) = $event)),
+            "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((cfg.doc_url) = $event)),
             label: "腾讯文档链接",
             variant: "outlined",
             density: "comfortable",
@@ -246,7 +214,7 @@ return (_ctx, _cache) => {
           }, null, 8, ["modelValue"]),
           _createVNode(_component_v_textarea, {
             modelValue: cfg.tencent_cookie,
-            "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((cfg.tencent_cookie) = $event)),
+            "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((cfg.tencent_cookie) = $event)),
             label: "腾讯文档 Cookie",
             variant: "outlined",
             density: "comfortable",
@@ -258,7 +226,7 @@ return (_ctx, _cache) => {
           }, null, 8, ["modelValue"]),
           _createVNode(_component_v_textarea, {
             modelValue: cfg.p115_cookie,
-            "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((cfg.p115_cookie) = $event)),
+            "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((cfg.p115_cookie) = $event)),
             label: "115 Cookie（留空则自动复用其它115插件）",
             variant: "outlined",
             density: "comfortable",
@@ -278,7 +246,7 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createVNode(_component_v_text_field, {
                     modelValue: cfg.movie_path,
-                    "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((cfg.movie_path) = $event)),
+                    "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((cfg.movie_path) = $event)),
                     label: "115 电影下载目录",
                     variant: "outlined",
                     density: "comfortable",
@@ -294,7 +262,7 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createVNode(_component_v_text_field, {
                     modelValue: cfg.tv_path,
-                    "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((cfg.tv_path) = $event)),
+                    "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((cfg.tv_path) = $event)),
                     label: "115 电视剧下载目录",
                     variant: "outlined",
                     density: "comfortable",
@@ -306,6 +274,17 @@ return (_ctx, _cache) => {
             ]),
             _: 1
           }),
+          _createVNode(_component_v_text_field, {
+            modelValue: cfg.magnet_staging_path,
+            "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((cfg.magnet_staging_path) = $event)),
+            label: "磁力 / ed2k 暂存目录",
+            variant: "outlined",
+            density: "comfortable",
+            class: "mt-3",
+            "hide-details": "",
+            hint: "磁力/ed2k 先离线下载到这里，完成后由本插件走「115网盘Plus」搬到上面的电影/电视剧目录（115 分享链接不受影响，直接进最终目录）",
+            "persistent-hint": ""
+          }, null, 8, ["modelValue"]),
           _createVNode(_component_v_row, {
             dense: "",
             class: "mt-3"
@@ -359,7 +338,7 @@ return (_ctx, _cache) => {
             loading: loading.value,
             onClick: _cache[12] || (_cache[12] = $event => (load(true)))
           }, {
-            default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
+            default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
               _createTextVNode("重新读取配置", -1)
             ]))]),
             _: 1
@@ -371,7 +350,7 @@ return (_ctx, _cache) => {
             "prepend-icon": "mdi-content-save",
             onClick: save
           }, {
-            default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
+            default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
               _createTextVNode("保存配置", -1)
             ]))]),
             _: 1

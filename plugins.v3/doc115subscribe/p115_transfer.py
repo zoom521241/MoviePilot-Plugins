@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Any, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from p115client import P115Client
@@ -239,6 +240,45 @@ class P115Transfer:
                 break
             page += 1
         return out
+
+    # -- 目录/搬运（走 115网盘Plus 插件）-------------------------------------
+    def list_names(self, path: str) -> List[str]:
+        """列出 115 网盘某个目录下的名字（只读）。"""
+        cid = self.path_to_id(path, mkdir=False)
+        self._limiter.wait()
+        resp = self.client.fs_files({"cid": cid, "limit": 400, "show_dir": 1})
+        return [str(it.get("n") or "") for it in ((resp or {}).get("data") or [])]
+
+    def path_exists(self, path: str) -> bool:
+        """判断 115 网盘上的某个路径是否存在（用于离线下载落盘校验）。"""
+        p = Path(str(path))
+        try:
+            return p.name in self.list_names(p.parent.as_posix())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def move_via_p115disk(self, src_path: str, dest_dir: str) -> Tuple[bool, str]:
+        """把网盘上的 ``src_path`` 移动到 ``dest_dir``。
+
+        ⚠️ 按约定，115 网盘上的移动**必须走 115网盘Plus（P115Disk）插件**，
+        所以这里直接复用它的存储实现 ``P115Api``（含限速与缓存维护），
+        而不是自己调 fs_move。
+        """
+        try:
+            from app.plugins.p115disk.p115_api import P115Api  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            return False, f"115网盘Plus 未安装/不可用：{exc}"
+        try:
+            api = P115Api(client=self.client, disk_name="115网盘Plus")
+            item = api.get_item(Path(src_path))
+            if not item:
+                return False, f"源路径不存在：{src_path}"
+            name = getattr(item, "name", None) or Path(src_path).name
+            if api.move(item, Path(dest_dir), name):
+                return True, ""
+            return False, f"移动失败：{src_path} -> {dest_dir}"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"移动异常：{type(exc).__name__}: {exc}"
 
     # -- 统一入口 -----------------------------------------------------------
     def add_resource(self, kind: str, url: str, save_path: str) -> Tuple[bool, str]:
