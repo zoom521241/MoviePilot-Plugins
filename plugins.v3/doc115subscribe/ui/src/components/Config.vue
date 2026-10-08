@@ -5,13 +5,13 @@
       <v-alert v-if="msg" :type="msgType" variant="tonal" density="comfortable" class="mb-3">{{ msg }}</v-alert>
 
       <v-alert
-        :type="cfg.tencent_cookie ? 'success' : 'warning'"
+        :type="secrets.tencent_ready ? 'info' : 'warning'"
         variant="tonal"
         density="comfortable"
         class="mb-3"
       >
-        腾讯文档 Cookie：{{ cfg.tencent_cookie ? `已配置（${cfg.tencent_cookie.length} 字符）` : '未配置 —— 请到「详情」页扫码登录，或在此手动粘贴' }}
-        <span v-if="cfg.tencent_cookie" class="text-medium-emphasis">｜开头：{{ cfg.tencent_cookie.slice(0, 24) }}…</span>
+        腾讯文档 Cookie：{{ secrets.tencent_ready ? '已配置，保存时留空会保留' : '未配置，请到「详情」页扫码登录或在此粘贴' }}
+        ｜115 Cookie：{{ secrets.p115_ready ? '已配置，保存时留空会保留' : '未单独配置，可复用其它 115 插件' }}
       </v-alert>
 
       <v-row dense>
@@ -20,9 +20,6 @@
         </v-col>
         <v-col cols="12" md="4">
           <v-switch v-model="cfg.subscribe_enabled" label="启用电影订阅同步" color="primary" hide-details />
-        </v-col>
-        <v-col cols="12" md="4">
-          <v-switch v-model="cfg.use_agent" label="类型不确定时调用 MP 智能体" color="primary" hide-details />
         </v-col>
       </v-row>
 
@@ -36,6 +33,9 @@
           />
         </v-col>
       </v-row>
+      <v-select v-model="cfg.link_mode" :items="linkModes" label="同一资源的多个链接" variant="outlined" density="comfortable" class="mt-3" persistent-hint hint="默认按镜像回退，首个成功即停止；只有明确属于分卷或多份必要文件时才选择全部提交。" />
+      <v-switch v-model="cfg.upgrade_enabled" color="primary" hide-details label="允许订阅获取新资源版本" />
+      <div class="text-caption text-medium-emphasis">开启后，同一影片出现不同资源链接时可以重新获取，可能产生多个版本。</div>
 
       <v-text-field
         v-model="cfg.doc_url"
@@ -47,27 +47,31 @@
         hide-details
       />
 
-      <v-textarea
+      <v-text-field
         v-model="cfg.tencent_cookie"
-        label="腾讯文档 Cookie"
+        label="替换腾讯文档 Cookie（留空保留）"
+        type="password"
+        autocomplete="new-password"
         variant="outlined"
         density="comfortable"
-        rows="3"
         class="mt-3"
         hide-details
-        hint="推荐在「详情」页用扫码登录自动获取；也可手动粘贴。仅本地保存。"
+        hint="推荐在「详情」页扫码登录；已有 Cookie 不会回显。"
         persistent-hint
       />
+      <v-checkbox v-model="cfg.clear_tencent_cookie" label="清除已保存的腾讯文档 Cookie" color="warning" hide-details />
 
-      <v-textarea
+      <v-text-field
         v-model="cfg.p115_cookie"
-        label="115 Cookie（留空则自动复用其它115插件）"
+        label="替换 115 Cookie（留空保留）"
+        type="password"
+        autocomplete="new-password"
         variant="outlined"
         density="comfortable"
-        rows="2"
         class="mt-4"
         hide-details
       />
+      <v-checkbox v-model="cfg.clear_p115_cookie" label="清除单独保存的 115 Cookie（改为复用其它 115 插件）" color="warning" hide-details />
 
       <v-row dense class="mt-3">
         <v-col cols="12" md="6">
@@ -139,56 +143,82 @@ const props = defineProps({
   model: { type: Object, default: () => ({}) },
   api: { type: Object, default: () => ({ get: async () => ({}), post: async () => ({}) }) },
 })
-const emit = defineEmits(['save', 'action'])
+const emit = defineEmits(['action'])
 
 const DEFAULTS = {
   enabled: false,
   doc_url: 'https://docs.qq.com/sheet/DZWtEeFFGZW9XUkJo',
   tencent_cookie: '',
   p115_cookie: '',
+  clear_tencent_cookie: false,
+  clear_p115_cookie: false,
   movie_path: '/115-影视/115-downloads/电影',
   tv_path: '/115-影视/115-downloads/电视剧',
   magnet_staging_path: '/115-影视/115-downloads/磁力链接',
   subscribe_enabled: true,
   subscribe_cron: '0 21 * * *',
   index_cron: '0 6 * * *',
-  use_agent: true,
   create_subdir: true,
+  link_mode: 'first',
+  upgrade_enabled: false,
 }
+const linkModes = [{ title: '镜像回退（推荐）', value: 'first' }, { title: '分卷 / 多份文件：全部提交', value: 'all' }]
 
 const cfg = reactive({ ...DEFAULTS })
+const secrets = reactive({ tencent_ready: false, p115_ready: false })
 const msg = ref('')
 const msgType = ref('info')
 const saving = ref(false)
 const loading = ref(false)
 
 async function load(showTip = false) {
+  if (loading.value || saving.value) return
   loading.value = true
   try {
-    const res = await props.api.get('plugin/Doc115Subscribe/get_config')
-    const data = res && res.data !== undefined ? res.data : res
-    if (data && typeof data === 'object') Object.assign(cfg, { ...DEFAULTS, ...data })
-    if (showTip) {
-      msg.value = cfg.tencent_cookie
-        ? `已读取到最新配置：腾讯文档 Cookie 已配置（${cfg.tencent_cookie.length} 字符）`
-        : '已读取到最新配置：腾讯文档 Cookie 仍为空（请到「详情」页扫码登录）'
-      msgType.value = cfg.tencent_cookie ? 'success' : 'warning'
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/get_config'))
+    if (res.code !== 0) throw new Error(res.msg || '读取配置失败')
+    const data = res.data
+    if (!data || typeof data !== 'object') throw new Error('配置响应格式错误')
+    secrets.tencent_ready = !!(data.tencent_cookie_ready || data.cookie_ready || data.tencent_cookie)
+    secrets.p115_ready = 'p115_cookie_ready' in data ? !!data.p115_cookie_ready : !!(data.p115_ready || data.p115_cookie)
+    // Credentials never enter the input controls, including older backend responses.
+    for (const key of Object.keys(DEFAULTS)) cfg[key] = data[key] === undefined ? DEFAULTS[key] : data[key]
+    cfg.tencent_cookie = ''
+    cfg.p115_cookie = ''
+    cfg.clear_tencent_cookie = false
+    cfg.clear_p115_cookie = false
+    if (showTip === true) {
+      msg.value = secrets.tencent_ready ? '已读取最新配置，腾讯文档 Cookie 已配置' : '已读取最新配置，腾讯文档 Cookie 未配置'
+      msgType.value = secrets.tencent_ready ? 'info' : 'warning'
     }
   } catch (e) {
-    console.error(e)
+    msg.value = `读取失败：${e.message || e}`
+    msgType.value = 'error'
   } finally {
     loading.value = false
   }
 }
 
 async function save() {
+  if (saving.value || loading.value) return
+  if ((cfg.clear_tencent_cookie && cfg.tencent_cookie.trim()) || (cfg.clear_p115_cookie && cfg.p115_cookie.trim())) {
+    msg.value = '替换 Cookie 和清除 Cookie 不能同时选择'
+    msgType.value = 'error'
+    return
+  }
   saving.value = true
   try {
     const payload = { ...cfg }
-    await props.api.post('plugin/Doc115Subscribe/save_config', payload)
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/save_config', payload))
+    if (res.code !== 0) throw new Error(res.msg || '配置校验未通过')
+    secrets.tencent_ready = cfg.clear_tencent_cookie ? false : !!(cfg.tencent_cookie.trim() || secrets.tencent_ready)
+    secrets.p115_ready = cfg.clear_p115_cookie ? false : !!(cfg.p115_cookie.trim() || secrets.p115_ready)
+    cfg.tencent_cookie = ''
+    cfg.p115_cookie = ''
+    cfg.clear_tencent_cookie = false
+    cfg.clear_p115_cookie = false
     msg.value = '配置已保存'
     msgType.value = 'success'
-    emit('save', payload)
   } catch (e) {
     msg.value = `保存失败：${e.message || e}`
     msgType.value = 'error'
@@ -198,5 +228,10 @@ async function save() {
   }
 }
 
-onMounted(load)
+function unwrap(res) {
+  if (res && typeof res === 'object' && 'code' in res) return res
+  return { code: 0, data: res }
+}
+
+onMounted(() => load())
 </script>

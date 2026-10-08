@@ -1,23 +1,15 @@
-"""115文档订阅与查询（MoviePilot V3 插件）
-
-功能
-----
-1. **订阅下载（仅电影）**：定时读取腾讯文档「最新电影（持续更新）」表，与 MP 订阅比对，
-   命中后把资源转存到 115 网盘的电影下载目录。
-2. **查找**：插件页搜索框，跨文档所有工作表搜索片名，展示结果并标注电影/电视剧，
-   选中后一键转存（可手动指定电影/电视剧目录）。
-3. 文档地址可配置；115 Cookie 复用「115网盘Plus」(P115Disk) 插件；
-   插件页提供**微信扫码登录**，扫码后自动固定保存腾讯文档 Cookie。
-
-链接分派：115 分享链接 -> 115 转存；磁力 / ed2k -> 115 离线下载。
-文档不允许导出，本插件改用文档前端自身的 dop-api 接口直读（见 doc_client）。
-"""
+"""腾讯文档资源索引、电影订阅与可恢复的 115 转存任务。"""
 from __future__ import annotations
 
 import base64
+import hashlib
+import inspect
 import json
+import re
 import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,774 +17,794 @@ from typing import Any, Dict, List, Optional, Tuple
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import MediaType
 
-try:
-    from app.schemas.types import MessageType as _MsgType
-except ImportError:  # V2 回退
-    from app.schemas.types import NotificationType as _MsgType
+from . import doc_parser, subscribe_sync
+from .doc_client import DocError, TencentDocsClient
+from .doc_index import DocIndex
+from .history import RecordStore, PendingStore, JsonListStore
+from .link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET, classify_link
+from .p115_transfer import P115Error, P115Transfer, extract_hash
+from .qrlogin_browser import BrowserQrLogin, QrLoginError
 
-try:
-    from . import doc_parser, subscribe_sync
-    from .doc_client import DocError, TencentDocsClient
-    from .doc_index import DocIndex
-    from .history import RecordStore
-    from .link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
-    from .p115_transfer import P115Error, P115Transfer, extract_hash
-    from .qrlogin_browser import BrowserQrLogin, QrLoginError
-except ImportError:
-    import doc_parser
-    import subscribe_sync
-    from doc_client import DocError, TencentDocsClient
-    from doc_index import DocIndex
-    from history import RecordStore
-    from link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
-    from p115_transfer import P115Error, P115Transfer, extract_hash
-    from qrlogin_browser import BrowserQrLogin, QrLoginError
+
+class OfflineTaskError(P115Error):
+    """Terminal task failure, as distinct from a temporary cloud lookup error."""
 
 
 class Doc115Subscribe(_PluginBase):
-    # ---- 插件元信息 ---------------------------------------------------------
     plugin_name = "115文档订阅与查询"
-    plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
+    plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.7.4"
+    plugin_version = "0.8.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
     plugin_order = 20
     auth_level = 1
 
-    # ---- 默认配置 ----------------------------------------------------------
+    DEFAULTS = {
+        "enabled": False, "doc_url": "https://docs.qq.com/sheet/DZWtEeFFGZW9XUkJo",
+        "tencent_cookie": "", "p115_cookie": "",
+        "movie_path": "/115-影视/115-downloads/电影",
+        "tv_path": "/115-影视/115-downloads/电视剧",
+        "magnet_staging_path": "/115-影视/115-downloads/磁力链接",
+        "subscribe_enabled": True, "subscribe_cron": "0 21 * * *",
+        "index_cron": "0 6 * * *", "create_subdir": True,
+        "link_mode": "first", "upgrade_enabled": False,
+    }
+    _scheduler = None
+    _index = None
+    _qr = None
     _enabled = False
-    _doc_url = "https://docs.qq.com/sheet/DZWtEeFFGZW9XUkJo"
     _tencent_cookie = ""
     _p115_cookie = ""
-    _movie_path = "/115-影视/115-downloads/电影"
-    _tv_path = "/115-影视/115-downloads/电视剧"
-    # 磁力/ed2k 先落这个暂存目录，下载完成后再由插件搬到上面的电影/电视剧目录
-    _magnet_staging_path = "/115-影视/115-downloads/磁力链接"
-    _subscribe_enabled = True
-    _subscribe_cron = "0 21 * * *"
-    _index_cron = "0 6 * * *"
-    _use_agent = True
-    _create_subdir = True      # 转存时按「片名 (年份)」建子目录
+    _P115_COOKIE_SOURCES = (("plugin.P115StrmHelper", "cookies"),
+                           ("plugin.P115Disk", "cookie"),
+                           ("plugin.P115StrgmSub", "cookies"))
+    _runtime_lock = threading.Lock()
+    QR_FRESH_SECONDS = 90
 
-    _scheduler: Optional[BackgroundScheduler] = None
-    _index: Optional[DocIndex] = None
-    _qr: Optional[BrowserQrLogin] = None
-    _qr_img: bytes = b""          # 预热好的二维码（PNG）
-    _qr_ts: float = 0.0            # 预热时间
-    _qr_lock: Any = None
-    _qr_img: str = ""
-    _search_results: List[Dict[str, Any]] = []
-    _page_msg: str = ""
-    _mt_cache: Dict[str, str] = {}
-    _tr: Any = None            # 缓存的 115 操作句柄
-    _tr_cookie: str = ""       # 缓存对应的 Cookie
-    _offline_next_ts: float = 0.0    # 下一次允许检查离线任务的时间戳（节流）
-    _offline_change_ts: float = 0.0  # 上次进度发生变化的时间戳（用于死种退避）
+    def _ensure_runtime(self):
+        with self._runtime_lock:
+            if not hasattr(self, "_operation_lock"):
+                self._operation_lock = threading.RLock()
+                self._config_lock = threading.RLock()
+                self._refresh_lock = threading.Lock()
+                self._subscribe_lock = threading.Lock()
+                self._offline_lock = threading.Lock()
+                self._qr_lock = threading.RLock()
+                self._generation = 0
+                self._tr = None
+                self._tr_cookie = ""
+                self._mt_cache = {}
+                self._qr_img = b""
+                self._qr_ts = 0.0
+                self._offline_next_ts = 0.0
+                self._last_refresh = {}
+                self._last_subscribe = {}
 
-    # ---------------------------------------------------------------------
+    @classmethod
+    def _validate_config(cls, config):
+        conf = {k: config.get(k, v) for k, v in cls.DEFAULTS.items()}
+        for k, default in cls.DEFAULTS.items():
+            if isinstance(default, bool):
+                if not isinstance(conf[k], bool):
+                    raise ValueError(f"{k} 必须是布尔值")
+            elif not isinstance(conf[k], str):
+                raise ValueError(f"{k} 必须是文本")
+            else:
+                conf[k] = conf[k].strip()
+        url = urllib.parse.urlparse(conf["doc_url"])
+        if (url.scheme != "https" or url.hostname != "docs.qq.com" or url.username or url.password
+                or url.port not in (None, 443)):
+            raise ValueError("腾讯文档地址必须是 https://docs.qq.com/sheet/ 链接")
+        TencentDocsClient.parse_doc_id(conf["doc_url"])
+        for field in ("index_cron", "subscribe_cron"):
+            CronTrigger.from_crontab(conf[field], timezone="Asia/Shanghai")
+        for field in ("movie_path", "tv_path", "magnet_staging_path"):
+            path = conf[field].replace("\\", "/")
+            if not path.startswith("/") or path == "/" or any(p in (".", "..") for p in path.split("/")):
+                raise ValueError(f"{field} 必须是非根目录的115绝对路径")
+            if any(ord(c) < 32 for c in path):
+                raise ValueError(f"{field} 含非法字符")
+            conf[field] = path.rstrip("/")
+        if conf["link_mode"] not in ("first", "all"):
+            raise ValueError("链接策略必须是 first 或 all")
+        return conf
+
     def init_plugin(self, config: dict = None):
+        self._ensure_runtime()
+        conf = self._validate_config({**self.DEFAULTS, **(config or {})})
+        with self._config_lock, self._qr_lock, self._operation_lock:
+            self.stop_service()
+            self._generation += 1
+            for key, val in conf.items():
+                setattr(self, "_" + key, val)
+            self._tr, self._tr_cookie = None, ""
+            self._mt_cache = {}
+            self._index = None
+            self._load_index()
+            if not self._enabled:
+                return
+            scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+            options = {"max_instances": 1, "coalesce": True, "misfire_grace_time": 300}
+            scheduler.add_job(self.refresh_index,
+                trigger=CronTrigger.from_crontab(self._index_cron, timezone="Asia/Shanghai"),
+                id="doc115-index", name="115文档刷新索引", **options)
+            if self._subscribe_enabled:
+                scheduler.add_job(self.run_subscribe,
+                    trigger=CronTrigger.from_crontab(self._subscribe_cron, timezone="Asia/Shanghai"),
+                    id="doc115-subscribe", name="115文档电影订阅", **options)
+            scheduler.add_job(self.check_offline_tasks, trigger=IntervalTrigger(seconds=15),
+                              id="doc115-offline", name="115文档离线搬运", **options)
+            self._scheduler = scheduler
+            try:
+                scheduler.start()
+            except Exception:
+                self.stop_service()
+                raise
+
+    def stop_service(self):
+        self._ensure_runtime()
+        with self._config_lock, self._qr_lock, self._operation_lock:
+            self._stop_service_locked()
+
+    def _stop_service_locked(self):
         self._enabled = False
-        self._scheduler = None
-        self._index = None
-        self._qr = None
+        scheduler, self._scheduler = self._scheduler, None
+        if scheduler:
+            scheduler.remove_all_jobs()
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+        qr, self._qr = self._qr, None
+        if qr:
+            qr.close()
         self._qr_img = b""
-        self._qr_ts = 0.0
-        self._qr_lock = threading.Lock()
-        self._search_results = []
-        self._page_msg = ""
-        self._tr = None
-        self._tr_cookie = ""
-        self._offline_next_ts = 0.0
-        self._offline_change_ts = 0.0
-        if config:
-            self._enabled = bool(config.get("enabled", False))
-            self._doc_url = config.get("doc_url") or self.__class__._doc_url
-            self._tencent_cookie = config.get("tencent_cookie") or ""
-            self._p115_cookie = config.get("p115_cookie") or ""
-            self._movie_path = config.get("movie_path") or self.__class__._movie_path
-            self._tv_path = config.get("tv_path") or self.__class__._tv_path
-            self._magnet_staging_path = (
-                config.get("magnet_staging_path") or self.__class__._magnet_staging_path
-            )
-            self._subscribe_enabled = bool(config.get("subscribe_enabled", True))
-            self._subscribe_cron = config.get("subscribe_cron") or self.__class__._subscribe_cron
-            self._index_cron = config.get("index_cron") or self.__class__._index_cron
-            self._use_agent = bool(config.get("use_agent", True))
-            self._create_subdir = bool(config.get("create_subdir", True))
 
-        self.stop_service()
-        self._load_index()
+    def get_state(self):
+        return bool(self._enabled)
 
-        if not self._enabled:
-            logger.info("115文档订阅与查询：插件未启用")
-            return
+    def _current_config(self):
+        return {key: getattr(self, "_" + key, default) for key, default in self.DEFAULTS.items()}
 
-        self._scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-        self._scheduler.add_job(
-            self.refresh_index,
-            trigger=CronTrigger.from_crontab(self._index_cron, timezone="Asia/Shanghai"),
-            name="115文档订阅与查询-刷新索引",
-        )
-        if self._subscribe_enabled:
-            self._scheduler.add_job(
-                self.run_subscribe,
-                trigger=CronTrigger.from_crontab(self._subscribe_cron, timezone="Asia/Shanghai"),
-                name="115文档订阅与查询-订阅同步",
-            )
-        self._scheduler.add_job(
-            self.check_offline_tasks,
-            trigger=IntervalTrigger(seconds=15),
-            name="115文档订阅与查询-离线任务整理",
-        )
-        self._scheduler.start()
-        logger.info("115文档订阅与查询：已启用，定时任务已注册")
+    def _public_config(self):
+        conf = self._current_config()
+        conf.update(tencent_cookie="", p115_cookie="",
+                    tencent_cookie_ready=bool(self._tencent_cookie),
+                    p115_cookie_ready=bool(self._p115_cookie),
+                    p115_ready=bool(self.get_p115_cookie()))
+        return conf
 
-    # ---- 基础 --------------------------------------------------------------
-    def get_state(self) -> bool:
-        return bool(self._enabled and self._tencent_cookie)
+    def _error(self, exc):
+        text = str(exc)
+        for val in (self._tencent_cookie, self._p115_cookie, getattr(self, "_tr_cookie", "")):
+            if val:
+                text = text.replace(val, "[已隐藏]")
+        return re.sub(r"([?&](?:token|apikey|password|receive_code)=)[^&\s]+", r"\1[已隐藏]", text)[:500]
 
-    # 本插件未单独填 115 Cookie 时，按顺序复用其它 115 插件的已保存 Cookie
-    _P115_COOKIE_SOURCES = (
-        ("plugin.P115StrmHelper", "cookies"),   # 115网盘STRM助手
-        ("plugin.P115Disk", "cookie"),          # 115网盘储存（115网盘Plus）
-        ("plugin.P115StrgmSub", "cookies"),     # 115网盘订阅追更
-    )
-
-    def get_p115_cookie(self) -> str:
-        """115 Cookie：本插件配置优先，否则复用其它 115 插件已保存的 Cookie。"""
+    def get_p115_cookie(self):
         if self._p115_cookie:
             return self._p115_cookie
         try:
             from app.db.systemconfig_oper import SystemConfigOper
-            oper = SystemConfigOper()
             for key, field in self._P115_COOKIE_SOURCES:
-                cfg = oper.get(key) or {}
-                if isinstance(cfg, dict):
-                    val = (cfg.get(field) or "").strip()
-                    if val:
-                        logger.debug(f"115文档订阅与查询：复用 {key}.{field} 的 115 Cookie")
-                        return val
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(f"115文档订阅与查询：读取其它插件 115 Cookie 失败：{exc}")
+                cfg = SystemConfigOper().get(key) or {}
+                if isinstance(cfg, dict) and isinstance(cfg.get(field), str) and cfg[field].strip():
+                    return cfg[field].strip()
+        except Exception:
+            logger.debug("115文档：无法复用其它插件Cookie")
         return ""
 
-    def _current_config(self) -> Dict[str, Any]:
-        return {
-            "enabled": self._enabled,
-            "doc_url": self._doc_url,
-            "tencent_cookie": self._tencent_cookie,
-            "p115_cookie": self._p115_cookie,
-            "movie_path": self._movie_path,
-            "tv_path": self._tv_path,
-            "magnet_staging_path": self._magnet_staging_path,
-            "subscribe_enabled": self._subscribe_enabled,
-            "subscribe_cron": self._subscribe_cron,
-            "index_cron": self._index_cron,
-            "use_agent": self._use_agent,
-            "create_subdir": self._create_subdir,
-        }
-
-    def resolve_media_type(self, rec: Dict[str, Any]) -> str:
-        """判定电影/电视剧：**TMDBID 精准识别** > 工作表名 > 片名特征。"""
-        tmdbid = str(rec.get("tmdbid") or "").strip()
-        if tmdbid.isdigit():
-            if tmdbid in self._mt_cache:
-                return self._mt_cache[tmdbid]
-            try:
-                from app.chain.media import MediaChain
-                media = MediaChain().recognize_media(tmdbid=int(tmdbid))
-                if media and media.type:
-                    mt = "movie" if media.type == MediaType.MOVIE else "tv"
-                    self._mt_cache[tmdbid] = mt
-                    return mt
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"115文档订阅与查询：TMDBID {tmdbid} 识别失败：{exc}")
-        return doc_parser.media_type_of(rec.get("sheet", ""), rec.get("title", ""))
-
-    def get_data_path_local(self) -> Path:
+    def get_data_path_local(self):
         return Path(self.get_data_path())
 
     @property
-    def index_path(self) -> Path:
+    def index_path(self):
         return self.get_data_path_local() / "doc_index.json"
 
-    def _new_client(self) -> TencentDocsClient:
-        doc_id, _ = TencentDocsClient.parse_doc_id(self._doc_url)
-        return TencentDocsClient(doc_id, self._tencent_cookie)
-
-    def _load_index(self):
-        self._index = DocIndex.load(self.index_path)
-        if self._index and not self._index.client:
-            self._index.client = self._new_client()
-        if self._index:
-            logger.info(f"115文档订阅与查询：已加载本地索引 {self._index.summary()}")
-
-    # ---- 索引 --------------------------------------------------------------
     @property
     def pending_path(self):
         return self.get_data_path_local() / "pending_offline.json"
 
-    def _load_pending(self) -> List[Dict[str, Any]]:
-        try:
-            p = self.pending_path
-            if p.exists():
-                return json.loads(p.read_text(encoding="utf-8")) or []
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(f"115文档订阅与查询：读取待整理离线任务失败：{exc}")
-        return []
-
-    def _save_pending(self, items: List[Dict[str, Any]]) -> None:
-        try:
-            self.pending_path.parent.mkdir(parents=True, exist_ok=True)
-            self.pending_path.write_text(
-                json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"115文档订阅与查询：保存待整理离线任务失败：{exc}")
-
-    # ---- 转存/离线记录（详情页「转存记录」页）------------------------------
     @property
     def history_path(self):
         return self.get_data_path_local() / "history.json"
 
-    def _records(self) -> RecordStore:
-        return RecordStore(self.history_path)
+    def _pending(self):
+        return PendingStore(self.pending_path)
 
-    def add_pending_offline(self, rec: Dict[str, Any], target: str,
-                            submit_path: str, final_path: str, url: str) -> Optional[str]:
-        """登记离线任务：磁力/ed2k 先落暂存目录，下载完成后再搬到最终目录。"""
-        h = extract_hash(url)
-        if not h:
-            return None
-        items = self._load_pending()
-        if not any(i.get("hash") == h for i in items):
-            items.append({
-                "hash": h,
-                "title": rec.get("title"),
-                "year": rec.get("year"),
-                "type": "movie" if target == "movie" else "tv",
-                "staging_path": submit_path,   # 实际提交/落盘目录
-                "final_path": final_path,      # 下载完成后要搬到的目录
-                "url": url,
-                "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            })
-            self._save_pending(items)
-        # 有新任务 → 让检查立刻开始（不受节流影响）
-        self._offline_next_ts = 0.0
-        self._offline_change_ts = 0.0
-        logger.info(f"115文档订阅与查询：已登记离线任务（先落 {submit_path}，"
-                    f"完成后搬到 {final_path}）：{rec.get('title')} [{h[:12]}]")
-        return h
+    def _records(self):
+        store = RecordStore(self.history_path)
+        # 0.7.x inferred organization from absence; that was not proof of ingestion.
+        def migrate(items):
+            for rec in items:
+                if rec.get("status") == "organized" and not rec.get("organization_confirmed"):
+                    rec.update(status="unverified", message="旧记录整理状态未经入库证据确认，请核实媒体库")
+                if not rec.get("resource_key") and rec.get("kind") and rec.get("url") and rec.get("final_path"):
+                    rec["resource_key"] = hashlib.sha256(
+                        f"{rec['kind']}|{rec['url']}|{rec['final_path']}".encode()).hexdigest()
+        store.transaction(migrate)
+        return store
 
-    def _process_offline(self, tr, store: RecordStore) -> Dict[str, Any]:
-        """检查离线任务：**已下完且已落盘**的，从暂存目录搬到最终目录。
+    def _subscription_store(self):
+        return JsonListStore(self.get_data_path_local() / "subscription_state.json")
 
-        返回 ``{"pending", "finished", "moved", "maxpct", "changed"}``。
-        整理由 115 生活事件驱动（搬到 电影/电视剧 目录这个动作本身就是事件），本插件不写 MP 下载历史。
-        """
-        items = self._load_pending()
-        if not items:
-            return {"pending": 0, "finished": 0, "moved": 0, "maxpct": 0, "changed": False}
-        tasks = tr.list_tasks()
-        by_hash: Dict[str, Dict[str, Any]] = {}
-        for t in tasks:
-            h = str(t.get("info_hash") or "").lower()
-            if h:
-                by_hash[h] = t
+    def _new_client(self):
+        doc_id, _ = TencentDocsClient.parse_doc_id(self._doc_url)
+        return TencentDocsClient(doc_id, self._tencent_cookie)
 
-        moved, finished, remain = 0, 0, []
-        maxpct, changed = 0, False
-        for it in items:
-            h = str(it.get("hash") or "").lower()
-            t = by_hash.get(h) or {}
-            try:
-                pct = int(float(t.get("percentDone") or 0))
-            except (TypeError, ValueError):
-                pct = 0
-            maxpct = max(maxpct, pct)
-            if pct != it.get("last_pct"):
-                changed = True
-                it["last_pct"] = pct
-            name = str(t.get("name") or "")
-            staging = str(it.get("staging_path") or "")
-            final = str(it.get("final_path") or "")
-
-            if pct < 100:
-                self._update_record(store, h, status="downloading", progress=pct)
-                remain.append(it)
-                continue
-
-            # 100% —— 必须校验文件**真的落盘**到暂存目录（115 偶发"任务完成但文件未落盘"）
-            src = f"{staging}/{name}" if (staging and name) else ""
-            if not src or not tr.path_exists(src):
-                self._update_record(
-                    store, h, status="downloading", progress=100,
-                    message="离线任务显示已完成，但文件未出现在暂存目录："
-                            "若是重复提交同一种子，115 会去重且不会重新下载，文件不会再产生")
-                remain.append(it)
-                continue
-
-            self._update_record(store, h, status="moving", progress=100)
-            ok, err = tr.move_via_p115disk(src, final)
-            if ok:
-                moved += 1
-                finished += 1
-                self._update_record(store, h, status="done", progress=100,
-                                    message=f"已搬到 {final}，等待 115 整理",
-                                    item_name=name, moved_at=time.time())
-                logger.info(f"115文档订阅与查询：离线下载完成并已搬到最终目录（等待 115 整理）："
-                            f"{it.get('title')} -> {final}")
-            else:
-                self._update_record(store, h, status="failed", progress=100, message=err)
-                logger.warning(f"115文档订阅与查询：离线文件搬运失败 {it.get('title')}：{err}")
-                remain.append(it)
-        if moved or finished or changed:
-            self._save_pending(remain)
-        return {"pending": len(remain), "finished": finished, "moved": moved,
-                "maxpct": maxpct, "changed": changed}
-
-    def check_offline_tasks(self, force: bool = False) -> Dict[str, Any]:
-        """检查离线任务并按需搬运（**自适应节流**，避免频繁访问 115）。
-
-        * 没有待搬运任务时：直接返回，**一次 115 请求都不发**；
-        * 有任务时按进度自适应间隔：下载中 90s、接近完成(≥99%) 15s、进度 10 分钟没变化 300s；
-        * ``force=True``（按钮 / 刚提交转存）忽略节流立即检查。
-        """
-        now = time.time()
-        if not force and now < self._offline_next_ts:
-            return {"code": 0, "data": {"skipped": 1}}
-        tr = self._transfers()
-        if not tr:
-            return {"code": 1, "msg": "未配置 115 Cookie"}
-        try:
-            data = self._process_offline(tr, self._records())
-        except Exception as exc:  # noqa: BLE001
-            self._offline_next_ts = now + 300          # 出错退避 5 分钟
-            return {"code": 1, "msg": f"查询 115 离线任务失败：{exc}"}
-
-        if not data.get("pending"):
-            # 搬完就停：没有待处理任务 → 不再设置下一次检查（也就不会再请求 115）
-            self._offline_next_ts = 0
-            self._offline_change_ts = 0
-        else:
-            if data.get("changed"):
-                self._offline_change_ts = now
-            elif not self._offline_change_ts:
-                self._offline_change_ts = now
-            stalled = self._offline_change_ts and (now - self._offline_change_ts) > 600
-            if stalled:
-                interval = 300                          # 10 分钟没动静 → 死种退避，5 分钟一问
-            elif data.get("maxpct", 0) >= 99:
-                interval = 15                           # 快下完了 → 加密，下完立刻搬
-            else:
-                interval = 90                           # 下载中 → 90 秒一问
-            self._offline_next_ts = now + interval
-            logger.debug(f"115文档订阅与查询：离线检查下一次将于 {interval}s 后（"
-                         f"pending={data['pending']} maxpct={data['maxpct']} stalled={bool(stalled)}）")
-        return {"code": 0, "data": data}
-
-    @staticmethod
-    def _update_record(store: RecordStore, info_hash: str, **fields: Any) -> None:
-        rec = store.find_by_hash(info_hash)
-        if rec:
-            store.update(rec["id"], **fields)
-
-    @staticmethod
-    def _norm_key(text: str, n: int = 8) -> str:
-        """取片名的归一化前 N 个字，用于在目录里模糊认领条目。"""
-        import re as _re
-        s = _re.sub(r"[【\[（(「『].*?[】\]）)」』]", "", text or "")
-        s = _re.sub(r"[\s\-_.·:：!！?？,，/\\|+]", "", s).lower()
-        return s[:n]
-
-    def _refresh_organized(self, store: RecordStore) -> None:
-        """回填「已整理」状态：已搬到最终目录的条目，若文件已不在下载目录 → 说明 115 整理完成。
-
-        只在**打开记录页**时跑（用户主动看），不改后台"搬完即停"的节流策略。
-        新记录按 ``item_name`` 精确判断；老记录（没有该字段）用片名前 8 字在目录里模糊认领。
-        """
-        tr = self._transfers()
-        if not tr:
-            return
-        now = time.time()
-        checked = 0
-        for r in store.list():
-            if r.get("status") != "done":
-                continue
-            final = str(r.get("final_path") or "")
-            if not final:
-                continue
-            moved_at = float(r.get("moved_at") or 0)
-            if moved_at and now - moved_at > 6 * 3600:
-                continue                       # 新记录：超过 6 小时就不再追问
-            if checked >= 5:
-                break
-            checked += 1
-            try:
-                names = [str(n) for n in (r.get("item_names") or []) if n]
-                if not names and r.get("item_name"):
-                    names = [str(r["item_name"])]
-                if names:
-                    # 有真实条目名 → 精确判断（磁力搬运 / 新版 115 分享转存）
-                    gone = not any(tr.path_exists(f"{final}/{n}") for n in names)
-                else:
-                    # 老记录没记名字：拿片名前 8 字去最终目录里模糊认领
-                    key = self._norm_key(str(r.get("title") or ""))
-                    if not key:
-                        continue
-                    gone = not any(key in self._norm_key(n) for n in tr.list_names(final))
-                if gone:
-                    store.update(r["id"], status="organized",
-                                 message=f"已整理完成（文件已移出 {final}）")
-                    logger.info(f"115文档订阅与查询：检测到已整理：{r.get('title')}")
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"115文档订阅与查询：检查整理状态失败：{exc}")
-
-    def records_view(self, refresh: bool = True) -> Dict[str, Any]:
-        """详情页「转存记录」页数据：历史记录 + 离线任务实时进度。
-
-        ``refresh=True`` 时按**节流规则**顺带跑一次离线检查（不会因此额外增加 115 请求频率）；
-        想强制立即检查请用按钮（``/check_offline``）。
-        """
-        store = self._records()
-        if refresh:
-            try:
-                self.check_offline_tasks(force=False)
-                self._refresh_organized(store)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"115文档订阅与查询：刷新离线进度/搬运失败：{exc}")
-        return {"code": 0, "data": store.list()}
-
-    def delete_record(self, rec_id: str = "") -> Dict[str, Any]:
-        """删除一条（或不传 id 则清空）转存记录；同时清掉对应的待处理离线任务。"""
-        store = self._records()
-        if not rec_id:
-            n = store.clear()
-            self._save_pending([])
-            return {"code": 0, "data": {"deleted": n, "cleared": True}}
-        rec = None
-        for r in store.list():
-            if r.get("id") == rec_id:
-                rec = r
-                break
-        if not rec:
-            return {"code": 1, "msg": "记录不存在"}
-        ok = store.delete(rec_id)
-        h = str(rec.get("hash") or "").lower()
-        if h:
-            items = self._load_pending()
-            keep = [i for i in items if str(i.get("hash") or "").lower() != h]
-            if len(keep) != len(items):
-                self._save_pending(keep)
-        return {"code": 0, "data": {"deleted": 1 if ok else 0}}
-
-    # ---- 订阅同步（仅电影）--------------------------------------------------
-    @property
-    def subscribed_path(self):
-        return self.get_data_path_local() / "subscribed.json"
-
-    def _load_subscribed(self) -> set:
-        """已按订阅转存过的去重键（tmdb:xxx / title:xxx）。"""
-        try:
-            data = json.loads(self.subscribed_path.read_text(encoding="utf-8"))
-            return set(data) if isinstance(data, list) else set()
-        except Exception:
-            return set()
-
-    def _save_subscribed(self, keys) -> None:
-        try:
-            self.subscribed_path.parent.mkdir(parents=True, exist_ok=True)
-            self.subscribed_path.write_text(
-                json.dumps(sorted(keys), ensure_ascii=False, indent=1), encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"115文档订阅与查询：保存订阅去重记录失败：{exc}")
-
-    def _mp_subscribes(self) -> List[Dict[str, Any]]:
-        """读取 MP 订阅列表。
-
-        走 MoviePilot 自己的 API（``/api/v1/subscribe/``）而不是内部应用层服务——
-        V3 的订阅链重构频繁，公开 API 反而是最稳定的契约。
-        """
-        import urllib.request
-
-        try:
-            from app.core.config import settings
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"115文档订阅与查询：读取 MP 配置失败，无法同步订阅：{exc}")
-            return []
-        token = (getattr(settings, "API_TOKEN", "") or "").strip()
-        ports: List[int] = []
-        for p in (getattr(settings, "PORT", None), 5000, 5001, 3000):
-            try:
-                p = int(p)
-            except (TypeError, ValueError):
-                continue
-            if p and p not in ports:
-                ports.append(p)
-        for port in ports:
-            try:
-                out: List[Dict[str, Any]] = []
-                for page in range(1, 6):          # 每页 100 条（MP 对 count 有上限，传大会 422）
-                    url = (f"http://127.0.0.1:{port}/api/v1/subscribe/"
-                           f"?apikey={token}&page={page}&count=100")
-                    # ⚠️ 必须带 User-Agent：MP 的 API 会拒绝 urllib 默认 UA 的请求
-                    req = urllib.request.Request(
-                        url, headers={"User-Agent": "MoviePilot-Doc115Subscribe"})
-                    with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
-                        data = json.loads(resp.read().decode("utf-8"))
-                    rows = data.get("data") if isinstance(data, dict) else data
-                    if not isinstance(rows, list):
-                        break
-                    out.extend(rows)
-                    if len(rows) < 100:
-                        break
-                if out:
-                    return out
-            except Exception:  # noqa: BLE001
-                continue
-        logger.warning("115文档订阅与查询：读取 MP 订阅列表失败（API_TOKEN / 端口不一致）")
-        return []
-
-    def run_subscribe(self) -> Dict[str, Any]:
-        """按 MP 的**电影**订阅，去「最新电影」工作表找资源并转存到 115。"""
-        if not self._enabled:
-            return {"code": 1, "msg": "插件未启用"}
-        self._ensure_index()
-        if not self._index or not self._index.records:
-            return {"code": 1, "msg": "本地索引为空，请先刷新索引"}
-        subs: List[Dict[str, Any]] = []
-        for s in self._mp_subscribes():
-            if str(s.get("type") or "") != "电影":
-                continue
-            source = str(s.get("media_source") or "")
-            if source in ("", "themoviedb"):
-                tmdbid = str(s.get("media_id") or s.get("tmdbid") or "").strip()
-            else:
-                tmdbid = str(s.get("tmdbid") or "").strip()
-            title = str(s.get("name") or s.get("title") or "").strip()
-            if not title and not tmdbid:
-                continue
-            subs.append({"title": title, "year": str(s.get("year") or "").strip(),
-                         "tmdbid": tmdbid})
-        if not subs:
-            return {"code": 0, "data": {"movie_subs": 0, "matched": 0, "transferred": 0}}
-        pairs = subscribe_sync.match_subscriptions(
-            subscribe_sync.movie_records(self._index.records), subs)
-        done = self._load_subscribed()
-        matched = transferred = skipped = failed = 0
-        for sub, rec in pairs:
-            key = subscribe_sync.transfer_key(sub, rec)
-            if key in done:
-                skipped += 1
-                continue
-            matched += 1
-            try:
-                ok, msg = self.do_transfer(rec)
-            except Exception as exc:  # noqa: BLE001
-                ok, msg = False, f"{type(exc).__name__}: {exc}"
-            if ok:
-                transferred += 1
-                done.add(key)
-                self._save_subscribed(done)
-                logger.info(f"115文档订阅与查询：订阅命中并转存 {rec.get('title')}（{msg}）")
-            else:
-                failed += 1
-                logger.warning(f"115文档订阅与查询：订运转存失败 {rec.get('title')}：{msg}")
-        logger.info(f"115文档订阅与查询：订阅同步完成：电影订阅 {len(subs)} 个，"
-                    f"本次新命中 {matched} 条，转存 {transferred} 条，跳过 {skipped} 条，失败 {failed} 条")
-        return {"code": 0, "data": {"movie_subs": len(subs), "matched": matched,
-                                    "transferred": transferred, "skipped": skipped,
-                                    "failed": failed}}
+    def _load_index(self):
+        client = self._new_client()
+        self._index = DocIndex.load(self.index_path, client=client, expected_doc_id=client.doc_id)
 
     def _ensure_index(self):
-        """内存里没有索引时，从磁盘已保存的文件加载（避免重启/重载后又要重建）。"""
         if self._index is None:
-            try:
-                self._load_index()
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"115文档订阅与查询：加载本地索引失败：{exc}")
+            self._load_index()
         return self._index
 
-    def refresh_index(self) -> Dict[str, Any]:
+    def resolve_media_type(self, rec):
+        explicit = rec.get("tmdb_type") or rec.get("media_type")
+        hint = explicit if explicit in ("movie", "tv") else doc_parser.media_type_of(rec.get("sheet", ""), rec.get("title", ""))
+        tmdbid = str(rec.get("tmdbid") or "")
+        if not tmdbid.isdigit() or hint not in ("movie", "tv"):
+            return hint
+        key = ("themoviedb", tmdbid, hint)
+        if key in self._mt_cache:
+            return self._mt_cache[key]
+        try:
+            from app.chain.media import MediaChain
+            chain = MediaChain()
+            params = inspect.signature(chain.recognize_media).parameters
+            mtype = MediaType.MOVIE if hint == "movie" else MediaType.TV
+            if "media_id" in params:
+                from app.schemas.types import MediaSource
+                media = chain.recognize_media(media_source=MediaSource.TMDB, media_id=tmdbid, mtype=mtype)
+            elif "tmdbid" in params:
+                media = chain.recognize_media(tmdbid=int(tmdbid), mtype=mtype)
+            else:
+                return hint
+            if media and media.type in (MediaType.MOVIE, MediaType.TV):
+                result = "movie" if media.type == MediaType.MOVIE else "tv"
+                self._mt_cache[key] = result
+                return result
+        except Exception as exc:
+            logger.debug(f"115文档：媒体类型识别失败：{self._error(exc)}")
+        return hint
+
+    def refresh_index(self):
+        self._ensure_runtime()
         if not self._tencent_cookie:
-            logger.error("115文档订阅与查询：缺少腾讯文档 Cookie，跳过索引刷新")
-            return {"code": 1, "msg": "缺少腾讯文档 Cookie"}
-        logger.info("115文档订阅与查询：开始刷新本地索引…")
+            return {"code": 1, "msg": "缺少腾讯文档Cookie"}
+        if not self._refresh_lock.acquire(blocking=False):
+            return {"code": 1, "msg": "索引正在刷新，请稍后"}
+        generation = self._generation
         try:
             idx = DocIndex(self._new_client())
-            idx.build(progress=lambda i, t, n: logger.info(
-                f"115文档订阅与查询：索引 [{i}/{t}] {n}"))
-            idx.save(self.index_path)
-            self._index = idx
-            summary = idx.summary()
-            logger.info(f"115文档订阅与查询：索引刷新完成 {summary}")
-            if summary["errors"]:
-                logger.warning(f"115文档订阅与查询：部分工作表未解析：{summary['errors'][:5]}")
-            return {"code": 0, "data": summary}
-        except DocError as exc:
-            logger.error(f"115文档订阅与查询：索引刷新失败 {exc}")
-            return {"code": 1, "msg": str(exc)}
+            summary = idx.build(previous=self._index)
+            with self._operation_lock:
+                if generation != self._generation:
+                    return {"code": 1, "msg": "配置已变化，已丢弃旧刷新结果"}
+                idx.save(self.index_path)
+                self._index = idx
+            partial = bool(summary.get("errors"))
+            self._last_refresh = {"success": not partial, "at": time.time(),
+                                  "msg": "部分工作表失败，已保留可用旧记录" if partial else "刷新完成"}
+            return {"code": 0, "msg": self._last_refresh["msg"], "data": summary}
+        except Exception as exc:
+            self._last_refresh = {"success": False, "at": time.time(), "msg": self._error(exc)}
+            logger.warning(f"115文档：索引刷新失败：{self._error(exc)}")
+            return {"code": 1, "msg": self._error(exc)}
+        finally:
+            self._refresh_lock.release()
 
-    # ---- 115 操作 ----------------------------------------------------------
-    def _transfers(self) -> Optional[P115Transfer]:
-        """115 操作句柄（按 Cookie 缓存，避免每次都新建并刷日志）。"""
+    def _transfers(self):
         cookie = self.get_p115_cookie()
         if not cookie:
-            return None
-        if self._tr is not None and self._tr_cookie == cookie:
-            return self._tr
-        try:
+            raise P115Error("未配置115 Cookie")
+        if self._tr is None or self._tr_cookie != cookie:
             self._tr = P115Transfer(cookie)
             self._tr_cookie = cookie
-            return self._tr
-        except P115Error as exc:
-            logger.error(f"115文档订阅与查询：初始化 115 客户端失败：{exc}")
-            return None
+        return self._tr
 
-    def build_save_path(self, rec: Dict[str, Any], target: str) -> str:
-        """转存目标目录：默认按「片名 (年份)」建子目录，便于 MP 整理识别。"""
+    def build_save_path(self, rec, target):
         base = self._movie_path if target == "movie" else self._tv_path
         if not self._create_subdir:
             return base
         title = (rec.get("title") or "").strip()
-        year = str(rec.get("year") or "").strip()
-        if not title:
-            return base
-        name = f"{title} ({year})" if year else title
-        # 去掉 115 不允许的字符
-        for ch in '\\/:*?"<>|':
-            name = name.replace(ch, "_")
-        return f"{base}/{name[:80]}"
+        year = str(rec.get("year") or "")
+        name = title if not year or re.search(r"[（(]" + re.escape(year) + r"[)）]", title) else f"{title} ({year})"
+        name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(" .")[:100]
+        return f"{base}/{name}" if name else base
 
-    def do_transfer(self, rec: Dict[str, Any], to: str = "") -> Tuple[bool, str]:
-        try:
-            return self._do_transfer_inner(rec, to)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"115文档订阅与查询：转存异常 {rec.get('title')} -> "
-                         f"{type(exc).__name__}: {exc}", exc_info=True)
-            return False, f"{rec.get('title')} 转存异常：{type(exc).__name__}: {exc}"
+    @staticmethod
+    def _fingerprint(rec):
+        return hashlib.sha256(json.dumps(list(doc_parser.iter_links(rec)), sort_keys=True).encode()).hexdigest()
 
-    def _do_transfer_inner(self, rec: Dict[str, Any], to: str = "") -> Tuple[bool, str]:
-        """把一条记录转存到 115：115 分享走转存、磁力/ed2k 走离线下载。
+    def _set_subscription(self, key, **fields):
+        if not key:
+            return
+        state = self._subscription_store()
+        def change(items):
+            item = next((x for x in items if x.get("key") == key), None)
+            if item is None:
+                item = {"key": key}
+                items.append(item)
+            if fields.get("status") == "failed" and item.get("completed_quality_score") is not None:
+                fields.update(status="complete", quality_score=item["completed_quality_score"],
+                              last_upgrade_fingerprint=fields.get("fingerprint", item.get("fingerprint")),
+                              last_upgrade_error=fields.get("message") or "升级资源提交或搬运失败")
+            item.update(fields, updated_at=time.time())
+            if fields.get("status") == "complete" and not fields.get("last_upgrade_error"):
+                item["completed_quality_score"] = max(item.get("completed_quality_score", 0),
+                    item.get("target_quality_score", item.get("quality_score", 0)))
+                item["quality_score"] = item["completed_quality_score"]
+        state.transaction(change)
 
-        115 分享直接落到最终目录；磁力/ed2k 先落到「磁力暂存目录」，下载完成后
-        再由本插件搬到最终目录。整理由 115 生活事件驱动，**不再写 MP 下载历史**。
-        """
-        links = [(k, u) for k, u in doc_parser.iter_links(rec) if k and u]
-        if not links:
-            return False, "该条目没有可用链接"
-        # 「大包」（整表打包链接 / 多行共用同一链接 / 纯列表无链接）条目：只做搜索，
-        # 不做一键转存（避免误转整包），由用户点结果里的链接自行查看/转存。
-        if rec.get("sheet_bundle") or rec.get("bundle") or rec.get("no_link"):
-            return False, (f"{rec.get('title')}：该条目是打包链接（大包），已关闭一键转存；"
-                           f"请点击结果里的 115/磁力 链接自行查看或转存")
-        target = to or self.resolve_media_type(rec)
-        final_path = self.build_save_path(rec, target)
-        staging_path = self._magnet_staging_path or final_path
-        tr = self._transfers()
-        if not tr:
-            return False, "未配置 115 Cookie（可在插件配置填写，或先装好 115 网盘相关插件）"
-        store = self._records()
-        ok_msgs, errs, first_url = [], [], ""
-        offline_added = []
-        for kind, url in links:
+    def _complete_subscription_if_ready(self, key):
+        if not key:
+            return
+        state = next((x for x in self._subscription_store().list() if x.get("key") == key), None)
+        if not state or state.get("status") == "cancelled":
+            return
+        required = state.get("required_resources") or []
+        if not required:
+            return
+        if set(required).issubset(set(state.get("completed_resources") or [])):
+            self._set_subscription(key, status="complete")
+
+    def _mark_resource_complete(self, key, resource_key):
+        if not key or not resource_key:
+            return
+        def change(items):
+            item = next((x for x in items if x.get("key") == key), None)
+            if item is None:
+                item = {"key": key}
+                items.append(item)
+            completed = set(item.get("completed_resources") or [])
+            completed.add(resource_key)
+            item.update(completed_resources=sorted(completed), updated_at=time.time())
+        self._subscription_store().transaction(change)
+
+    def do_transfer(self, rec, to="", force=False):
+        self._ensure_runtime()
+        with self._operation_lock:
+            self._last_transfer_result = {"resource_keys": [], "required_resources": [], "uncertain": False}
+            if not self._enabled:
+                return False, "插件未启用"
             try:
-                # 磁力/ed2k 先落「磁力暂存目录」，完成后再由插件搬到最终目录；
-                # 115 分享是直接落到最终目录的。
-                submit_path = staging_path if kind in (LINK_MAGNET, LINK_ED2K) else final_path
-                ok, msg = tr.add_resource(kind, url, submit_path)
-                if ok:
-                    ok_msgs.append(msg)
-                    first_url = first_url or url
-                    if kind in (LINK_MAGNET, LINK_ED2K):
-                        h = self.add_pending_offline(rec, target, submit_path, final_path, url)
-                        offline_added.append(kind)
-                        store.add({
-                            "title": rec.get("title"), "year": rec.get("year"),
-                            "type": "movie" if target == "movie" else "tv",
-                            "kind": kind, "url": url, "hash": h or "",
-                            "staging_path": submit_path, "final_path": final_path,
-                            "status": "downloading", "progress": 0,
-                            "message": f"已提交离线下载，先落 {submit_path}",
-                        })
-                    else:
-                        store.add({
-                            "title": rec.get("title"), "year": rec.get("year"),
-                            "type": "movie" if target == "movie" else "tv",
-                            "kind": kind, "url": url, "hash": "",
-                            "staging_path": final_path, "final_path": final_path,
-                            "status": "done",
-                            "message": f"已转存到 {final_path}；整理由 115 助手接管",
-                            # 记下真实转存进去的条目名，供「是否已整理」回填用
-                            "item_names": list(getattr(tr, "last_share_names", []) or []),
-                        })
-            except Exception as exc:  # noqa: BLE001
-                errs.append(str(exc))
-                logger.warning(
-                    f"115文档订阅与查询：链接处理失败 {rec.get('title')} [{kind}] {url} -> "
-                    f"{type(exc).__name__}: {exc}", exc_info=True)
-        if not ok_msgs:
-            reason = "；".join(errs) or "未知错误"
-            if any("失效" in e or "取消" in e or "过期" in e for e in errs):
-                reason += "。文档里的这条分享已被分享者取消或过期，请换一条链接"
-            return False, f"{rec.get('title')} 转存失败：{reason}"
-        is_offline_only = bool(offline_added) and all(m == "已提交离线下载" for m in ok_msgs)
-        if is_offline_only:
-            return True, (f"{rec.get('title')} -> 先落 {staging_path}（{'；'.join(ok_msgs)}）"
-                          f"，下载完成后会搬到 {final_path}，再由 115 整理")
-        return True, (f"{rec.get('title')} -> {final_path}（{'；'.join(ok_msgs)}），"
-                      f"已转存，等待 115 整理")
+                return self._do_transfer_inner(rec, to, force)
+            except Exception as exc:
+                logger.warning(f"115文档：转存失败：{self._error(exc)}")
+                return False, self._error(exc)
 
-    # ---- 表单 / 页面（Vue 联邦模式） --------------------------------------
+    def _do_transfer_inner(self, rec, to="", force=False):
+        if rec.get("sheet_bundle") or rec.get("bundle") or rec.get("no_link"):
+            return False, "该条目为大包或没有独立资源，请点击链接查看"
+        target = to or self.resolve_media_type(rec)
+        if target not in ("movie", "tv"):
+            return False, "请选择电影或电视剧目录"
+        links = [(k, u) for k, u in doc_parser.iter_links(rec)
+                 if k in (LINK_115_SHARE, LINK_MAGNET, LINK_ED2K) and classify_link(u) == k]
+        # Tracker variants and hex/Base32 representations refer to one offline task.
+        distinct, seen = [], set()
+        for kind, url in links:
+            identity = ("offline", extract_hash(url)) if kind != LINK_115_SHARE and extract_hash(url) else (kind, url)
+            if identity not in seen:
+                seen.add(identity)
+                distinct.append((kind, url))
+        links = distinct
+        if not links:
+            return False, "该条目没有有效资源链接"
+        final = self.build_save_path(rec, target)
+        tr, history, pending = self._transfers(), self._records(), self._pending()
+        success, errors, successful_keys, uncertain = [], [], [], False
+        self._last_transfer_result = {"resource_keys": [], "required_resources": [], "uncertain": False}
+        required_keys = [hashlib.sha256(f"{k}|{u}|{final}".encode()).hexdigest() for k, u in links]
+        for kind, url in links:
+            resource_key = hashlib.sha256(f"{kind}|{url}|{final}".encode()).hexdigest()
+            existing = next((r for r in history.list() if r.get("resource_key") == resource_key), None)
+            if existing and existing.get("status") in ("submitting", "unverified") and not force:
+                self._last_transfer_result["uncertain"] = True
+                self._last_transfer_result["required_resources"] = [resource_key]
+                return False, "上次提交结果尚未确认，请先核对任务，未重复转存"
+            if existing and existing.get("status") in ("downloading", "awaiting_move", "moving") and not force:
+                tracked = pending.get(existing.get("hash", ""))
+                if not tracked or tracked.get("status") in ("failed", "missing", "cancelled"):
+                    self._last_transfer_result["uncertain"] = True
+                    self._last_transfer_result["required_resources"] = [resource_key]
+                    return False, "历史任务缺少有效跟踪记录，请先核对115任务，未重复提交或标记完成"
+            if existing and existing.get("status") in ("submitting", "downloading", "awaiting_move", "moving", "done", "organized", "unverified") and not force:
+                success.append("该资源已提交，未重复下载")
+                successful_keys.append(resource_key)
+                if existing.get("status") in ("done", "organized", "unverified"):
+                    self._mark_resource_complete(rec.get("_subscription_key"), resource_key)
+                if self._link_mode == "first":
+                    break
+                continue
+            h = extract_hash(url) if kind != LINK_115_SHARE else ""
+            if kind != LINK_115_SHARE and not h:
+                errors.append("无效或不支持的信息哈希，未提交下载")
+                continue
+            submission = self._magnet_staging_path if h else final
+            context = {"title": rec.get("title"), "year": rec.get("year"), "type": target,
+                       "kind": kind, "url": url, "hash": h, "resource_key": resource_key,
+                       "staging_path": submission, "final_path": final,
+                       "subscription_key": rec.get("_subscription_key", ""),
+                       "fingerprint": self._fingerprint(rec), "quality_score": doc_parser.quality_score(rec)}
+            item = history.add({**context, "status": "submitting", "message": "准备提交"})
+            result = None
+            try:
+                if h:
+                    active = pending.get(h)
+                    if active and active.get("status", "downloading") not in ("failed", "missing", "cancelled"):
+                        raise P115Error("相同离线任务已经在跟踪，请先查看转存记录")
+                    if active:
+                        pending.delete(h)
+                    pending.upsert({**context, "record_id": item["id"], "status": "submitting",
+                                    "created_ts": time.time(), "last_change_ts": time.time(), "attempts": 0})
+                ok, msg = tr.add_resource(kind, url, submission)
+                if not ok:
+                    raise P115Error(msg)
+                if h:
+                    result = getattr(tr, "last_offline_result", None)
+                    if result is not None and result.duplicate:
+                        actual = result.actual_cid
+                        expected = result.requested_cid
+                        if actual and expected and str(actual) != str(expected):
+                            raise P115Error("115已有同种子任务位于其它目录，未搬运或重下；请手动核对")
+                    pending.update(h, status="downloading", task_file_id=getattr(result, "file_id", ""),
+                                   actual_cid=getattr(result, "actual_cid", ""))
+                    history.update(item["id"], status="downloading", message="已提交离线下载，等待落盘及搬运")
+                else:
+                    history.update(item["id"], status="done", progress=100,
+                                   item_names=list(getattr(tr, "last_share_names", []) or []),
+                                   message="已转存到下载目录，尚未确认整理入库", moved_at=time.time())
+                    self._mark_resource_complete(context["subscription_key"], resource_key)
+                success.append(msg)
+                successful_keys.append(resource_key)
+                if self._link_mode == "first":
+                    break
+            except Exception as exc:
+                error = self._error(exc)
+                errors.append(error)
+                outcome = getattr(tr, "last_offline_result", None) if h else None
+                share_result = getattr(tr, "last_share_result", {})
+                uncertain = bool(outcome is not None and outcome.info_hash == h and outcome.uncertain) if h else bool(
+                    share_result.get("uncertain") or share_result.get("partial"))
+                history.update(item["id"], status="submitting" if uncertain else "failed", message=error)
+                if h and pending.get(h) and pending.get(h).get("record_id") == item["id"]:
+                    pending.update(h, status="submitting" if uncertain else "failed", message=error)
+                if uncertain:
+                    # Reconcile the task before attempting any other mirror.
+                    successful_keys.append(resource_key)
+                    break
+        self._last_transfer_result = {"resource_keys": successful_keys,
+            "required_resources": required_keys if self._link_mode == "all" else successful_keys,
+            "uncertain": uncertain}
+        if not success:
+            return False, "；".join(errors) or "转存失败"
+        if errors and self._link_mode == "all":
+            return False, "部分资源已提交；失败资源可重试：" + "；".join(errors)
+        return True, "；".join(success)
+
+    @staticmethod
+    def _update_record(store, task, **fields):
+        rec = next((r for r in store.list() if r.get("id") == task.get("record_id")), None)
+        if not rec:
+            rec = store.find_by_hash(task.get("hash", ""))
+        if rec:
+            store.update(rec["id"], **fields)
+
+    def _process_offline(self, tr, history):
+        pending = self._pending()
+        items = [x for x in pending.list() if x.get("status", "downloading") not in ("failed", "missing", "cancelled")]
+        data = {"pending": len(items), "finished": 0, "moved": 0, "failed": 0, "maxpct": 0, "changed": False, "errors": []}
+        if not items:
+            return data
+        tasks = {str(t.get("info_hash") or "").lower(): t for t in tr.list_tasks()}
+        now = time.time()
+        for item in items:
+            h = item.get("hash", "")
+            task = tasks.get(h)
+            try:
+                if not task:
+                    since = item.get("missing_since") or now
+                    terminal = now - since >= 3600
+                    status = "missing" if terminal else "downloading"
+                    message = "115任务已消失，请核对后重试" if terminal else "暂未查询到115任务，稍后重查"
+                    pending.update(h, missing_since=since, status=status, message=message)
+                    self._update_record(history, item, status=status, message=message)
+                    if terminal:
+                        data["failed"] += 1
+                        self._set_subscription(item.get("subscription_key"), status="failed", message=message)
+                    continue
+                pct = max(0, min(100, int(float(task.get("percentDone") or 0))))
+                if tr.task_failed(task):
+                    raise OfflineTaskError("115离线任务失败，请核对后重试")
+                changed = pct != item.get("last_pct")
+                change_ts = now if changed else item.get("last_change_ts", item.get("created_ts", now))
+                if now - float(change_ts) > 24 * 3600:
+                    raise OfflineTaskError("离线任务超过24小时没有进度，已停止自动检查，可手动重试")
+                pending.update(h, last_pct=pct, last_change_ts=change_ts, missing_since=0)
+                data["changed"] |= changed
+                data["maxpct"] = max(data["maxpct"], pct)
+                if pct < 100:
+                    self._update_record(history, item, status="downloading", progress=pct)
+                    continue
+                name = str(task.get("name") or "")
+                if not name or name in (".", "..") or "/" in name or "\\" in name:
+                    raise OfflineTaskError("115任务返回无效文件名，未执行搬运")
+                staging, final = item["staging_path"], item["final_path"]
+                file_id = str(task.get("file_id") or item.get("task_file_id") or "")
+                if not file_id or not file_id.isdigit() or file_id == "0":
+                    raise OfflineTaskError("115任务没有可验证的文件ID，未执行搬运；请核实任务后重试")
+                pending.update(h, task_file_id=file_id)
+                info = tr.get_file_info(file_id)
+                if info and info.get("name"):
+                    name = str(info["name"])
+                    if name in (".", "..") or "/" in name or "\\" in name:
+                        raise OfflineTaskError("115文件ID对应名称无效，未执行搬运")
+                actual_cid = task.get("wp_path_id") or task.get("savepath") or item.get("actual_cid")
+                if actual_cid and str(actual_cid).isdigit() and int(actual_cid) != tr.path_to_id(staging, mkdir=False):
+                    raise OfflineTaskError("115任务保存目录与登记目录不同，未执行搬运")
+                src = f"{staging}/{name}"
+                if not tr.file_in_directory(file_id, staging):
+                    # A previous move may have succeeded before a crash; verify exact target.
+                    if tr.file_in_directory(file_id, final):
+                        ok, error = True, ""
+                    else:
+                        since = item.get("completed_since") or now
+                        if now - float(since) >= 3600:
+                            raise OfflineTaskError("115显示完成但文件1小时未落盘，已停止检查，可核对后重试")
+                        pending.update(h, completed_since=since, status="awaiting_move")
+                        self._update_record(history, item, status="awaiting_move", progress=100,
+                                            message="115显示完成，文件尚未落盘")
+                        continue
+                else:
+                    if item.get("move_started") and now - float(item.get("move_requested_ts") or 0) < 300:
+                        self._update_record(history, item, status="moving", message="等待115搬运结果，未重复发送请求")
+                        continue
+                    pending.update(h, status="moving", move_started=True, move_requested_ts=now)
+                    self._update_record(history, item, status="moving", progress=100)
+                    ok, error = tr.move_via_p115disk(src, final, file_id=file_id)
+                if not ok:
+                    attempts = int(item.get("attempts") or 0) + 1
+                    pending.update(h, attempts=attempts)
+                    if attempts >= 3:
+                        raise OfflineTaskError(error or "搬运连续失败3次，可手动重试")
+                    self._update_record(history, item, status="awaiting_move", message=error or "搬运失败，稍后重试")
+                    continue
+                if not tr.file_in_directory(file_id, final):
+                    pending.update(h, status="moving", move_started=True)
+                    self._update_record(history, item, status="moving", progress=100,
+                                        message="115已接收搬运请求，等待按文件ID确认目标目录")
+                    continue
+                self._update_record(history, item, status="done", progress=100, item_name=name,
+                                    moved_at=now, message="已搬入下载目录，尚未确认整理入库")
+                self._mark_resource_complete(item.get("subscription_key"), item.get("resource_key"))
+                pending.delete(h)
+                data["moved"] += 1
+                data["finished"] += 1
+                self._complete_subscription_if_ready(item.get("subscription_key"))
+            except OfflineTaskError as exc:
+                pending.update(h, status="failed", message=self._error(exc))
+                self._update_record(history, item, status="failed", message=self._error(exc))
+                self._set_subscription(item.get("subscription_key"), status="failed", message=self._error(exc))
+                data["failed"] += 1
+            except P115Error as exc:
+                # A failed query says nothing about whether the file exists.
+                error = self._error(exc)
+                pending.update(h, message=error)
+                self._update_record(history, item, message="暂时无法查询115：" + error)
+                data["errors"].append(error)
+        data["pending"] = sum(x.get("status", "downloading") not in ("failed", "missing", "cancelled") for x in pending.list())
+        return data
+
+    def check_offline_tasks(self, force=False):
+        self._ensure_runtime()
+        if not self._enabled:
+            return {"code": 1, "msg": "插件未启用"}
+        if not self._offline_lock.acquire(blocking=False):
+            return {"code": 0, "data": {"skipped": 1}}
+        try:
+            with self._operation_lock:
+                if not force and time.time() < self._offline_next_ts:
+                    return {"code": 0, "data": {"skipped": 1}}
+                if not any(x.get("status", "downloading") not in ("failed", "missing", "cancelled") for x in self._pending().list()):
+                    return {"code": 0, "data": {"pending": 0, "finished": 0}}
+                data = self._process_offline(self._transfers(), self._records())
+                interval = 300 if data["errors"] else (15 if data["maxpct"] >= 99 else (90 if data["changed"] else 300))
+                self._offline_next_ts = time.time() + interval if data["pending"] else 0
+                return {"code": 0, "data": data}
+        except Exception as exc:
+            self._offline_next_ts = time.time() + 300
+            return {"code": 1, "msg": self._error(exc)}
+        finally:
+            self._offline_lock.release()
+
+    def records_view(self, refresh=False):
+        # Reading history never triggers a cloud mutation.
+        return {"code": 0, "data": self._records().list()}
+
+    def delete_record(self, rec_id=""):
+        store = self._records()
+        if rec_id:
+            return {"code": 0, "data": {"deleted": int(store.delete(rec_id))}}
+        return {"code": 0, "data": {"deleted": store.clear(), "cleared": True}}
+
+    def _mp_subscribes(self):
+        from app.core.config import settings
+        token = (getattr(settings, "API_TOKEN", "") or "").strip()
+        if not token:
+            raise RuntimeError("MP未配置API_TOKEN，无法读取订阅")
+        ports = list(dict.fromkeys(int(p) for p in (getattr(settings, "PORT", 0), 5000, 5001, 3000) if str(p).isdigit() and int(p)))
+        for port in ports:
+            for endpoint, credential in (("list", "token"), ("", "apikey")):
+                try:
+                    rows, seen = [], set()
+                    for page in range(1, 1001):
+                        query = urllib.parse.urlencode({credential: token, "page": page, "count": 100})
+                        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/subscribe/{endpoint}?{query}",
+                                                     headers={"User-Agent": "MoviePilot-Doc115Subscribe"})
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            body = json.loads(resp.read().decode())
+                        batch = body.get("data") if isinstance(body, dict) else body
+                        if not isinstance(batch, list):
+                            raise ValueError("MP订阅接口返回结构错误")
+                        if not batch:
+                            return rows
+                        signature = hashlib.sha256(json.dumps(batch, sort_keys=True).encode()).hexdigest()
+                        if signature in seen:
+                            raise ValueError("MP订阅接口分页没有前进")
+                        seen.add(signature)
+                        rows.extend(batch)
+                        if len(batch) < 100:
+                            return rows
+                    raise ValueError("订阅超过分页保护上限，未执行不完整同步")
+                except Exception:
+                    continue
+        raise RuntimeError("读取MP订阅失败，请检查API_TOKEN、端口和接口版本")
+
+    @staticmethod
+    def _matches_rules(rec, sub):
+        text = " ".join(str(rec.get(k) or "") for k in ("title", "qtext", "spec"))
+        for field in ("include", "quality", "resolution", "effect"):
+            if sub.get(field) and not re.search(str(sub[field]), text, re.I):
+                return False
+        return not (sub.get("exclude") and re.search(str(sub["exclude"]), text, re.I))
+
+    def run_subscribe(self):
+        self._ensure_runtime()
+        if not self._enabled or not self._subscribe_enabled:
+            return {"code": 1, "msg": "电影订阅同步未启用"}
+        if not self._subscribe_lock.acquire(blocking=False):
+            return {"code": 1, "msg": "订阅同步正在运行"}
+        try:
+            with self._operation_lock:
+                index = self._ensure_index()
+                if not index or not index.records:
+                    raise ValueError("索引为空，请刷新索引")
+                subs = []
+                for raw in self._mp_subscribes():
+                    if raw.get("type") != "电影":
+                        continue
+                    if raw.get("state") not in (None, "", "N", "R"):
+                        continue
+                    source = raw.get("media_source") or "themoviedb"
+                    sub = {**raw, "title": raw.get("name") or raw.get("title") or "",
+                           "tmdbid": str((raw.get("media_id") or raw.get("tmdbid") or "") if source == "themoviedb" else (raw.get("tmdbid") or "")),
+                           "year": str(raw.get("year") or "")}
+                    subs.append(sub)
+                data = {"movie_subs": len(subs), "matched": 0, "transferred": 0, "skipped": 0, "failed": 0, "errors": []}
+                records = subscribe_sync.SubscriptionMatcher(index.records)
+                states = {x["key"]: x for x in self._subscription_store().list()}
+                legacy_path = self.get_data_path_local() / "subscribed.json"
+                legacy = set(json.loads(legacy_path.read_text(encoding="utf8"))) if legacy_path.exists() else set()
+                for sub in subs:
+                    if not self._enabled:
+                        break
+                    self._last_transfer_result = {"resource_keys": [], "required_resources": [], "uncertain": False}
+                    candidates = subscribe_sync.subscription_candidates(records, sub)
+                    if not candidates:
+                        continue
+                    key = subscribe_sync.transfer_key(sub, candidates[0])
+                    state = states.get(key, {})
+                    if state.get("status") == "cancelled":
+                        data["skipped"] += 1
+                        continue
+                    if state.get("status") == "failed" and state.get("fingerprint") == self._fingerprint(candidates[0]):
+                        data["skipped"] += 1
+                        data["errors"].append(f"{sub['title']}：上次失败，等待手动重试或新资源")
+                        continue
+                    completed_score = state.get("completed_quality_score")
+                    if completed_score is None and (state.get("status") == "complete" or key in legacy):
+                        completed_score = state.get("quality_score", 3)
+                        self._set_subscription(key, completed_quality_score=completed_score)
+                    if completed_score is not None:
+                        if not self._upgrade_enabled or doc_parser.quality_score(candidates[0]) <= completed_score:
+                            data["skipped"] += 1
+                            continue
+                        candidates = [c for c in candidates if doc_parser.quality_score(c) > completed_score]
+                        if state.get("last_upgrade_fingerprint") == self._fingerprint(candidates[0]):
+                            data["skipped"] += 1
+                            continue
+                    if any(x.get("subscription_key") == key and x.get("status", "downloading") not in ("failed", "missing", "cancelled") for x in self._pending().list()):
+                        data["skipped"] += 1
+                        continue
+                    data["matched"] += 1
+                    if sub.get("filter") or sub.get("filter_groups"):
+                        data["failed"] += 1
+                        data["errors"].append(f"{sub['title']}：外部过滤规则组不能在文档记录中可靠校验，未自动下载")
+                        continue
+                    try:
+                        for field in ("include", "exclude", "quality", "resolution", "effect"):
+                            if sub.get(field):
+                                re.compile(str(sub[field]), re.I)
+                    except re.error as exc:
+                        data["failed"] += 1
+                        data["errors"].append(f"{sub['title']}：订阅正则规则无效：{self._error(exc)}")
+                        continue
+                    failures, accepted = [], None
+                    for candidate in candidates:
+                        if not self._matches_rules(candidate, sub):
+                            continue
+                        if self.resolve_media_type(candidate) != "movie":
+                            continue
+                        candidate = {**candidate, "_subscription_key": key}
+                        ok, msg = self.do_transfer(candidate, to="movie")
+                        if ok:
+                            accepted = candidate
+                            break
+                        failures.append(msg)
+                        if self._last_transfer_result.get("uncertain"):
+                            break
+                        if self._link_mode == "all" and any(x.get("subscription_key") == key for x in self._pending().list()):
+                            break
+                    if accepted:
+                        data["transferred"] += 1
+                        active = any(x.get("subscription_key") == key and x.get("status", "downloading") not in ("failed", "missing", "cancelled") for x in self._pending().list())
+                        self._set_subscription(key, status="pending" if active else "complete",
+                                               fingerprint=self._fingerprint(accepted), quality_score=doc_parser.quality_score(accepted),
+                                               target_quality_score=doc_parser.quality_score(accepted),
+                                               required_resources=self._last_transfer_result["required_resources"])
+                    else:
+                        data["failed"] += 1
+                        data["errors"].append(f"{sub['title']}：" + ("；".join(failures) or "没有符合类型和订阅规则的可用资源"))
+                        self._set_subscription(key, status="pending" if self._last_transfer_result.get("uncertain") else "failed",
+                            fingerprint=self._fingerprint(candidates[0]),
+                            target_quality_score=doc_parser.quality_score(candidates[0]),
+                            required_resources=self._last_transfer_result.get("required_resources") or self._last_transfer_result.get("resource_keys", []))
+                self._last_subscribe = {"success": not data["failed"], "at": time.time(), "msg": f"命中{data['matched']}，提交{data['transferred']}，失败{data['failed']}"}
+                return {"code": 0, "msg": self._last_subscribe["msg"], "data": data}
+        except Exception as exc:
+            self._last_subscribe = {"success": False, "at": time.time(), "msg": self._error(exc)}
+            return {"code": 1, "msg": self._error(exc)}
+        finally:
+            self._subscribe_lock.release()
+
     @staticmethod
     def get_render_mode():
-        """声明本插件使用 Vue 联邦组件渲染（Vuetify 页面无法把输入框的值传给接口）。"""
         return "vue", "dist/assets"
 
-    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """Vue 模式下配置表单由前端组件渲染，这里只返回默认配置模型。"""
-        return [], self._current_config()
+    def get_form(self):
+        return [], self._public_config()
 
-    def get_page(self) -> Optional[List[dict]]:
-        """Vue 模式下详情页由前端组件渲染。"""
+    def get_page(self):
         return []
 
-    # ---- API ---------------------------------------------------------------
-    def get_api(self) -> List[Dict[str, Any]]:
-        return [
-            {"path": "/status", "endpoint": self.api_status,
-             "auth": "bear", "methods": ["GET"], "summary": "插件状态"},
-            {"path": "/get_config", "endpoint": self.api_get_config,
-             "auth": "bear", "methods": ["GET"], "summary": "读取配置"},
-            {"path": "/save_config", "endpoint": self.api_save_config,
-             "auth": "bear", "methods": ["POST"], "summary": "保存配置"},
-            {"path": "/refresh_index", "endpoint": self.api_refresh_index,
-             "auth": "bear", "methods": ["POST"], "summary": "刷新本地索引"},
-            {"path": "/search", "endpoint": self.api_search,
-             "auth": "bear", "methods": ["POST"], "summary": "搜索文档资源"},
-            {"path": "/transfer", "endpoint": self.api_transfer,
-             "auth": "bear", "methods": ["POST"], "summary": "转存到 115"},
-            {"path": "/check_offline", "endpoint": self.api_check_offline,
-             "auth": "bear", "methods": ["POST"], "summary": "检查离线下载并搬运到最终目录"},
-            {"path": "/records", "endpoint": self.api_records,
-             "auth": "bear", "methods": ["GET"], "summary": "转存/离线记录与进度"},
-            {"path": "/records_delete", "endpoint": self.api_records_delete,
-             "auth": "bear", "methods": ["POST"], "summary": "删除转存记录（不传 id 则清空）"},
-            {"path": "/run_subscribe", "endpoint": self.api_run_subscribe,
-             "auth": "bear", "methods": ["POST"], "summary": "手动同步电影订阅"},
-            {"path": "/qr_start", "endpoint": self.api_qr_start,
-             "auth": "bear", "methods": ["GET"], "summary": "生成扫码登录二维码"},
-            {"path": "/qr_status", "endpoint": self.api_qr_check,
-             "auth": "bear", "methods": ["GET"], "summary": "查询扫码状态"},
-        ]
-
-    # --- API 实现 -----------------------------------------------------------
+    def get_api(self):
+        methods = [("status", self.api_status, "GET"), ("get_config", self.api_get_config, "GET"),
+                   ("save_config", self.api_save_config, "POST"), ("refresh_index", self.refresh_index, "POST"),
+                   ("search", self.api_search, "POST"), ("transfer", self.api_transfer, "POST"),
+                   ("check_offline", self.api_check_offline, "POST"), ("records", self.api_records, "GET"),
+                   ("records_delete", self.api_records_delete, "POST"), ("cancel_task", self.api_cancel_task, "POST"),
+                   ("retry_task", self.api_retry_task, "POST"), ("run_subscribe", self.run_subscribe, "POST"),
+                   ("qr_start", self.api_qr_start, "GET"), ("qr_status", self.api_qr_check, "GET")]
+        return [{"path": "/" + name, "endpoint": endpoint, "auth": "bear", "methods": [method], "summary": name}
+                for name, endpoint, method in methods]
 
     @staticmethod
     def _cookie_days_left(cookie: str) -> Optional[float]:
@@ -836,209 +848,167 @@ class Doc115Subscribe(_PluginBase):
         except Exception:  # noqa: BLE001
             return None
 
-    def api_status(self) -> Dict[str, Any]:
-        if self._enabled and not self._tencent_cookie:
-            try:
-                self.prewarm_qr()          # 页面打开即在后台备好二维码
-            except Exception:  # noqa: BLE001
-                pass
-        idx = self._ensure_index()
-        s = idx.summary() if idx else {"record_count": 0, "sheet_count": 0}
-        built = "尚未建立"
-        if idx and idx.built_at:
-            built = datetime.fromtimestamp(idx.built_at).strftime("%Y-%m-%d %H:%M")
-        return {"code": 0, "data": {
-            "version": self.plugin_version,
-            "enabled": self._enabled,
-            "cookie_ready": bool(self._tencent_cookie),
-            "p115_ready": bool(self.get_p115_cookie()),
+    def api_status(self):
+        self._ensure_runtime()
+        index = self._ensure_index()
+        summary = index.summary() if index else {}
+        return {"code": 0, "data": {"version": self.plugin_version, "enabled": self._enabled,
+            "cookie_ready": bool(self._tencent_cookie), "p115_ready": bool(self.get_p115_cookie()),
             "cookie_days_left": self._cookie_days_left(self._tencent_cookie),
-            "record_count": s.get("record_count", 0),
-            "sheet_count": s.get("sheet_count", 0),
-            "built_at_text": built,
-        }}
+            "record_count": summary.get("record_count", 0), "sheet_count": summary.get("sheet_count", 0),
+            "built_at_text": datetime.fromtimestamp(index.built_at).strftime("%Y-%m-%d %H:%M") if index and index.built_at else "尚未建立",
+            "index_errors": summary.get("errors", []), "stale_sheets": summary.get("stale_sheets", []),
+            "refreshing": self._refresh_lock.locked(), "last_refresh": self._last_refresh,
+            "last_subscribe": self._last_subscribe}}
 
-    def api_get_config(self) -> Dict[str, Any]:
-        return {"code": 0, "data": self._current_config()}
+    def api_get_config(self):
+        return {"code": 0, "data": self._public_config()}
 
-    def api_save_config(self, payload: dict = None) -> Dict[str, Any]:
-        conf = dict(payload or {})
-        if not conf:
+    def api_save_config(self, payload: dict = None):
+        self._ensure_runtime()
+        if not isinstance(payload, dict) or not payload:
             return {"code": 1, "msg": "没有收到配置内容"}
-        merged = self._current_config()
-        merged.update(conf)
-        self.update_config(merged)
-        # 让新配置立即生效（与 MP 的 init 流程一致）
-        try:
-            self.init_plugin(merged)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"115文档订阅与查询：重新初始化失败：{exc}")
-        return {"code": 0, "msg": "配置已保存", "data": self._current_config()}
+        with self._config_lock:
+            before = self._current_config()
+            try:
+                merged = {**before, **{k: v for k, v in payload.items() if k in self.DEFAULTS}}
+                for field in ("tencent_cookie", "p115_cookie"):
+                    if "clear_" + field in payload and not isinstance(payload["clear_" + field], bool):
+                        raise ValueError("清除Cookie标记必须是布尔值")
+                    if payload.get("clear_" + field) is True:
+                        merged[field] = ""
+                    elif not payload.get(field):
+                        merged[field] = before[field]
+                merged = self._validate_config(merged)
+                self.init_plugin(merged)
+                self.update_config(merged)
+                return {"code": 0, "msg": "配置已保存", "data": self._public_config()}
+            except Exception as exc:
+                # Validation errors leave the old scheduler intact. Revert runtime if startup failed.
+                if self._current_config() != before or (before["enabled"] and not self._scheduler):
+                    try:
+                        self.init_plugin(before)
+                        self.update_config(before)
+                    except Exception:
+                        logger.error("115文档：旧配置恢复失败，请检查插件设置")
+                return {"code": 1, "msg": "配置未生效：" + self._error(exc)}
 
-    def api_refresh_index(self) -> Dict[str, Any]:
-        return self.refresh_index()
-
-    def api_search(self, keyword: str = "", payload: dict = None) -> Dict[str, Any]:
-        kw = (keyword or (payload or {}).get("keyword") or "").strip()
-        if not self._enabled:
-            return {"code": 1, "msg": "插件未启用"}
-        if not self._ensure_index():
-            return {"code": 1, "msg": "本地索引尚未建立，请先点「刷新索引」"}
-        if not kw:
-            return {"code": 1, "msg": "请输入影视名称"}
-        results = self._index.search(kw, limit=30)
-        for r in results:
-            r["media_type"] = self.resolve_media_type(r)
-        return {"code": 0, "data": results}
-
-    def api_transfer(self, payload: dict = None, index: int = -1, to: str = "",
-                     keyword: str = "") -> Dict[str, Any]:
-        """前端传 {keyword, index, to}：后端按同样的关键词重跑一次搜索再取下标对应的记录。"""
+    def api_search(self, payload: dict = None):
         body = payload or {}
-        kw = (body.get("keyword") or keyword or "").strip()
-        target = body.get("to") or to or ""
-        raw_idx = body.get("index", index)
-        try:
-            idx = int(raw_idx)
-        except (TypeError, ValueError):
-            idx = -1
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}
-        if not self._ensure_index():
-            return {"code": 1, "msg": "本地索引尚未建立"}
-        if not kw:
-            return {"code": 1, "msg": "缺少搜索关键词"}
-        hits = self._index.search(kw, limit=30)
-        if idx < 0 or idx >= len(hits):
-            return {"code": 1, "msg": "结果已失效，请重新搜索"}
-        ok, msg = self.do_transfer(hits[idx], to=target)
-        return {"code": 0 if ok else 1, "msg": msg}
+        try:
+            index = self._ensure_index()
+            if not index:
+                raise ValueError("本地索引尚未建立，请刷新索引")
+            kw = str(body.get("keyword") or "").strip()
+            if not kw:
+                raise ValueError("请输入影视名称")
+            data = index.search_page(kw, media_type=body.get("media_type", "all"),
+                quality=body.get("quality", "all"), page=int(body.get("page", 1)), page_size=int(body.get("page_size", 10)))
+            return {"code": 0, "data": data}
+        except Exception as exc:
+            return {"code": 1, "msg": self._error(exc)}
 
-    def api_check_offline(self) -> Dict[str, Any]:
-        """按钮/手动触发：忽略节流，立即检查一次。"""
+    def api_transfer(self, payload: dict = None):
+        body = payload or {}
+        with self._operation_lock:
+            index = self._ensure_index()
+            if not index or body.get("index_version") != index.index_version:
+                return {"code": 1, "msg": "索引已更新，请重新搜索再转存"}
+            rec = index.get_record(str(body.get("record_id") or ""))
+            if not rec:
+                return {"code": 1, "msg": "资源已失效，请重新搜索"}
+            target = body.get("to", "")
+            if target not in ("movie", "tv"):
+                return {"code": 1, "msg": "请选择电影或电视剧目录"}
+            ok, msg = self.do_transfer(rec, target)
+            return {"code": 0 if ok else 1, "msg": msg}
+
+    def api_check_offline(self):
         return self.check_offline_tasks(force=True)
 
-    def api_records(self, limit: int = 200) -> Dict[str, Any]:
-        """详情页「转存记录」页：历史转存/离线记录 + 实时进度。"""
-        data = self.records_view(refresh=True).get("data") or []
+    def api_records(self, limit: int = 200):
         try:
-            n = int(limit)
-        except (TypeError, ValueError):
-            n = 200
-        return {"code": 0, "data": data[:max(1, n)]}
+            return {"code": 0, "data": self._records().list()[:max(1, min(200, int(limit)))]}
+        except Exception as exc:
+            return {"code": 1, "msg": self._error(exc)}
 
-    def api_records_delete(self, payload: dict = None) -> Dict[str, Any]:
-        """前端传 {id} 删除单条；不传 id（或 id 为空）则清空全部。"""
-        body = payload or {}
-        return self.delete_record(str(body.get("id") or ""))
-
-    def api_run_subscribe(self) -> Dict[str, Any]:
-        return self.run_subscribe()
-
-    QR_FRESH_SECONDS = 90
-
-    def api_qr_start(self) -> Dict[str, Any]:
-        """返回二维码。若页面打开时已预热好，则**秒出**；否则现生成（约 7 秒）。"""
-        # 预热命中
-        with self._qr_lock:
-            if self._qr and self._qr_img and (time.time() - self._qr_ts) < self.QR_FRESH_SECONDS:
-                return {"code": 0, "data": {
-                    "qr_base64": "data:image/png;base64," + base64.b64encode(self._qr_img).decode(),
-                    "cached": True}}
-        return self._start_qr_now()
-
-    def _start_qr_now(self) -> Dict[str, Any]:
-        try:
-            if self._qr:
-                self._qr.close()
-            qr = BrowserQrLogin(self._doc_url)
-            shot, already, cost = qr.start()
-        except QrLoginError as exc:
-            return {"code": 1, "msg": f"获取二维码失败：{exc}"}
-        if already:
-            self._qr = qr
-            return self.page_qr_collect()
-        if not shot:
-            return {"code": 1, "msg": "未截取到二维码，请重试"}
-        with self._qr_lock:
-            self._qr = qr
-            self._qr_img = shot
-            self._qr_ts = time.time()
-        logger.info(f"115文档订阅与查询：二维码生成完成，耗时 {cost:.1f}s")
-        return {"code": 0, "data": {
-            "qr_base64": "data:image/png;base64," + base64.b64encode(shot).decode(),
-            "cost": round(cost, 1)}}
-
-    def prewarm_qr(self):
-        """后台预热二维码：详情页打开时调用，用户点按钮即可秒出。"""
-        with self._qr_lock:
-            if self._qr and self._qr_img and (time.time() - self._qr_ts) < self.QR_FRESH_SECONDS:
-                return
-            if getattr(self, "_qr_warming", False):
-                return
-            self._qr_warming = True
-
-        def _run():
+    def api_records_delete(self, payload: dict = None):
+        with self._operation_lock:
             try:
-                self._start_qr_now()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"115文档订阅与查询：二维码预热失败：{exc}")
-            finally:
-                self._qr_warming = False
+                return self.delete_record(str((payload or {}).get("id") or ""))
+            except Exception as exc:
+                return {"code": 1, "msg": self._error(exc)}
 
-        threading.Thread(target=_run, daemon=True, name="doc115-qrprewarm").start()
+    def api_cancel_task(self, payload: dict = None):
+        with self._operation_lock:
+            rec_id = str((payload or {}).get("id") or "")
+            task = next((x for x in self._pending().list() if x.get("record_id") == rec_id), None)
+            if not task:
+                return {"code": 1, "msg": "没有正在跟踪的任务"}
+            self._pending().delete(task["hash"])
+            self._records().update(rec_id, status="cancelled", message="已停止自动搬运；115下载与文件不受影响")
+            self._set_subscription(task.get("subscription_key"), status="cancelled")
+            return {"code": 0, "msg": "已停止跟踪，未取消115下载或删除文件"}
 
-    def page_qr_collect(self) -> Dict[str, Any]:
-        """会话已是登录态时，直接收集 Cookie 并保存。"""
-        st = self._qr.check() if self._qr else {}
-        cookie = (st or {}).get("cookie")
+    def api_retry_task(self, payload: dict = None):
+        with self._operation_lock:
+            rec = next((x for x in self._records().list() if x.get("id") == (payload or {}).get("id")), None)
+            if not rec or rec.get("status") not in ("failed", "missing", "cancelled"):
+                return {"code": 1, "msg": "该记录不需要重试"}
+            candidate = {**rec, "links": [(rec["kind"], rec["url"])], "_subscription_key": rec.get("subscription_key", "")}
+            ok, msg = self.do_transfer(candidate, rec.get("type", "movie"), force=True)
+            if ok and candidate["_subscription_key"]:
+                self._set_subscription(candidate["_subscription_key"], status="pending")
+                self._complete_subscription_if_ready(candidate["_subscription_key"])
+            return {"code": 0 if ok else 1, "msg": msg}
+
+    def api_qr_start(self, force: bool = False):
+        self._ensure_runtime()
+        with self._config_lock, self._qr_lock:
+            if not force and self._qr and self._qr_img and time.time() - self._qr_ts < self.QR_FRESH_SECONDS:
+                return {"code": 0, "data": {"qr_base64": "data:image/png;base64," + base64.b64encode(self._qr_img).decode(),
+                                               "session_id": self._qr.session_id, "cached": True}}
+            qr = None
+            try:
+                if self._qr:
+                    self._qr.close()
+                self._qr, self._qr_img = None, b""
+                qr = BrowserQrLogin(self._doc_url)
+                shot, already, cost = qr.start()
+                self._qr = qr
+                if already:
+                    return self._finish_qr(qr.check())
+                self._qr_img, self._qr_ts = shot, time.time()
+                return {"code": 0, "data": {"qr_base64": "data:image/png;base64," + base64.b64encode(shot).decode(),
+                                               "session_id": qr.session_id, "cost": round(cost, 1)}}
+            except Exception as exc:
+                failed_qr = self._qr or qr
+                if failed_qr:
+                    failed_qr.close()
+                self._qr, self._qr_img = None, b""
+                return {"code": 1, "msg": self._error(exc)}
+
+    def _finish_qr(self, state):
+        cookie = state.get("cookie") or ""
         if not cookie:
-            return {"code": 1, "msg": "已是登录态但未取到 Cookie，请重试"}
-        self._tencent_cookie = cookie
-        self.update_config(self._current_config())
-        if self._qr:
-            self._qr.close()
-        self._qr = None
-        with self._qr_lock:
-            self._qr_img = b""
-        self.refresh_index()
-        return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True}}
-
-    def api_qr_check(self) -> Dict[str, Any]:
-        """查询扫码状态；确认后自动保存 Cookie。二维码过期会自动附上新码。"""
-        if not self._qr:
-            return {"code": 1, "msg": "请先点「获取登录二维码」"}
-        st = self._qr.check() or {}
-        state = st.get("state")
-        if state == "confirmed":
-            cookie = st.get("cookie") or ""
-            if not cookie:
-                return {"code": 1, "msg": "登录成功但未取到 Cookie，请重新获取二维码"}
+            return {"code": 1, "msg": "没有获取到有效登录Cookie，请重试"}
+        with self._config_lock:
             self._tencent_cookie = cookie
             self.update_config(self._current_config())
-            self._qr.close()
-            self._qr = None
-            with self._qr_lock:
-                self._qr_img = b""
-            # 索引构建约 4~5 分钟，放后台跑，避免这次请求超时
-            threading.Thread(target=self.refresh_index, daemon=True,
-                             name="doc115-index-after-login").start()
-            return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True,
-                                        "count": st.get("count"), "index_refreshing": True}}
-        data: Dict[str, Any] = {"state": state or "wait"}
-        if st.get("qr_base64"):
-            data["qr_base64"] = st["qr_base64"]
-        if state == "error":
-            data["msg"] = st.get("msg")
-            return {"code": 1, "msg": st.get("msg") or "检查失败", "data": data}
-        return {"code": 0, "data": data}
+        self._qr.close()
+        self._qr, self._qr_img = None, b""
+        threading.Thread(target=self.refresh_index, daemon=True, name="doc115-index-after-login").start()
+        return {"code": 0, "data": {"state": "confirmed", "cookie_saved": True, "index_refreshing": True}}
 
-    def stop_service(self):
-        if self._scheduler:
-            try:
-                self._scheduler.remove_all_jobs()
-                if self._scheduler.running:
-                    self._scheduler.shutdown()
-            except Exception:  # noqa: BLE001
-                pass
-            self._scheduler = None
+    def api_qr_check(self, session_id: str = ""):
+        self._ensure_runtime()
+        with self._config_lock, self._qr_lock:
+            if not self._qr or session_id != self._qr.session_id:
+                return {"code": 1, "msg": "扫码会话已变化，请重新获取二维码", "data": {"state": "expired"}}
+            state = self._qr.check() or {}
+            if state.get("state") == "confirmed":
+                return self._finish_qr(state)
+            data = {k: v for k, v in state.items() if k != "cookie"}
+            return {"code": 1 if data.get("state") == "error" else 0, "msg": data.get("msg", ""), "data": data}

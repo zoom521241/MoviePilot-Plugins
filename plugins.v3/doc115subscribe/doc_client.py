@@ -132,7 +132,7 @@ def _extract_rich(inner: bytes) -> Tuple[str, Optional[str]]:
                         for f4, k4, v4 in pb_fields(v3):
                             if f4 == 1 and k4 == "l":
                                 s = _utf8(v4).strip()
-                                if s.startswith(("http://", "https://")):
+                                if s.lower().startswith(("http://", "https://", "magnet:?", "ed2k://")):
                                     hrefs.append(s)
     return "".join(texts), (hrefs[0] if hrefs else None)
 
@@ -144,23 +144,14 @@ def _decode_block(related_b64: str) -> Tuple[List[Tuple[int, int, int, int]], Li
     top = pb_msg(raw, 1)
     if top is None:
         raise DocError("数据块结构不符预期")
-    # 主数据段通常是长度最大的那个 f5；小表（行数少）可能整段都不足 POOL_MIN_LEN，
-    # 所以先按阈值挑，挑不到就退回“最大的那个 f5”，否则小表会被误判为空表。
-    big = None
-    fallback = None
-    for field, kind, value in pb_fields(top):
-        if field != 5 or kind != "l":
-            continue
-        if len(value) > POOL_MIN_LEN:
-            big = value
-            break
-        if fallback is None or len(value) > len(fallback):
-            fallback = value
-    if big is None:
-        big = fallback
-    if big is None:
+    # f5 里也有图像/样式等大段，不能仅按第一个达到长度阈值的段判断。
+    # 逐个验证 f19 + 值池结构，也兼容不足阈值的小表。
+    candidates = sorted((value for field, kind, value in pb_fields(top)
+                         if field == 5 and kind == "l"), key=len, reverse=True)
+    if not candidates:
         raise DocError("数据块里找不到主数据段（空表或接口已变更）")
-    node = pb_msg(big, 19)
+    node = next((segment for candidate in candidates
+                 if (segment := pb_msg(candidate, 19)) is not None and pb_msg(segment, 5) is not None), None)
     if node is None:
         raise DocError("数据块里找不到 f19 段（接口可能已变更）")
 
@@ -272,12 +263,24 @@ class TencentDocsClient:
     def parse_doc_id(url_or_id: str) -> Tuple[str, Optional[str]]:
         """从分享链接或裸 ID 解析 (doc_id, tab_id)。"""
         text = (url_or_id or "").strip()
-        if "docs.qq.com" in text:
-            m = re.search(r"/sheet/([A-Za-z0-9]+)", text)
+        if "://" in text:
+            try:
+                parsed = urllib.parse.urlsplit(text)
+                valid_host = (parsed.scheme.lower() in ("http", "https")
+                              and parsed.hostname == "docs.qq.com"
+                              and not parsed.username and not parsed.password
+                              and parsed.port in (None, 80, 443))
+            except ValueError:
+                valid_host = False
+            if not valid_host:
+                raise DocError("只支持 docs.qq.com/sheet/ 链接")
+            m = re.fullmatch(r"/sheet/([A-Za-z0-9]+)/?", parsed.path)
             if not m:
                 raise DocError("只支持 docs.qq.com/sheet/ 链接")
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(text).query)
+            q = urllib.parse.parse_qs(parsed.query)
             return m.group(1), (q.get("tab") or [None])[0]
+        if not re.fullmatch(r"[A-Za-z0-9]+", text):
+            raise DocError("文档 ID 无效，请填写 docs.qq.com/sheet/ 分享链接或文档 ID")
         return text, None
 
     def _fetch(self, params: Dict[str, Any]) -> Dict[str, Any]:

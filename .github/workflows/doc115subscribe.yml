@@ -1,0 +1,96 @@
+name: Doc115Subscribe synthetic checks
+
+on:
+  push:
+    paths:
+      - 'plugins.v3/doc115subscribe/**'
+      - 'tests/test_doc115subscribe_*'
+      - 'package.v3.json'
+      - '.github/workflows/doc115subscribe.yml'
+  pull_request:
+    paths:
+      - 'plugins.v3/doc115subscribe/**'
+      - 'tests/test_doc115subscribe_*'
+      - 'package.v3.json'
+      - '.github/workflows/doc115subscribe.yml'
+  workflow_dispatch:
+
+# Test jobs never receive SSH, MoviePilot, Tencent or 115 credentials.
+permissions:
+  contents: read
+
+concurrency:
+  group: doc115subscribe-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Python synthetic regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test-only HTTP and scheduler frameworks
+        run: python -m pip install 'fastapi==0.115.12' 'httpx==0.28.1' 'APScheduler==3.11.0'
+      - name: Check syntax and manifest version
+        run: |
+          python - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+          root = Path('plugins.v3/doc115subscribe')
+          for source in root.glob('*.py'):
+              ast.parse(source.read_text(encoding='utf-8'), filename=str(source))
+          tree = ast.parse((root / '__init__.py').read_text(encoding='utf-8'))
+          plugin = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Doc115Subscribe')
+          version = next(ast.literal_eval(node.value) for node in plugin.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'plugin_version' for target in node.targets))
+          manifest = json.loads(Path('package.v3.json').read_text(encoding='utf-8'))
+          assert manifest['Doc115Subscribe']['version'] == version, 'Manifest and plugin version differ'
+          assert 'v' + version in manifest['Doc115Subscribe']['history'], 'Missing release note'
+          print('Python syntax and plugin manifest match')
+          PY
+      - name: Run synthetic Python tests with fake services
+        run: python -m unittest discover -s tests -p 'test_doc115subscribe_*.py' -v
+
+  frontend:
+    name: Vue build and synthetic UI regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: plugins.v3/doc115subscribe/ui
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins.v3/doc115subscribe/ui/package-lock.json
+      - name: Install locked build dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build frontend
+        run: npm run build
+      - name: Run synthetic UI tests
+        working-directory: .
+        run: node --test tests/test_doc115subscribe_frontend.mjs
+      - name: Compare built and committed assets
+        working-directory: .
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          root = Path('plugins.v3/doc115subscribe')
+          built = {str(path.relative_to(root / 'ui/dist/assets')): path.read_bytes() for path in (root / 'ui/dist/assets').rglob('*') if path.is_file()}
+          committed = {str(path.relative_to(root / 'dist/assets')): path.read_bytes() for path in (root / 'dist/assets').rglob('*') if path.is_file()}
+          assert built and 'remoteEntry.js' in built, 'No federation entry generated'
+          assert built.keys() == committed.keys(), 'Asset file sets differ: ' + repr(sorted(built.keys() ^ committed.keys()))
+          different = [name for name in built if built[name] != committed[name]]
+          assert not different, 'Asset contents differ: ' + repr(different)
+          print(f'All {len(built)} generated assets match committed dist')
+          PY

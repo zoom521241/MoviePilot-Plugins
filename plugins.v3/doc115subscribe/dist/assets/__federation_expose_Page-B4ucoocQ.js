@@ -70,15 +70,24 @@ const emit = __emit;
 const status = reactive({
   version: '', cookie_ready: false, p115_ready: false, cookie_days_left: null,
   record_count: 0, sheet_count: 0, built_at_text: '尚未建立',
+  index_errors: [], stale_sheets: [], last_refresh: null, last_subscribe: null,
 });
 const msg = ref('');
 const msgType = ref('info');
 const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false });
 const qrImage = ref('');
 const qrTip = ref('等待扫码');
+const qrSessionId = ref('');
 const keyword = ref('');
 const results = ref([]);
 const searched = ref(false);
+const searchedKeyword = ref('');
+const total = ref(0);
+const resultVersion = ref('');
+const transferring = reactive({});
+const retrying = reactive({});
+let searchSerial = 0;
+let disposed = false;
 
 // ---- 页签：搜索 / 转存记录 ----
 const tab = ref('search');
@@ -89,26 +98,15 @@ const page = ref(1);
 const filterType = ref('all');
 const filterQuality = ref('all');
 
-const filtered = computed(() => {
-  return results.value.filter((r) => {
-    if (filterType.value !== 'all' && r.media_type !== filterType.value) return false
-    if (filterQuality.value === '4k') {
-      return /4k|2160p|uhd|蓝光|remux/i.test(`${r.qtext || ''} ${r.title || ''}`)
-    }
-    if (filterQuality.value === 'cn') {
-      const t = `${r.qtext || ''} ${r.title || ''}`;
-      if (/无中字|无字幕/i.test(t)) return false
-      return /中文字幕|中字|简繁|国语|双语|简中|繁体/i.test(t)
-    }
-    return true
-  })
+const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
+watch([filterType, filterQuality], () => {
+  if (searchedKeyword.value) searchPage(searchedKeyword.value, 1);
 });
-const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize)));
-const paged = computed(() => {
-  const start = (page.value - 1) * pageSize;
-  return filtered.value.slice(start, start + pageSize)
-});
-watch([filterType, filterQuality, results], () => { page.value = 1; });
+const indexWarnings = computed(() => [...new Set([
+  ...(status.index_errors || []).map(String),
+  ...(status.stale_sheets || []).map((s) => typeof s === 'string' ? `保留旧索引：${s}` : `保留旧索引：${s.title || s.name || s.sheet_id || '未知工作表'}`),
+])]);
+function mediaTypeName(type) { return ({ movie: '电影', tv: '电视剧' })[type] || '类型待确认' }
 
 // ---- Cookie 状态文案 ----
 const cookieDays = computed(() => {
@@ -122,7 +120,7 @@ const cookieText = computed(() => {
 const cookieAlertType = computed(() => {
   if (!status.cookie_ready) return 'warning'
   if (cookieDays.value !== null && cookieDays.value <= 5) return 'warning'
-  return 'success'
+  return 'info'
 });
 
 // ---- 字段配色 ----
@@ -186,12 +184,19 @@ const KIND_STYLE = {
   ed2k: { name: 'ed2k', color: 'teal-darken-3' },
 };
 const STATUS_STYLE = {
-  submitted: { name: '已转存', color: 'blue-darken-2' },
+  submitting: { name: '提交中', color: 'blue-darken-2' },
+  submitted: { name: '已提交', color: 'blue-darken-2' },
   downloading: { name: '下载中', color: 'blue-darken-2' },
+  waiting: { name: '等待文件', color: 'amber-darken-3' },
+  awaiting_move: { name: '等待搬运', color: 'amber-darken-3' },
   moving: { name: '搬运中', color: 'amber-darken-3' },
   done: { name: '已搬入下载目录', color: 'amber-darken-3' },
+  moved: { name: '已搬入下载目录', color: 'amber-darken-3' },
+  missing: { name: '原目录未找到，整理待确认', color: 'amber-darken-3' },
+  unverified: { name: '整理待确认', color: 'amber-darken-3' },
   organized: { name: '已整理', color: 'green-darken-2' },
   failed: { name: '失败', color: 'red-darken-2' },
+  cancelled: { name: '已停止自动搬运', color: 'grey' },
 };
 function kindName(k) { return (KIND_STYLE[k] || {}).name || k }
 function kindColor(k) { return (KIND_STYLE[k] || {}).color || 'grey' }
@@ -199,9 +204,10 @@ function statusName(s) { return (STATUS_STYLE[s] || {}).name || s }
 function statusColor(s) { return (STATUS_STYLE[s] || {}).color || 'grey' }
 
 async function loadRecords() {
+  if (busy.records || disposed) return
   busy.records = true;
   try {
-    // 该接口会顺带检测离线任务：已下完且落盘的会立即搬到最终目录
+    // 仅读取记录；离线检查与搬运由独立后台任务执行。
     const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 120000 }));
     if (res.code === 0) records.value = res.data || [];
     else setMsg(res.msg || '读取转存记录失败', 'error');
@@ -212,7 +218,7 @@ async function loadRecords() {
   }
 }
 
-// 站在「转存记录」页且有下载中的任务时，自动轮询刷新（进度条会自己走，搬运也会被自动触发）
+// 记录页有活动任务时轮询读取后台检查结果。
 let recTimer = null;
 function stopRecTimer() {
   if (recTimer) { clearInterval(recTimer); recTimer = null; }
@@ -221,13 +227,13 @@ function startRecTimer() {
   stopRecTimer();
   recTimer = setInterval(() => {
     if (tab.value !== 'records') return
-    if (!records.value.some((r) => r.status === 'downloading' || r.status === 'moving')) return
+    if (!records.value.some(isActiveTask)) return
     loadRecords();
   }, 20000);
 }
 
 async function deleteRecord(r) {
-  if (!window.confirm(`删除这条记录？\n${r.title}`)) return
+  if (!window.confirm(`删除这条历史记录？下载与自动搬运任务继续执行。\n${r.title}`)) return
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_delete', { id: r.id }));
     if (res.code === 0) {
@@ -242,7 +248,7 @@ async function deleteRecord(r) {
 }
 
 async function clearRecords() {
-  if (!window.confirm('清空全部转存记录？（不影响 115 网盘里的文件）')) return
+  if (!window.confirm('清空全部转存历史记录？网盘文件、下载与自动搬运任务不受影响。')) return
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_delete', {}));
     if (res.code === 0) {
@@ -256,8 +262,31 @@ async function clearRecords() {
   }
 }
 
+function isActiveTask(r) { return ['submitting', 'submitted', 'downloading', 'waiting', 'awaiting_move', 'moving'].includes(r.status) && r.kind !== '115_share' }
+async function retryTask(r) {
+  if (retrying[r.id]) return
+  retrying[r.id] = true;
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/retry_task', { id: r.id }, { timeout: 300000 }));
+    setMsg(res.msg || (res.code === 0 ? '已重新尝试该任务' : '重试失败'), res.code === 0 ? 'success' : 'error');
+    if (res.code === 0) await loadRecords();
+  } catch (e) { setMsg(`重试失败：${describeError(e)}`, 'error'); }
+  finally { delete retrying[r.id]; }
+}
+async function cancelTask(r) {
+  if (!window.confirm(`停止「${r.title}」的自动跟踪与搬运？\n115 中的下载和文件会保留，完成后需要你手动搬运。`)) return
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/cancel_task', { id: r.id }));
+    setMsg(res.msg || (res.code === 0 ? '已停止自动搬运' : '停止失败'), res.code === 0 ? 'success' : 'error');
+    if (res.code === 0) await loadRecords();
+  } catch (e) { setMsg(`停止失败：${describeError(e)}`, 'error'); }
+}
+
 function close() {
+  disposed = true;
+  searchSerial += 1;
   stopQrTimer();
+  stopRecTimer();
   emit('close');
 }
 
@@ -288,16 +317,19 @@ async function loadStatus() {
 }
 
 async function refreshIndex() {
+  if (busy.refresh) return
   busy.refresh = true;
-  setMsg('正在刷新索引（90 张表，约 4~5 分钟），请稍候…');
+  setMsg('正在读取所有工作表并刷新索引，可能需要数分钟，请稍候…');
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/refresh_index', {}, { timeout: 900000 }));
     if (res.code === 0) {
       const d = res.data || {};
-      setMsg(`索引刷新完成：${d.record_count || 0} 条记录 / ${d.sheet_count || 0} 张表`, 'success');
+      const errors = d.errors || d.index_errors || [];
+      setMsg(`索引${errors.length ? '部分更新' : '刷新完成'}：${d.record_count || 0} 条记录 / ${d.sheet_count || 0} 张表${errors.length ? '\n' + errors.join('\n') : ''}`, errors.length ? 'warning' : 'success');
       await loadStatus();
     } else {
       setMsg(res.msg || '索引刷新失败', 'error');
+      await loadStatus();
     }
   } catch (e) {
     setMsg(`索引刷新失败：${describeError(e)}`, 'error');
@@ -309,38 +341,44 @@ async function refreshIndex() {
 
 // ---- 扫码登录 -----------------------------------------------------------
 let qrTimer = null;
-let qrTick = 0;
+let qrGeneration = 0;
 
 function stopQrTimer() {
+  qrGeneration += 1;
   if (qrTimer) {
-    clearInterval(qrTimer);
+    clearTimeout(qrTimer);
     qrTimer = null;
   }
 }
 
 function startQrTimer() {
-  stopQrTimer();
-  qrTick = 0;
-  qrTimer = setInterval(async () => {
-    qrTick += 1;
-    if (qrTick > 34) {
-      qrTick = 0;
-      await startQr(true);
-      return
-    }
+  if (disposed || !qrSessionId.value || qrTimer) return
+  const generation = qrGeneration;
+  qrTimer = setTimeout(async () => {
+    qrTimer = null;
     await checkQr(true);
+    if (generation === qrGeneration) startQrTimer();
   }, 3000);
 }
 
 async function startQr(silent = false) {
+  if (busy.qr || busy.check || disposed) return
   if (silent !== true) silent = false;
-  busy.qr = !silent;
+  busy.qr = true;
   stopQrTimer();
+  const generation = qrGeneration;
+  qrSessionId.value = '';
+  qrImage.value = '';
   if (!silent) setMsg('正在打开登录页并生成二维码（约 10~20 秒），请稍候…');
   try {
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_start', { timeout: 180000 }));
-    if (res.code === 0 && res.data && res.data.qr_base64) {
-      qrImage.value = res.data.qr_base64;
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_start', { params: { force: true }, timeout: 180000 }));
+    if (generation !== qrGeneration || disposed) return
+    const data = res.data || {};
+    if (res.code === 0 && data.state === 'confirmed') {
+      await qrConfirmed();
+    } else if (res.code === 0 && data.qr_base64 && data.session_id) {
+      qrSessionId.value = data.session_id;
+      qrImage.value = data.qr_base64;
       qrTip.value = '等待扫码';
       setMsg('二维码已生成，请用微信扫码（扫完会自动完成登录）');
       startQrTimer();
@@ -355,16 +393,17 @@ async function startQr(silent = false) {
 }
 
 async function checkQr(silent = false) {
+  if (busy.check || busy.qr || !qrSessionId.value || disposed) return
   if (silent !== true) silent = false;
-  busy.check = !silent;
+  busy.check = true;
+  const generation = qrGeneration;
+  const sessionId = qrSessionId.value;
   try {
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_status', { timeout: 120000 }));
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_status', { params: { session_id: sessionId }, timeout: 120000 }));
+    if (generation !== qrGeneration || disposed) return
     const data = res.data || {};
     if (res.code === 0 && data.state === 'confirmed') {
-      stopQrTimer();
-      qrImage.value = '';
-      setMsg('登录成功，Cookie 已保存！索引正在后台刷新，约 4~5 分钟后可搜索。', 'success');
-      await loadStatus();
+      await qrConfirmed();
       return
     }
     if (data.qr_base64) {
@@ -373,15 +412,23 @@ async function checkQr(silent = false) {
     }
     if (res.code !== 0) {
       setMsg(res.msg || '检查失败', 'error');
+      stopQrTimer();
       return
     }
     const map = {
       wait: '等待扫码',
       scanned: '已扫描，请在手机上确认登录',
-      expired: '二维码已过期，已自动换新',
-      failed: '本次登录失败，已换新码',
+      expired: '二维码已过期，请获取新二维码',
+      failed: '本次登录失败，请获取新二维码',
+      error: '登录检查失败，请获取新二维码',
     };
     qrTip.value = map[data.state] || '等待扫码';
+    if (['expired', 'failed', 'error'].includes(data.state)) {
+      stopQrTimer();
+      qrSessionId.value = '';
+      setMsg(data.msg || qrTip.value, 'warning');
+      return
+    }
     if (!silent && data.state) setMsg(map[data.state] || '');
   } catch (e) {
     if (!silent) setMsg(`检查失败：${describeError(e)}`, 'error');
@@ -390,14 +437,24 @@ async function checkQr(silent = false) {
   }
 }
 
+async function qrConfirmed() {
+  stopQrTimer();
+  qrSessionId.value = '';
+  qrImage.value = '';
+  setMsg('登录成功，Cookie 已保存。可刷新索引查看文档读取结果。', 'success');
+  await loadStatus();
+}
+
 // ---- 其它 ---------------------------------------------------------------
 async function checkOffline() {
+  if (busy.offline) return
   busy.offline = true;
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/check_offline', {}, { timeout: 180000 }));
     if (res.code === 0) {
       const d = res.data || {};
-      setMsg(`离线任务检查完成：本轮通知整理 ${d.finished || 0} 条，仍在下载 ${d.pending || 0} 条`, 'success');
+      setMsg(`离线任务检查完成：本轮搬运 ${d.finished || 0} 条，待完成 ${d.pending || 0} 条${d.failed ? `，失败 ${d.failed} 条（请查看转存记录）` : ''}`, d.failed ? 'warning' : 'success');
+      await loadRecords();
     } else {
       setMsg(res.msg || '检查离线任务失败', 'error');
     }
@@ -409,12 +466,14 @@ async function checkOffline() {
 }
 
 async function runSubscribe() {
+  if (busy.subscribe) return
   busy.subscribe = true;
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/run_subscribe', {}, { timeout: 900000 }));
     if (res.code === 0) {
       const d = res.data || {};
-      setMsg(`订阅同步完成：命中 ${d.matched || 0} 条，转存 ${d.transferred || 0} 条`, 'success');
+      const errors = d.errors || [];
+      setMsg(`订阅同步完成：命中 ${d.matched || 0} 条，成功提交 ${d.transferred || 0} 条${errors.length ? '\n' + errors.join('\n') : ''}`, errors.length ? 'warning' : 'success');
     } else {
       setMsg(res.msg || '订阅同步失败', 'error');
     }
@@ -422,6 +481,7 @@ async function runSubscribe() {
     setMsg(`订阅同步失败：${describeError(e)}`, 'error');
   } finally {
     busy.subscribe = false;
+    await loadStatus();
     emit('action');
   }
 }
@@ -432,40 +492,66 @@ async function doSearch() {
     setMsg('请输入影视名称', 'warning');
     return
   }
+  await searchPage(kw, 1);
+}
+
+function changePage(value) {
+  if (searchedKeyword.value && !busy.search) searchPage(searchedKeyword.value, value);
+}
+
+async function searchPage(kw, requestedPage) {
+  const serial = ++searchSerial;
+  const mediaType = filterType.value;
+  const quality = filterQuality.value;
+  searchedKeyword.value = kw;
   busy.search = true;
   searched.value = true;
+  results.value = [];
+  total.value = 0;
+  resultVersion.value = '';
+  page.value = requestedPage;
   try {
-    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/search', { keyword: kw }, { timeout: 120000 }));
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/search', {
+      keyword: kw, media_type: mediaType, quality, page: requestedPage, page_size: pageSize,
+    }, { timeout: 120000 }));
+    if (serial !== searchSerial || disposed) return
     if (res.code === 0) {
-      results.value = res.data || [];
-      page.value = 1;
-      setMsg(`「${kw}」找到 ${results.value.length} 条结果`);
+      const data = res.data || {};
+      if (!Array.isArray(data.records) || !data.index_version) throw new Error('搜索响应无有效索引版本，请更新插件后重试')
+      results.value = data.records;
+      total.value = data.total || 0;
+      page.value = data.page || requestedPage;
+      resultVersion.value = data.index_version;
+      setMsg(`「${kw}」符合当前筛选的结果共 ${total.value} 条`);
     } else {
       results.value = [];
       setMsg(res.msg || '搜索失败', 'error');
     }
   } catch (e) {
-    setMsg(`搜索失败：${describeError(e)}`, 'error');
+    if (serial === searchSerial && !disposed) setMsg(`搜索失败：${describeError(e)}`, 'error');
   } finally {
-    busy.search = false;
-    emit('action');
+    if (serial === searchSerial) {
+      busy.search = false;
+      emit('action');
+    }
   }
 }
 
-async function transfer(pageIdx, to) {
-  const rec = paged.value[pageIdx];
-  if (!rec) return
+async function transfer(rec, to) {
+  if (!rec || !rec.record_id || !resultVersion.value || busy.search || transferring[rec.record_id]) return
+  const recordId = rec.record_id;
+  const indexVersion = resultVersion.value;
+  transferring[recordId] = true;
   setMsg(`正在转存「${rec.title}」，请稍候…`);
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/transfer', {
-      keyword: keyword.value || '',
-      index: (page.value - 1) * pageSize + pageIdx,
-      to,
+      record_id: recordId, index_version: indexVersion, to,
     }, { timeout: 300000 }));
     setMsg(res.msg || (res.code === 0 ? '转存完成' : '转存失败'), res.code === 0 ? 'success' : 'error');
   } catch (e) {
     setMsg(`转存失败：${describeError(e)}`, 'error');
   } finally {
+    delete transferring[recordId];
     emit('action');
   }
 }
@@ -479,6 +565,8 @@ watch(tab, (v) => {
   if (v === 'records') loadRecords();
 });
 onBeforeUnmount(() => {
+  disposed = true;
+  searchSerial += 1;
   stopQrTimer();
   stopRecTimer();
 });
@@ -498,8 +586,8 @@ return (_ctx, _cache) => {
   const _component_v_spacer = _resolveComponent("v-spacer");
   const _component_v_btn_toggle = _resolveComponent("v-btn-toggle");
   const _component_v_card_title = _resolveComponent("v-card-title");
-  const _component_v_pagination = _resolveComponent("v-pagination");
   const _component_v_progress_linear = _resolveComponent("v-progress-linear");
+  const _component_v_pagination = _resolveComponent("v-pagination");
 
   return (_openBlock(), _createElementBlock("div", _hoisted_1, [
     _createVNode(_component_v_row, {
@@ -511,7 +599,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_v_col, { cols: "10" }, {
           default: _withCtx(() => [
             _createElementVNode("div", _hoisted_2, [
-              _cache[7] || (_cache[7] = _createTextVNode(" 115文档订阅与查询 ", -1)),
+              _cache[6] || (_cache[6] = _createTextVNode(" 115文档订阅与查询 ", -1)),
               (status.version)
                 ? (_openBlock(), _createBlock(_component_v_chip, {
                     key: 0,
@@ -544,7 +632,7 @@ return (_ctx, _cache) => {
             }, {
               default: _withCtx(() => [
                 _createVNode(_component_v_icon, null, {
-                  default: _withCtx(() => [...(_cache[8] || (_cache[8] = [
+                  default: _withCtx(() => [...(_cache[7] || (_cache[7] = [
                     _createTextVNode("mdi-close", -1)
                   ]))]),
                   _: 1
@@ -572,21 +660,62 @@ return (_ctx, _cache) => {
             : _createCommentVNode("", true)
         ]),
         _createElementVNode("div", null, [
-          _cache[9] || (_cache[9] = _createTextVNode(" 本地索引：", -1)),
+          _cache[8] || (_cache[8] = _createTextVNode(" 本地索引：", -1)),
           _createElementVNode("span", _hoisted_4, _toDisplayString(status.record_count), 1),
-          _cache[10] || (_cache[10] = _createTextVNode(" 条 / ", -1)),
+          _cache[9] || (_cache[9] = _createTextVNode(" 条 / ", -1)),
           _createElementVNode("span", _hoisted_5, _toDisplayString(status.sheet_count), 1),
           _createTextVNode(" 张表， 更新于 " + _toDisplayString(status.built_at_text) + " ｜115 Cookie：", 1),
           _createElementVNode("span", {
             class: _normalizeClass(status.p115_ready ? 'text-green-darken-2' : 'text-red-darken-2')
-          }, _toDisplayString(status.p115_ready ? '可用' : '未检测到'), 3)
+          }, _toDisplayString(status.p115_ready ? '已配置' : '未检测到'), 3)
         ])
       ]),
       _: 1
     }, 8, ["type"]),
-    (msg.value)
+    (indexWarnings.value.length)
       ? (_openBlock(), _createBlock(_component_v_alert, {
           key: 0,
+          type: "warning",
+          variant: "tonal",
+          class: "mb-3",
+          style: {"white-space":"pre-wrap"}
+        }, {
+          default: _withCtx(() => [
+            _cache[10] || (_cache[10] = _createElementVNode("div", null, "索引存在未更新的工作表，部分结果可能已过时：", -1)),
+            _createTextVNode(_toDisplayString(indexWarnings.value.join('\n')), 1)
+          ]),
+          _: 1
+        }))
+      : _createCommentVNode("", true),
+    (status.last_subscribe && status.last_subscribe.success === false)
+      ? (_openBlock(), _createBlock(_component_v_alert, {
+          key: 1,
+          type: "error",
+          variant: "tonal",
+          class: "mb-3"
+        }, {
+          default: _withCtx(() => [
+            _createTextVNode(" 最近订阅同步失败：" + _toDisplayString(status.last_subscribe.msg || status.last_subscribe.error || '请手动同步查看原因'), 1)
+          ]),
+          _: 1
+        }))
+      : _createCommentVNode("", true),
+    (status.last_refresh && status.last_refresh.success === false)
+      ? (_openBlock(), _createBlock(_component_v_alert, {
+          key: 2,
+          type: "error",
+          variant: "tonal",
+          class: "mb-3"
+        }, {
+          default: _withCtx(() => [
+            _createTextVNode(" 最近索引刷新失败：" + _toDisplayString(status.last_refresh.msg || status.last_refresh.error || '请刷新索引查看原因'), 1)
+          ]),
+          _: 1
+        }))
+      : _createCommentVNode("", true),
+    (msg.value)
+      ? (_openBlock(), _createBlock(_component_v_alert, {
+          key: 3,
           type: msgType.value,
           variant: "tonal",
           density: "comfortable",
@@ -633,6 +762,7 @@ return (_ctx, _cache) => {
               block: "",
               color: "primary",
               loading: busy.qr,
+              disabled: busy.check,
               "prepend-icon": "mdi-qrcode",
               onClick: _cache[0] || (_cache[0] = $event => (startQr()))
             }, {
@@ -640,7 +770,7 @@ return (_ctx, _cache) => {
                 _createTextVNode(_toDisplayString(qrImage.value ? '换一张二维码' : '获取登录二维码'), 1)
               ]),
               _: 1
-            }, 8, ["loading"])
+            }, 8, ["loading", "disabled"])
           ]),
           _: 1
         }),
@@ -653,6 +783,7 @@ return (_ctx, _cache) => {
               block: "",
               color: "secondary",
               loading: busy.check,
+              disabled: busy.qr || !qrSessionId.value,
               "prepend-icon": "mdi-check-decagram",
               onClick: _cache[1] || (_cache[1] = $event => (checkQr()))
             }, {
@@ -660,7 +791,7 @@ return (_ctx, _cache) => {
                 _createTextVNode(" 检查扫码状态 ", -1)
               ]))]),
               _: 1
-            }, 8, ["loading"])
+            }, 8, ["loading", "disabled"])
           ]),
           _: 1
         }),
@@ -677,7 +808,7 @@ return (_ctx, _cache) => {
               onClick: checkOffline
             }, {
               default: _withCtx(() => [...(_cache[13] || (_cache[13] = [
-                _createTextVNode(" 检查离线下载并整理 ", -1)
+                _createTextVNode(" 检查离线下载与搬运 ", -1)
               ]))]),
               _: 1
             }, 8, ["loading"])
@@ -730,7 +861,7 @@ return (_ctx, _cache) => {
       _: 1
     }, 8, ["modelValue"]),
     (tab.value === 'search')
-      ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
+      ? (_openBlock(), _createElementBlock(_Fragment, { key: 4 }, [
           (qrImage.value)
             ? (_openBlock(), _createBlock(_component_v_card, {
                 key: 0,
@@ -746,7 +877,7 @@ return (_ctx, _cache) => {
                         alt: "扫码登录"
                       }, null, 8, _hoisted_6),
                       _createElementVNode("div", _hoisted_7, "用微信扫码登录腾讯文档（" + _toDisplayString(qrTip.value) + "）", 1),
-                      _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 二维码约 2~3 分钟过期，过期会自动换新；扫过一次后旧码即失效。 ", -1))
+                      _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 二维码过期后请点「换一张二维码」；请只扫描当前页面显示的二维码。 ", -1))
                     ]),
                     _: 1
                   })
@@ -813,7 +944,7 @@ return (_ctx, _cache) => {
             ]),
             _: 1
           }),
-          (results.value.length)
+          (searched.value)
             ? (_openBlock(), _createBlock(_component_v_card, {
                 key: 1,
                 variant: "outlined"
@@ -821,23 +952,14 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createVNode(_component_v_card_title, { class: "text-subtitle-1 d-flex align-center flex-wrap" }, {
                     default: _withCtx(() => [
-                      _cache[25] || (_cache[25] = _createElementVNode("span", null, "搜索结果", -1)),
+                      _createElementVNode("span", null, "「" + _toDisplayString(searchedKeyword.value) + "」的搜索结果", 1),
                       _createVNode(_component_v_chip, {
                         size: "x-small",
                         color: "primary",
                         class: "ml-2"
                       }, {
                         default: _withCtx(() => [
-                          _createTextVNode(_toDisplayString(results.value.length) + " 条", 1)
-                        ]),
-                        _: 1
-                      }),
-                      _createVNode(_component_v_chip, {
-                        size: "x-small",
-                        class: "ml-1"
-                      }, {
-                        default: _withCtx(() => [
-                          _createTextVNode("筛选后 " + _toDisplayString(filtered.value.length) + " 条", 1)
+                          _createTextVNode("共 " + _toDisplayString(total.value) + " 条", 1)
                         ]),
                         _: 1
                       }),
@@ -924,9 +1046,29 @@ return (_ctx, _cache) => {
                   }),
                   _createVNode(_component_v_card_text, null, {
                     default: _withCtx(() => [
-                      (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(paged.value, (r, i) => {
+                      (busy.search)
+                        ? (_openBlock(), _createBlock(_component_v_progress_linear, {
+                            key: 0,
+                            indeterminate: "",
+                            color: "primary",
+                            class: "mb-2"
+                          }))
+                        : (!results.value.length)
+                          ? (_openBlock(), _createBlock(_component_v_alert, {
+                              key: 1,
+                              type: "info",
+                              variant: "tonal",
+                              class: "mb-2"
+                            }, {
+                              default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
+                                _createTextVNode("没有找到匹配的资源，可调整筛选或换个关键词。", -1)
+                              ]))]),
+                              _: 1
+                            }))
+                          : _createCommentVNode("", true),
+                      (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(results.value, (r) => {
                         return (_openBlock(), _createBlock(_component_v_card, {
-                          key: i,
+                          key: r.record_id,
                           variant: "tonal",
                           class: "mb-2"
                         }, {
@@ -957,7 +1099,7 @@ return (_ctx, _cache) => {
                                             class: "mr-1"
                                           }, {
                                             default: _withCtx(() => [
-                                              _createTextVNode(_toDisplayString(r.media_type === 'movie' ? '电影' : '电视剧'), 1)
+                                              _createTextVNode(_toDisplayString(mediaTypeName(r.media_type)), 1)
                                             ]),
                                             _: 2
                                           }, 1032, ["color"]),
@@ -1035,13 +1177,15 @@ return (_ctx, _cache) => {
                                                 block: "",
                                                 size: "small",
                                                 color: "primary",
-                                                onClick: $event => (transfer(i, 'movie'))
+                                                loading: !!transferring[r.record_id],
+                                                disabled: busy.search || !!transferring[r.record_id] || !r.record_id,
+                                                onClick: $event => (transfer(r, 'movie'))
                                               }, {
                                                 default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
                                                   _createTextVNode("转存到电影", -1)
                                                 ]))]),
                                                 _: 1
-                                              }, 8, ["onClick"])
+                                              }, 8, ["loading", "disabled", "onClick"])
                                             ]),
                                             _: 2
                                           }, 1024),
@@ -1054,13 +1198,14 @@ return (_ctx, _cache) => {
                                                 block: "",
                                                 size: "small",
                                                 color: "secondary",
-                                                onClick: $event => (transfer(i, 'tv'))
+                                                disabled: busy.search || !!transferring[r.record_id] || !r.record_id,
+                                                onClick: $event => (transfer(r, 'tv'))
                                               }, {
                                                 default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
                                                   _createTextVNode("转存到电视剧", -1)
                                                 ]))]),
                                                 _: 1
-                                              }, 8, ["onClick"])
+                                              }, 8, ["disabled", "onClick"])
                                             ]),
                                             _: 2
                                           }, 1024)
@@ -1087,7 +1232,7 @@ return (_ctx, _cache) => {
                             class: "text-caption text-medium-emphasis"
                           }, {
                             default: _withCtx(() => [
-                              _createTextVNode(" 第 " + _toDisplayString(page.value) + " / " + _toDisplayString(pageCount.value) + " 页，每页 " + _toDisplayString(pageSize) + " 条（共 " + _toDisplayString(filtered.value.length) + " 条） ", 1)
+                              _createTextVNode(" 第 " + _toDisplayString(page.value) + " / " + _toDisplayString(pageCount.value) + " 页，每页 " + _toDisplayString(pageSize) + " 条（共 " + _toDisplayString(total.value) + " 条） ", 1)
                             ]),
                             _: 1
                           }),
@@ -1097,13 +1242,14 @@ return (_ctx, _cache) => {
                           }, {
                             default: _withCtx(() => [
                               _createVNode(_component_v_pagination, {
-                                modelValue: page.value,
-                                "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((page).value = $event)),
+                                "model-value": page.value,
                                 length: pageCount.value,
+                                disabled: busy.search,
                                 "total-visible": 6,
                                 density: "comfortable",
-                                size: "small"
-                              }, null, 8, ["modelValue", "length"])
+                                size: "small",
+                                "onUpdate:modelValue": changePage
+                              }, null, 8, ["model-value", "length", "disabled"])
                             ]),
                             _: 1
                           })
@@ -1116,27 +1262,16 @@ return (_ctx, _cache) => {
                 ]),
                 _: 1
               }))
-            : (searched.value)
-              ? (_openBlock(), _createBlock(_component_v_alert, {
-                  key: 2,
-                  type: "info",
-                  variant: "tonal"
-                }, {
-                  default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
-                    _createTextVNode(" 没有找到匹配的资源，换个关键词试试。 ", -1)
-                  ]))]),
-                  _: 1
-                }))
-              : _createCommentVNode("", true)
+            : _createCommentVNode("", true)
         ], 64))
       : (_openBlock(), _createBlock(_component_v_card, {
-          key: 2,
+          key: 5,
           variant: "outlined"
         }, {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, { class: "text-subtitle-1 d-flex align-center flex-wrap" }, {
               default: _withCtx(() => [
-                _cache[34] || (_cache[34] = _createElementVNode("span", null, "转存记录", -1)),
+                _cache[33] || (_cache[33] = _createElementVNode("span", null, "转存记录", -1)),
                 _createVNode(_component_v_chip, {
                   size: "x-small",
                   color: "primary",
@@ -1147,7 +1282,7 @@ return (_ctx, _cache) => {
                   ]),
                   _: 1
                 }),
-                _cache[35] || (_cache[35] = _createElementVNode("span", { class: "text-caption text-medium-emphasis ml-2" }, "（最多保留最近 200 条）", -1)),
+                _cache[34] || (_cache[34] = _createElementVNode("span", { class: "text-caption text-medium-emphasis ml-2" }, "（最多保留最近 200 条）", -1)),
                 _createVNode(_component_v_spacer),
                 _createVNode(_component_v_btn, {
                   size: "small",
@@ -1156,7 +1291,7 @@ return (_ctx, _cache) => {
                   loading: busy.records,
                   onClick: loadRecords
                 }, {
-                  default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+                  default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
                     _createTextVNode(" 刷新 ", -1)
                   ]))]),
                   _: 1
@@ -1169,7 +1304,7 @@ return (_ctx, _cache) => {
                   disabled: !records.value.length,
                   onClick: clearRecords
                 }, {
-                  default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
+                  default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
                     _createTextVNode(" 清空 ", -1)
                   ]))]),
                   _: 1
@@ -1185,7 +1320,7 @@ return (_ctx, _cache) => {
                       type: "info",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
+                      default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
                         _createTextVNode(" 还没有转存 / 离线下载记录。去「搜索」页转存一条试试。 ", -1)
                       ]))]),
                       _: 1
@@ -1209,7 +1344,7 @@ return (_ctx, _cache) => {
                               class: "ml-2"
                             }, {
                               default: _withCtx(() => [
-                                _createTextVNode(_toDisplayString(r.type === 'movie' ? '电影' : '电视剧'), 1)
+                                _createTextVNode(_toDisplayString(mediaTypeName(r.type)), 1)
                               ]),
                               _: 2
                             }, 1032, ["color"]),
@@ -1237,6 +1372,37 @@ return (_ctx, _cache) => {
                             }, 1032, ["color"]),
                             _createVNode(_component_v_spacer),
                             _createElementVNode("span", _hoisted_18, _toDisplayString(r.submitted_at), 1),
+                            (isActiveTask(r))
+                              ? (_openBlock(), _createBlock(_component_v_btn, {
+                                  key: 0,
+                                  size: "x-small",
+                                  variant: "text",
+                                  color: "warning",
+                                  disabled: busy.records,
+                                  onClick: $event => (cancelTask(r))
+                                }, {
+                                  default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
+                                    _createTextVNode("停止自动搬运", -1)
+                                  ]))]),
+                                  _: 1
+                                }, 8, ["disabled", "onClick"]))
+                              : _createCommentVNode("", true),
+                            (['failed', 'missing'].includes(r.status))
+                              ? (_openBlock(), _createBlock(_component_v_btn, {
+                                  key: 1,
+                                  size: "x-small",
+                                  variant: "text",
+                                  color: "primary",
+                                  disabled: busy.records || !!retrying[r.id],
+                                  loading: !!retrying[r.id],
+                                  onClick: $event => (retryTask(r))
+                                }, {
+                                  default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
+                                    _createTextVNode("重试", -1)
+                                  ]))]),
+                                  _: 1
+                                }, 8, ["disabled", "loading", "onClick"]))
+                              : _createCommentVNode("", true),
                             _createVNode(_component_v_btn, {
                               icon: "",
                               size: "x-small",
@@ -1248,7 +1414,7 @@ return (_ctx, _cache) => {
                             }, {
                               default: _withCtx(() => [
                                 _createVNode(_component_v_icon, null, {
-                                  default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
+                                  default: _withCtx(() => [...(_cache[38] || (_cache[38] = [
                                     _createTextVNode("mdi-delete", -1)
                                   ]))]),
                                   _: 1

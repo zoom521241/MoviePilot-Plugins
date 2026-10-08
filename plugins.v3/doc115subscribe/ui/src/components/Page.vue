@@ -28,8 +28,18 @@
         <span class="text-primary font-weight-medium">{{ status.sheet_count }}</span> 张表， 更新于
         {{ status.built_at_text }} ｜115 Cookie：<span
           :class="status.p115_ready ? 'text-green-darken-2' : 'text-red-darken-2'"
-        >{{ status.p115_ready ? '可用' : '未检测到' }}</span>
+        >{{ status.p115_ready ? '已配置' : '未检测到' }}</span>
       </div>
+    </v-alert>
+
+    <v-alert v-if="indexWarnings.length" type="warning" variant="tonal" class="mb-3" style="white-space: pre-wrap">
+      <div>索引存在未更新的工作表，部分结果可能已过时：</div>{{ indexWarnings.join('\n') }}
+    </v-alert>
+    <v-alert v-if="status.last_subscribe && status.last_subscribe.success === false" type="error" variant="tonal" class="mb-3">
+      最近订阅同步失败：{{ status.last_subscribe.msg || status.last_subscribe.error || '请手动同步查看原因' }}
+    </v-alert>
+    <v-alert v-if="status.last_refresh && status.last_refresh.success === false" type="error" variant="tonal" class="mb-3">
+      最近索引刷新失败：{{ status.last_refresh.msg || status.last_refresh.error || '请刷新索引查看原因' }}
     </v-alert>
 
     <v-alert
@@ -48,18 +58,18 @@
         </v-btn>
       </v-col>
       <v-col cols="6" md="2">
-        <v-btn block color="primary" :loading="busy.qr" prepend-icon="mdi-qrcode" @click="startQr()">
+        <v-btn block color="primary" :loading="busy.qr" :disabled="busy.check" prepend-icon="mdi-qrcode" @click="startQr()">
           {{ qrImage ? '换一张二维码' : '获取登录二维码' }}
         </v-btn>
       </v-col>
       <v-col cols="6" md="2">
-        <v-btn block color="secondary" :loading="busy.check" prepend-icon="mdi-check-decagram" @click="checkQr()">
+        <v-btn block color="secondary" :loading="busy.check" :disabled="busy.qr || !qrSessionId" prepend-icon="mdi-check-decagram" @click="checkQr()">
           检查扫码状态
         </v-btn>
       </v-col>
       <v-col cols="6" md="3">
         <v-btn block color="secondary" :loading="busy.offline" prepend-icon="mdi-download-network" @click="checkOffline">
-          检查离线下载并整理
+          检查离线下载与搬运
         </v-btn>
       </v-col>
       <v-col cols="6" md="3">
@@ -84,7 +94,7 @@
         />
         <div class="text-caption mt-2">用微信扫码登录腾讯文档（{{ qrTip }}）</div>
         <div class="text-caption text-medium-emphasis">
-          二维码约 2~3 分钟过期，过期会自动换新；扫过一次后旧码即失效。
+          二维码过期后请点「换一张二维码」；请只扫描当前页面显示的二维码。
         </div>
       </v-card-text>
     </v-card>
@@ -112,11 +122,10 @@
       </v-card-text>
     </v-card>
 
-    <v-card v-if="results.length" variant="outlined">
+    <v-card v-if="searched" variant="outlined">
       <v-card-title class="text-subtitle-1 d-flex align-center flex-wrap">
-        <span>搜索结果</span>
-        <v-chip size="x-small" color="primary" class="ml-2">{{ results.length }} 条</v-chip>
-        <v-chip size="x-small" class="ml-1">筛选后 {{ filtered.length }} 条</v-chip>
+        <span>「{{ searchedKeyword }}」的搜索结果</span>
+        <v-chip size="x-small" color="primary" class="ml-2">共 {{ total }} 条</v-chip>
         <v-spacer />
         <v-btn-toggle v-model="filterType" density="compact" variant="outlined" mandatory class="mr-2">
           <v-btn size="small" value="all">全部</v-btn>
@@ -130,7 +139,9 @@
         </v-btn-toggle>
       </v-card-title>
       <v-card-text>
-        <v-card v-for="(r, i) in paged" :key="i" variant="tonal" class="mb-2">
+        <v-progress-linear v-if="busy.search" indeterminate color="primary" class="mb-2" />
+        <v-alert v-else-if="!results.length" type="info" variant="tonal" class="mb-2">没有找到匹配的资源，可调整筛选或换个关键词。</v-alert>
+        <v-card v-for="r in results" :key="r.record_id" variant="tonal" class="mb-2">
           <v-card-text class="py-2">
             <v-row dense align="center">
               <v-col cols="12" md="8">
@@ -140,7 +151,7 @@
                 </div>
                 <div class="text-caption mt-1">
                   <v-chip size="x-small" variant="flat" :color="r.media_type === 'movie' ? 'deep-purple' : 'blue-darken-2'" class="mr-1">
-                    {{ r.media_type === 'movie' ? '电影' : '电视剧' }}
+                    {{ mediaTypeName(r.media_type) }}
                   </v-chip>
                   <v-chip v-if="r.bundle" size="x-small" color="deep-orange" class="mr-1">打包链接</v-chip>
                   <span class="text-purple-darken-2">来源：{{ r.sheet }}</span>
@@ -181,10 +192,10 @@
               </template>
               <template v-else>
                 <v-col cols="6" md="2">
-                  <v-btn block size="small" color="primary" @click="transfer(i, 'movie')">转存到电影</v-btn>
+                  <v-btn block size="small" color="primary" :loading="!!transferring[r.record_id]" :disabled="busy.search || !!transferring[r.record_id] || !r.record_id" @click="transfer(r, 'movie')">转存到电影</v-btn>
                 </v-col>
                 <v-col cols="6" md="2">
-                  <v-btn block size="small" color="secondary" @click="transfer(i, 'tv')">转存到电视剧</v-btn>
+                  <v-btn block size="small" color="secondary" :disabled="busy.search || !!transferring[r.record_id] || !r.record_id" @click="transfer(r, 'tv')">转存到电视剧</v-btn>
                 </v-col>
               </template>
             </v-row>
@@ -192,23 +203,22 @@
         </v-card>
         <v-row dense align="center" class="mt-2">
           <v-col cols="12" md="6" class="text-caption text-medium-emphasis">
-            第 {{ page }} / {{ pageCount }} 页，每页 {{ pageSize }} 条（共 {{ filtered.length }} 条）
+            第 {{ page }} / {{ pageCount }} 页，每页 {{ pageSize }} 条（共 {{ total }} 条）
           </v-col>
           <v-col cols="12" md="6">
             <v-pagination
-              v-model="page"
+              :model-value="page"
               :length="pageCount"
+              :disabled="busy.search"
               :total-visible="6"
               density="comfortable"
               size="small"
+              @update:model-value="changePage"
             />
           </v-col>
         </v-row>
       </v-card-text>
     </v-card>
-    <v-alert v-else-if="searched" type="info" variant="tonal">
-      没有找到匹配的资源，换个关键词试试。
-    </v-alert>
     </template>
 
     <template v-else>
@@ -241,7 +251,7 @@
               <div class="d-flex align-center flex-wrap">
                 <span class="font-weight-bold text-body-1 text-primary">{{ r.title }}</span>
                 <v-chip size="x-small" variant="flat" :color="r.type === 'movie' ? 'deep-purple' : 'blue-darken-2'" class="ml-2">
-                  {{ r.type === 'movie' ? '电影' : '电视剧' }}
+                  {{ mediaTypeName(r.type) }}
                 </v-chip>
                 <v-chip size="x-small" variant="flat" :color="kindColor(r.kind)" class="ml-1">
                   {{ kindName(r.kind) }}
@@ -251,6 +261,8 @@
                 </v-chip>
                 <v-spacer />
                 <span class="text-caption text-medium-emphasis">{{ r.submitted_at }}</span>
+                <v-btn v-if="isActiveTask(r)" size="x-small" variant="text" color="warning" :disabled="busy.records" @click="cancelTask(r)">停止自动搬运</v-btn>
+                <v-btn v-if="['failed', 'missing'].includes(r.status)" size="x-small" variant="text" color="primary" :disabled="busy.records || !!retrying[r.id]" :loading="!!retrying[r.id]" @click="retryTask(r)">重试</v-btn>
                 <v-btn
                   icon
                   size="x-small"
@@ -309,15 +321,24 @@ const pageSize = 10
 const status = reactive({
   version: '', cookie_ready: false, p115_ready: false, cookie_days_left: null,
   record_count: 0, sheet_count: 0, built_at_text: '尚未建立',
+  index_errors: [], stale_sheets: [], last_refresh: null, last_subscribe: null,
 })
 const msg = ref('')
 const msgType = ref('info')
 const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false })
 const qrImage = ref('')
 const qrTip = ref('等待扫码')
+const qrSessionId = ref('')
 const keyword = ref('')
 const results = ref([])
 const searched = ref(false)
+const searchedKeyword = ref('')
+const total = ref(0)
+const resultVersion = ref('')
+const transferring = reactive({})
+const retrying = reactive({})
+let searchSerial = 0
+let disposed = false
 
 // ---- 页签：搜索 / 转存记录 ----
 const tab = ref('search')
@@ -328,26 +349,15 @@ const page = ref(1)
 const filterType = ref('all')
 const filterQuality = ref('all')
 
-const filtered = computed(() => {
-  return results.value.filter((r) => {
-    if (filterType.value !== 'all' && r.media_type !== filterType.value) return false
-    if (filterQuality.value === '4k') {
-      return /4k|2160p|uhd|蓝光|remux/i.test(`${r.qtext || ''} ${r.title || ''}`)
-    }
-    if (filterQuality.value === 'cn') {
-      const t = `${r.qtext || ''} ${r.title || ''}`
-      if (/无中字|无字幕/i.test(t)) return false
-      return /中文字幕|中字|简繁|国语|双语|简中|繁体/i.test(t)
-    }
-    return true
-  })
+const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+watch([filterType, filterQuality], () => {
+  if (searchedKeyword.value) searchPage(searchedKeyword.value, 1)
 })
-const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize)))
-const paged = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return filtered.value.slice(start, start + pageSize)
-})
-watch([filterType, filterQuality, results], () => { page.value = 1 })
+const indexWarnings = computed(() => [...new Set([
+  ...(status.index_errors || []).map(String),
+  ...(status.stale_sheets || []).map((s) => typeof s === 'string' ? `保留旧索引：${s}` : `保留旧索引：${s.title || s.name || s.sheet_id || '未知工作表'}`),
+])])
+function mediaTypeName(type) { return ({ movie: '电影', tv: '电视剧' })[type] || '类型待确认' }
 
 // ---- Cookie 状态文案 ----
 const cookieDays = computed(() => {
@@ -361,7 +371,7 @@ const cookieText = computed(() => {
 const cookieAlertType = computed(() => {
   if (!status.cookie_ready) return 'warning'
   if (cookieDays.value !== null && cookieDays.value <= 5) return 'warning'
-  return 'success'
+  return 'info'
 })
 
 // ---- 字段配色 ----
@@ -425,12 +435,19 @@ const KIND_STYLE = {
   ed2k: { name: 'ed2k', color: 'teal-darken-3' },
 }
 const STATUS_STYLE = {
-  submitted: { name: '已转存', color: 'blue-darken-2' },
+  submitting: { name: '提交中', color: 'blue-darken-2' },
+  submitted: { name: '已提交', color: 'blue-darken-2' },
   downloading: { name: '下载中', color: 'blue-darken-2' },
+  waiting: { name: '等待文件', color: 'amber-darken-3' },
+  awaiting_move: { name: '等待搬运', color: 'amber-darken-3' },
   moving: { name: '搬运中', color: 'amber-darken-3' },
   done: { name: '已搬入下载目录', color: 'amber-darken-3' },
+  moved: { name: '已搬入下载目录', color: 'amber-darken-3' },
+  missing: { name: '原目录未找到，整理待确认', color: 'amber-darken-3' },
+  unverified: { name: '整理待确认', color: 'amber-darken-3' },
   organized: { name: '已整理', color: 'green-darken-2' },
   failed: { name: '失败', color: 'red-darken-2' },
+  cancelled: { name: '已停止自动搬运', color: 'grey' },
 }
 function kindName(k) { return (KIND_STYLE[k] || {}).name || k }
 function kindColor(k) { return (KIND_STYLE[k] || {}).color || 'grey' }
@@ -438,9 +455,10 @@ function statusName(s) { return (STATUS_STYLE[s] || {}).name || s }
 function statusColor(s) { return (STATUS_STYLE[s] || {}).color || 'grey' }
 
 async function loadRecords() {
+  if (busy.records || disposed) return
   busy.records = true
   try {
-    // 该接口会顺带检测离线任务：已下完且落盘的会立即搬到最终目录
+    // 仅读取记录；离线检查与搬运由独立后台任务执行。
     const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 120000 }))
     if (res.code === 0) records.value = res.data || []
     else setMsg(res.msg || '读取转存记录失败', 'error')
@@ -451,7 +469,7 @@ async function loadRecords() {
   }
 }
 
-// 站在「转存记录」页且有下载中的任务时，自动轮询刷新（进度条会自己走，搬运也会被自动触发）
+// 记录页有活动任务时轮询读取后台检查结果。
 let recTimer = null
 function stopRecTimer() {
   if (recTimer) { clearInterval(recTimer); recTimer = null }
@@ -460,13 +478,13 @@ function startRecTimer() {
   stopRecTimer()
   recTimer = setInterval(() => {
     if (tab.value !== 'records') return
-    if (!records.value.some((r) => r.status === 'downloading' || r.status === 'moving')) return
+    if (!records.value.some(isActiveTask)) return
     loadRecords()
   }, 20000)
 }
 
 async function deleteRecord(r) {
-  if (!window.confirm(`删除这条记录？\n${r.title}`)) return
+  if (!window.confirm(`删除这条历史记录？下载与自动搬运任务继续执行。\n${r.title}`)) return
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_delete', { id: r.id }))
     if (res.code === 0) {
@@ -481,7 +499,7 @@ async function deleteRecord(r) {
 }
 
 async function clearRecords() {
-  if (!window.confirm('清空全部转存记录？（不影响 115 网盘里的文件）')) return
+  if (!window.confirm('清空全部转存历史记录？网盘文件、下载与自动搬运任务不受影响。')) return
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_delete', {}))
     if (res.code === 0) {
@@ -495,8 +513,31 @@ async function clearRecords() {
   }
 }
 
+function isActiveTask(r) { return ['submitting', 'submitted', 'downloading', 'waiting', 'awaiting_move', 'moving'].includes(r.status) && r.kind !== '115_share' }
+async function retryTask(r) {
+  if (retrying[r.id]) return
+  retrying[r.id] = true
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/retry_task', { id: r.id }, { timeout: 300000 }))
+    setMsg(res.msg || (res.code === 0 ? '已重新尝试该任务' : '重试失败'), res.code === 0 ? 'success' : 'error')
+    if (res.code === 0) await loadRecords()
+  } catch (e) { setMsg(`重试失败：${describeError(e)}`, 'error') }
+  finally { delete retrying[r.id] }
+}
+async function cancelTask(r) {
+  if (!window.confirm(`停止「${r.title}」的自动跟踪与搬运？\n115 中的下载和文件会保留，完成后需要你手动搬运。`)) return
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/cancel_task', { id: r.id }))
+    setMsg(res.msg || (res.code === 0 ? '已停止自动搬运' : '停止失败'), res.code === 0 ? 'success' : 'error')
+    if (res.code === 0) await loadRecords()
+  } catch (e) { setMsg(`停止失败：${describeError(e)}`, 'error') }
+}
+
 function close() {
+  disposed = true
+  searchSerial += 1
   stopQrTimer()
+  stopRecTimer()
   emit('close')
 }
 
@@ -527,16 +568,19 @@ async function loadStatus() {
 }
 
 async function refreshIndex() {
+  if (busy.refresh) return
   busy.refresh = true
-  setMsg('正在刷新索引（90 张表，约 4~5 分钟），请稍候…')
+  setMsg('正在读取所有工作表并刷新索引，可能需要数分钟，请稍候…')
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/refresh_index', {}, { timeout: 900000 }))
     if (res.code === 0) {
       const d = res.data || {}
-      setMsg(`索引刷新完成：${d.record_count || 0} 条记录 / ${d.sheet_count || 0} 张表`, 'success')
+      const errors = d.errors || d.index_errors || []
+      setMsg(`索引${errors.length ? '部分更新' : '刷新完成'}：${d.record_count || 0} 条记录 / ${d.sheet_count || 0} 张表${errors.length ? '\n' + errors.join('\n') : ''}`, errors.length ? 'warning' : 'success')
       await loadStatus()
     } else {
       setMsg(res.msg || '索引刷新失败', 'error')
+      await loadStatus()
     }
   } catch (e) {
     setMsg(`索引刷新失败：${describeError(e)}`, 'error')
@@ -548,38 +592,44 @@ async function refreshIndex() {
 
 // ---- 扫码登录 -----------------------------------------------------------
 let qrTimer = null
-let qrTick = 0
+let qrGeneration = 0
 
 function stopQrTimer() {
+  qrGeneration += 1
   if (qrTimer) {
-    clearInterval(qrTimer)
+    clearTimeout(qrTimer)
     qrTimer = null
   }
 }
 
 function startQrTimer() {
-  stopQrTimer()
-  qrTick = 0
-  qrTimer = setInterval(async () => {
-    qrTick += 1
-    if (qrTick > 34) {
-      qrTick = 0
-      await startQr(true)
-      return
-    }
+  if (disposed || !qrSessionId.value || qrTimer) return
+  const generation = qrGeneration
+  qrTimer = setTimeout(async () => {
+    qrTimer = null
     await checkQr(true)
+    if (generation === qrGeneration) startQrTimer()
   }, 3000)
 }
 
 async function startQr(silent = false) {
+  if (busy.qr || busy.check || disposed) return
   if (silent !== true) silent = false
-  busy.qr = !silent
+  busy.qr = true
   stopQrTimer()
+  const generation = qrGeneration
+  qrSessionId.value = ''
+  qrImage.value = ''
   if (!silent) setMsg('正在打开登录页并生成二维码（约 10~20 秒），请稍候…')
   try {
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_start', { timeout: 180000 }))
-    if (res.code === 0 && res.data && res.data.qr_base64) {
-      qrImage.value = res.data.qr_base64
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_start', { params: { force: true }, timeout: 180000 }))
+    if (generation !== qrGeneration || disposed) return
+    const data = res.data || {}
+    if (res.code === 0 && data.state === 'confirmed') {
+      await qrConfirmed()
+    } else if (res.code === 0 && data.qr_base64 && data.session_id) {
+      qrSessionId.value = data.session_id
+      qrImage.value = data.qr_base64
       qrTip.value = '等待扫码'
       setMsg('二维码已生成，请用微信扫码（扫完会自动完成登录）')
       startQrTimer()
@@ -594,16 +644,17 @@ async function startQr(silent = false) {
 }
 
 async function checkQr(silent = false) {
+  if (busy.check || busy.qr || !qrSessionId.value || disposed) return
   if (silent !== true) silent = false
-  busy.check = !silent
+  busy.check = true
+  const generation = qrGeneration
+  const sessionId = qrSessionId.value
   try {
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_status', { timeout: 120000 }))
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/qr_status', { params: { session_id: sessionId }, timeout: 120000 }))
+    if (generation !== qrGeneration || disposed) return
     const data = res.data || {}
     if (res.code === 0 && data.state === 'confirmed') {
-      stopQrTimer()
-      qrImage.value = ''
-      setMsg('登录成功，Cookie 已保存！索引正在后台刷新，约 4~5 分钟后可搜索。', 'success')
-      await loadStatus()
+      await qrConfirmed()
       return
     }
     if (data.qr_base64) {
@@ -612,15 +663,23 @@ async function checkQr(silent = false) {
     }
     if (res.code !== 0) {
       setMsg(res.msg || '检查失败', 'error')
+      stopQrTimer()
       return
     }
     const map = {
       wait: '等待扫码',
       scanned: '已扫描，请在手机上确认登录',
-      expired: '二维码已过期，已自动换新',
-      failed: '本次登录失败，已换新码',
+      expired: '二维码已过期，请获取新二维码',
+      failed: '本次登录失败，请获取新二维码',
+      error: '登录检查失败，请获取新二维码',
     }
     qrTip.value = map[data.state] || '等待扫码'
+    if (['expired', 'failed', 'error'].includes(data.state)) {
+      stopQrTimer()
+      qrSessionId.value = ''
+      setMsg(data.msg || qrTip.value, 'warning')
+      return
+    }
     if (!silent && data.state) setMsg(map[data.state] || '')
   } catch (e) {
     if (!silent) setMsg(`检查失败：${describeError(e)}`, 'error')
@@ -629,14 +688,24 @@ async function checkQr(silent = false) {
   }
 }
 
+async function qrConfirmed() {
+  stopQrTimer()
+  qrSessionId.value = ''
+  qrImage.value = ''
+  setMsg('登录成功，Cookie 已保存。可刷新索引查看文档读取结果。', 'success')
+  await loadStatus()
+}
+
 // ---- 其它 ---------------------------------------------------------------
 async function checkOffline() {
+  if (busy.offline) return
   busy.offline = true
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/check_offline', {}, { timeout: 180000 }))
     if (res.code === 0) {
       const d = res.data || {}
-      setMsg(`离线任务检查完成：本轮通知整理 ${d.finished || 0} 条，仍在下载 ${d.pending || 0} 条`, 'success')
+      setMsg(`离线任务检查完成：本轮搬运 ${d.finished || 0} 条，待完成 ${d.pending || 0} 条${d.failed ? `，失败 ${d.failed} 条（请查看转存记录）` : ''}`, d.failed ? 'warning' : 'success')
+      await loadRecords()
     } else {
       setMsg(res.msg || '检查离线任务失败', 'error')
     }
@@ -648,12 +717,14 @@ async function checkOffline() {
 }
 
 async function runSubscribe() {
+  if (busy.subscribe) return
   busy.subscribe = true
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/run_subscribe', {}, { timeout: 900000 }))
     if (res.code === 0) {
       const d = res.data || {}
-      setMsg(`订阅同步完成：命中 ${d.matched || 0} 条，转存 ${d.transferred || 0} 条`, 'success')
+      const errors = d.errors || []
+      setMsg(`订阅同步完成：命中 ${d.matched || 0} 条，成功提交 ${d.transferred || 0} 条${errors.length ? '\n' + errors.join('\n') : ''}`, errors.length ? 'warning' : 'success')
     } else {
       setMsg(res.msg || '订阅同步失败', 'error')
     }
@@ -661,6 +732,7 @@ async function runSubscribe() {
     setMsg(`订阅同步失败：${describeError(e)}`, 'error')
   } finally {
     busy.subscribe = false
+    await loadStatus()
     emit('action')
   }
 }
@@ -671,40 +743,66 @@ async function doSearch() {
     setMsg('请输入影视名称', 'warning')
     return
   }
+  await searchPage(kw, 1)
+}
+
+function changePage(value) {
+  if (searchedKeyword.value && !busy.search) searchPage(searchedKeyword.value, value)
+}
+
+async function searchPage(kw, requestedPage) {
+  const serial = ++searchSerial
+  const mediaType = filterType.value
+  const quality = filterQuality.value
+  searchedKeyword.value = kw
   busy.search = true
   searched.value = true
+  results.value = []
+  total.value = 0
+  resultVersion.value = ''
+  page.value = requestedPage
   try {
-    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/search', { keyword: kw }, { timeout: 120000 }))
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/search', {
+      keyword: kw, media_type: mediaType, quality, page: requestedPage, page_size: pageSize,
+    }, { timeout: 120000 }))
+    if (serial !== searchSerial || disposed) return
     if (res.code === 0) {
-      results.value = res.data || []
-      page.value = 1
-      setMsg(`「${kw}」找到 ${results.value.length} 条结果`)
+      const data = res.data || {}
+      if (!Array.isArray(data.records) || !data.index_version) throw new Error('搜索响应无有效索引版本，请更新插件后重试')
+      results.value = data.records
+      total.value = data.total || 0
+      page.value = data.page || requestedPage
+      resultVersion.value = data.index_version
+      setMsg(`「${kw}」符合当前筛选的结果共 ${total.value} 条`)
     } else {
       results.value = []
       setMsg(res.msg || '搜索失败', 'error')
     }
   } catch (e) {
-    setMsg(`搜索失败：${describeError(e)}`, 'error')
+    if (serial === searchSerial && !disposed) setMsg(`搜索失败：${describeError(e)}`, 'error')
   } finally {
-    busy.search = false
-    emit('action')
+    if (serial === searchSerial) {
+      busy.search = false
+      emit('action')
+    }
   }
 }
 
-async function transfer(pageIdx, to) {
-  const rec = paged.value[pageIdx]
-  if (!rec) return
+async function transfer(rec, to) {
+  if (!rec || !rec.record_id || !resultVersion.value || busy.search || transferring[rec.record_id]) return
+  const recordId = rec.record_id
+  const indexVersion = resultVersion.value
+  transferring[recordId] = true
   setMsg(`正在转存「${rec.title}」，请稍候…`)
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/transfer', {
-      keyword: keyword.value || '',
-      index: (page.value - 1) * pageSize + pageIdx,
-      to,
+      record_id: recordId, index_version: indexVersion, to,
     }, { timeout: 300000 }))
     setMsg(res.msg || (res.code === 0 ? '转存完成' : '转存失败'), res.code === 0 ? 'success' : 'error')
   } catch (e) {
     setMsg(`转存失败：${describeError(e)}`, 'error')
   } finally {
+    delete transferring[recordId]
     emit('action')
   }
 }
@@ -718,6 +816,8 @@ watch(tab, (v) => {
   if (v === 'records') loadRecords()
 })
 onBeforeUnmount(() => {
+  disposed = true
+  searchSerial += 1
   stopQrTimer()
   stopRecTimer()
 })

@@ -1,101 +1,155 @@
-"""订阅同步（仅电影）：把文档里的资源与 MP 订阅比对，挑出该转存的条目。
-
-纯逻辑模块，不依赖 MoviePilot，便于离线测试。
-"""
+"""电影订阅的严格身份匹配及可转存候选排序；不依赖 MoviePilot。"""
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
-# MoviePilot V3 以「包」的形式加载插件（app.plugins.<插件id>），插件目录不在 sys.path 上，
-# 因此插件内部模块必须用相对导入；绝对导入仅在脚本/单测场景下兜底。
 try:
     from . import doc_parser
-except ImportError:  # 直接作为顶层模块加载（脚本/单测）
+    from .link_router import classify_link, is_resource_link
+except ImportError:
     import doc_parser
+    from link_router import classify_link, is_resource_link
 
-# 用户只要求电影参与订阅
 MOVIE_SHEET_HINT = ("最新电影",)
+_RELEASE_SUFFIX = re.compile(
+    r"(?:\s|[._-])(?:4k|2160p?|1080p?|720p?|uhd|remux|bluray|blu-ray|web-dl|"
+    r"中字|中文字幕|中文|国语|简中|繁中|简繁)(?:\b|(?=[\s\u3400-\u9fff]))[\s\S]*$", re.I)
 
 
-def _norm_title(t: str) -> str:
-    """归一化片名：去掉发布组/合集等各类括号内容，再去空格与标点，统一小写。"""
-    s = t or ""
-    s = re.sub(r"[【\[（(「『].*?[】\]）)」』]", "", s)
-    s = re.sub(r"[\s\-_.·:：!！?？,，/\\|]", "", s)
-    return s.lower()
+def _norm_title(title: str, year_hint: str = "") -> str:
+    s = title or ""
+    def strip_metadata(match):
+        inner = match.group(1).strip()
+        if (re.fullmatch(r"(?:18|19|20|21)\d{2}", inner)
+                or re.search(r"(?:4k|2160p?|1080p?|720p?|uhd|remux|bluray|blu-ray|web-dl|"
+                             r"字幕|中字|简中|繁中|国语|杜比|发布组|导演剪辑|加长版|未删减|"
+                             r"directors?\s*cut|extended\s*cut)", inner, re.I)):
+            return " "
+        # 括号也可能是续集或副标题，不能无条件删除。
+        return " " + inner + " "
+    s = re.sub(r"[【\[（(「『](.*?)[】\]）)」』]", strip_metadata, s)
+    # 仅清除发行信息后缀，绝不把续作或任意前缀当作同一片名。
+    s = _RELEASE_SUFFIX.sub("", s)
+    if re.fullmatch(r"(?:18|19|20|21)\d{2}", str(year_hint)):
+        s = re.sub(r"(?:\s|[._-])" + re.escape(str(year_hint)) + r"$", "", s.strip())
+    return re.sub(r"[\s\-_.·:：!！?？,，/\\|]", "", s).lower()
 
 
 def is_movie_sheet(sheet_name: str) -> bool:
     return any(h in (sheet_name or "") for h in MOVIE_SHEET_HINT)
 
 
+def _media_type(record: Dict[str, Any]) -> str:
+    if doc_parser._TV_TITLE_RE.search(record.get("title", "")):
+        return "tv"
+    return record.get("media_type") or doc_parser.media_type_of(record.get("sheet", ""), record.get("title", ""))
+
+
 def movie_records(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """只保留电影类工作表里的记录。"""
-    out = []
-    for r in records:
-        if is_movie_sheet(r.get("sheet", "")) or r.get("kind") == "movie":
-            out.append(r)
-    return out
+    """标题剧集特征、明确媒体类型优先，画质表不再冒充电影表。"""
+    return [r for r in records if _media_type(r) == "movie"]
 
 
-def match_subscriptions(records: Iterable[Dict[str, Any]],
-                        subscribes: Iterable[Dict[str, Any]]
-                        ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    """把订阅与文档记录配对，返回 [(订阅, 选中的记录)]。
+def _year(value: Dict[str, Any]) -> str:
+    return str(value.get("year") or doc_parser.extract_year(value.get("title", "")) or "").strip()
 
-    匹配优先级：
-      1. **TMDBID 相等**（最准）
-      2. 「片名(+年份)」归一化后**完全相同**
-      3. 归一化后**订阅名是文档标题的前缀**（文档标题常带「发布组/合集/字幕/英文名」等后缀），
-         要求订阅名 ≥4 个字符且年份不冲突 —— 避免「八仙」误配「八仙饭店」这类短名误判。
 
-    同一订阅命中多条时，用 doc_parser.pick_best 选最优（4K+中文优先，其次最新）。
+def _tmdb(value: Dict[str, Any]) -> str:
+    text = str(value.get("tmdbid") or "").strip()
+    return str(int(text)) if re.fullmatch(r"[1-9]\d*", text) else ""
+
+
+def _usable(record: Dict[str, Any]) -> bool:
+    if any(record.get(flag) for flag in ("bundle", "sheet_bundle", "no_link")):
+        return False
+    # 不信任缓存里声明的 kind，重新校验链接真实主机和协议。
+    return any(url and is_resource_link(classify_link(url)) for _, url in doc_parser.iter_links(record))
+
+
+class SubscriptionMatcher:
+    """一次同步只建立一次身份索引，避免每个订阅都重新扫描数十万行。"""
+    def __init__(self, records: Iterable[Dict[str, Any]]):
+        self.records = [rec for rec in records if _media_type(rec) == "movie" and _usable(rec)]
+        self.by_tmdb: Dict[str, List[Dict[str, Any]]] = {}
+        self.by_title: Dict[str, List[Dict[str, Any]]] = {}
+        for rec in self.records:
+            tmdb = _tmdb(rec)
+            if tmdb:
+                self.by_tmdb.setdefault(tmdb, []).append(rec)
+            title = rec.get("title", "")
+            keys = {_norm_title(title), _norm_title(title, _year(rec))}
+            bare = re.search(r"(?:\s|[._-])((?:18|19|20|21)\d{2})$", title.strip())
+            if bare:
+                # 索引同时保留发行年别名；最终匹配仍须订阅年份一致，不能据此误配。
+                keys.add(_norm_title(title, bare.group(1)))
+            for key in keys:
+                self.by_title.setdefault(key, []).append(rec)
+
+    def __iter__(self):
+        return iter(self.records)
+
+    def candidates_for(self, sub: Dict[str, Any]) -> List[Dict[str, Any]]:
+        candidates = (self.by_tmdb.get(_tmdb(sub), [])
+                      + self.by_title.get(_norm_title(sub.get("title", "")), [])
+                      + self.by_title.get(_norm_title(sub.get("title", ""), _year(sub)), []))
+        seen, result = set(), []
+        for rec in candidates:
+            if id(rec) not in seen:
+                seen.add(id(rec))
+                result.append(rec)
+        return result
+
+
+def subscription_candidates(records: Iterable[Dict[str, Any]], sub: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """返回按身份可信度、4K/中文及行号排序的可转存电影候选。
+
+    双方都有的 TMDB、年份或类型一旦冲突就排除。只有身份缺失时才按完整标题
+    兜底；不会为了获得命中恢复已排除的候选，也不会把续作当作片名前缀匹配。
     """
-    records = list(records)
-    by_tmdb: Dict[str, List[Dict[str, Any]]] = {}
-    by_title: Dict[str, List[Dict[str, Any]]] = {}
-    for r in records:
-        tm = str(r.get("tmdbid") or "").strip()
-        if tm:
-            by_tmdb.setdefault(tm, []).append(r)
-        by_title.setdefault(_norm_title(r.get("title", "")), []).append(r)
-
-    pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-    for sub in subscribes:
-        cands: List[Dict[str, Any]] = []
-        tm = str(sub.get("tmdbid") or "").strip()
-        if tm and tm in by_tmdb:
-            cands = list(by_tmdb[tm])
-        else:
-            cands = list(by_title.get(_norm_title(sub.get("title", "")), []))
-            # 年份不一致时降权（不排除，文档年份可能缺失）
-            year = str(sub.get("year") or "").strip()
-            if year:
-                cands = [c for c in cands if not c.get("year") or c["year"] == year] or cands
-        if not cands:
-            # 兜底：订阅名是文档标题的前缀（文档标题常带发布组/合集/字幕后缀）
-            nsub = _norm_title(sub.get("title", ""))
-            year = str(sub.get("year") or "").strip()
-            if len(nsub) >= 4:
-                for r in records:
-                    if not _norm_title(r.get("title", "")).startswith(nsub):
-                        continue
-                    ry = str(r.get("year") or "").strip()
-                    if year and ry and year != ry:
-                        continue
-                    cands.append(r)
-        if not cands:
+    sub_type = str(sub.get("media_type") or sub.get("type") or "movie").lower()
+    if sub_type not in ("movie", "电影", "电影订阅"):
+        return []
+    st, sy = _tmdb(sub), _year(sub)
+    sn = _norm_title(sub.get("title", ""), sy)
+    out = []
+    for rec in records.candidates_for(sub) if isinstance(records, SubscriptionMatcher) else records:
+        if _media_type(rec) != "movie":
             continue
-        best = doc_parser.pick_best(cands)
-        if best:
-            pairs.append((sub, best))
-    return pairs
+        rt = _tmdb(rec)
+        if st and rt and st != rt:
+            continue
+        ry = _year(rec)
+        if sy and ry and sy != ry:
+            continue
+        exact_id = bool(st and rt and st == rt)
+        if not exact_id and (not sn or _norm_title(rec.get("title", ""), ry or sy) != sn):
+            continue
+        if not _usable(rec):
+            continue
+        out.append((0 if exact_id else 1, rec))
+    out.sort(key=lambda item: (item[0], -doc_parser.quality_score(item[1]),
+                               item[1].get("row", 0), item[1].get("sheet_id", "")))
+    return [rec for _, rec in out]
+
+
+def match_subscription_candidates(records: Iterable[Dict[str, Any]], subscribes: Iterable[Dict[str, Any]]
+                                  ) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+    records = SubscriptionMatcher(records)
+    return [(sub, candidates) for sub in subscribes
+            if (candidates := subscription_candidates(records, sub))]
+
+
+def match_subscriptions(records: Iterable[Dict[str, Any]], subscribes: Iterable[Dict[str, Any]]
+                        ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """兼容旧调用方：每个订阅仅返回优先级最高的可用候选。"""
+    return [(sub, candidates[0]) for sub, candidates in match_subscription_candidates(records, subscribes)]
 
 
 def transfer_key(sub: Dict[str, Any], rec: Dict[str, Any]) -> str:
-    """去重键：优先 tmdbid，其次片名+年份。"""
-    tm = str(rec.get("tmdbid") or sub.get("tmdbid") or "").strip()
+    """保留既有电影去重键，避免升级后重复转存历史影片。"""
+    tm = _tmdb(rec) or _tmdb(sub)
     if tm:
         return f"tmdb:{tm}"
-    return f"title:{_norm_title(rec.get('title', ''))}:{rec.get('year') or sub.get('year') or ''}"
+    year = _year(rec) or _year(sub)
+    return f"title:{_norm_title(rec.get('title', ''), year)}:{year}"

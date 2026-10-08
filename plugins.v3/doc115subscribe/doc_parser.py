@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 try:  # 作为包的一部分加载（MoviePilot 运行时）
     from .link_router import (LINK_115_SHARE, LINK_ED2K, LINK_MAGNET,
@@ -22,18 +23,18 @@ except ImportError:  # 直接作为顶层模块加载（脚本/单测）
 
 # 工作表 -> 资源大类
 SHEET_KINDS = [
-    ("movie", ("电影", "原盘", "remux", "蓝光", "blu", "1080p", "4k", "uhd", "港片", "漫威", "邵氏",
-               "奥斯卡", "金棕榈", "票房", "top250", "高清影视", "ed2k")),
-    ("tv", ("剧", "tvb", "美剧", "英剧", "韩剧", "日剧", "泰剧", "短剧", "电视剧")),
     ("anime", ("动漫", "国漫", "动画", "番剧")),
     ("variety", ("综艺",)),
     ("documentary", ("纪录片", "bbc")),
     ("music", ("音乐", "演唱会")),
     ("book", ("图书", "小说", "评书")),
     ("game", ("游戏",)),
+    ("tv", ("剧", "tvb", "美剧", "英剧", "韩剧", "日剧", "泰剧", "短剧", "电视剧")),
+    ("movie", ("电影", "港片", "漫威", "邵氏", "奥斯卡", "金棕榈", "票房", "top250")),
 ]
 
-NAME_HEADS = ("名称", "名字", "标题", "影视名称", "片名", "剧名", "资源名", "影片")
+NAME_HEADS = ("名称", "名字", "标题", "影视名称", "片名", "剧名", "资源名", "影片",
+              "电影名称", "影片名称", "资源名称", "影视名")
 # 英文表头（如 高清影视之家 的 Title/Name 列）；必须整格等于才算，避免误伤含 name 的片名
 NAME_HEADS_EN = ("title", "name", "movie", "film")
 LINK_HEADS = ("链接", "转存", "地址", "下载")
@@ -49,17 +50,20 @@ _TV_TITLE_RE = re.compile(
     re.I,
 )
 
-_QUALITY_4K = re.compile(r"(4k|2160|uhd|杜比视界|dolby\s*vision)", re.I)
+_QUALITY_4K = re.compile(r"(?<![A-Za-z0-9])(?:4k|2160p?|uhd)(?![A-Za-z0-9])", re.I)
 _QUALITY_1080 = re.compile(r"(1080p|1080)", re.I)
 _CN_SUB = re.compile(r"(中文|中字|国语|简中|繁中|简繁)", re.I)
 _NO_CN = re.compile(r"无\s*(中文|中字|字幕)|无字幕", re.I)
-_YEAR_RE = re.compile(r"[（(](\d{4})[)）]")
-_TMDBID_RE = re.compile(r"\b(\d{4,9})\b")
+_YEAR_RE = re.compile(r"[（(\[]((?:18|19|20|21)\d{2})[)）\]]")
+_TMDB_HOSTS = {"themoviedb.org", "www.themoviedb.org", "tmdb.org", "www.tmdb.org"}
 
 
 def classify_sheet(sheet_name: str) -> str:
     """按工作表名判断资源大类。"""
     n = (sheet_name or "").lower()
+    # 动画电影仍然是电影；画质词完全不参与媒体类型识别。
+    if "电影" in n and not any(k in n for k in ("电视剧", "电影剧集", "电影/剧", "电影、剧")):
+        return "movie"
     for kind, keys in SHEET_KINDS:
         if any(k in n for k in keys):
             return kind
@@ -72,7 +76,7 @@ def is_skippable_sheet(sheet_name: str) -> bool:
 
 
 def media_type_of(sheet_name: str, title: str = "") -> str:
-    """返回 'movie' 或 'tv'。
+    """返回 'movie'、'tv' 或 'unknown'。
 
     ⚠️ **片名特征优先于工作表名**：工作表名常常不可靠（例如「蚂蚁和 rb4k」这类复合表里
     既有电影也有剧集），只看表名会把「洛基 第二季[全6集]」判成电影。
@@ -85,7 +89,7 @@ def media_type_of(sheet_name: str, title: str = "") -> str:
         return "movie"
     if kind in ("tv", "anime", "variety"):
         return "tv"
-    return "movie"
+    return "unknown"
 
 
 def is_name_head(text: str) -> bool:
@@ -93,9 +97,7 @@ def is_name_head(text: str) -> bool:
     t = (text or "").strip()
     if not t or len(t) > 8:
         return False
-    if any(h in t for h in NAME_HEADS):
-        return True
-    return t.lower() in NAME_HEADS_EN
+    return t in NAME_HEADS or t.lower() in NAME_HEADS_EN
 
 
 # 「横幅行」：表头区/整表打包链接所在的行（尤其是单列「目录型」表）
@@ -108,7 +110,7 @@ def is_banner_row(row: List[str]) -> bool:
     return any(h in txt for h in BANNER_HINTS)
 
 
-def _find_header(grid: List[List[str]]) -> Tuple[int, Optional[int]]:
+def _find_header(grid: List[List[str]], hrefs=None) -> Tuple[int, Optional[int]]:
     """在前 12 行里找表头 -> (表头行号, 名称列号)。找不到返回 (-1, None)。"""
     best = (-1, None, -1)
     for r in range(min(12, len(grid))):
@@ -119,13 +121,69 @@ def _find_header(grid: List[List[str]]) -> Tuple[int, Optional[int]]:
             if is_name_head(c):
                 name_col = ci
                 break
-        # 单列表（如「动画电影1000部」）里「名称」独占一列，non_empty<2 也要认
-        if name_col is None and non_empty < 2:
+        # 没有明确名称表头时，不能把第一条数据误当成表头。
+        if name_col is None:
+            continue
+        if any(extract_links(c or "") for c in row) or any(
+                href and is_resource_link(classify_link(href)) for href in
+                ((hrefs[r] if r < len(hrefs) else []) if hrefs else [])):
             continue
         score = non_empty + (10 if name_col is not None else 0)
         if score > best[2]:
             best = (r, name_col, score)
     return best[0], best[1]
+
+
+def extract_year(title: str) -> str:
+    """只识别发行年份标注，保留《1917》《2001：太空漫游》等片名中的数字。"""
+    m = _YEAR_RE.search(title or "")
+    if m:
+        return m.group(1)
+    # 裸结尾数字也可能属于片名，只有后接发布规格时才当作年份。
+    m = re.search(r"(?:\s|[._-])((?:18|19|20|21)\d{2})(?=[\s._-]+[\[（(]?(?:4k|2160p?|1080p?|720p?|uhd|remux|bluray|web-dl|中字|中文字幕))",
+                  title or "", re.I)
+    return m.group(1) if m else ""
+
+
+def _tmdb_value(value: str, numeric: bool = False) -> Tuple[str, str]:
+    """解析 TMDB ID 或 TMDB 页面 URL；URL 同时携带 movie/tv 类型。"""
+    text = (value or "").strip()
+    if numeric and re.fullmatch(r"[1-9]\d*", text):
+        return str(int(text)), ""
+    for candidate in re.findall(r"https?://[^\s\"'<>，。；）]+", text, re.I):
+        try:
+            parsed = urlsplit(candidate)
+            if (parsed.hostname or "").lower() not in _TMDB_HOSTS or parsed.username or parsed.password:
+                continue
+            m = re.match(r"^/(?:[A-Za-z]{2}(?:-[A-Za-z]{2})?/)?(movie|tv)/([1-9]\d*)(?:[-/]|$)", parsed.path)
+            if m:
+                return str(int(m.group(2))), m.group(1)
+        except ValueError:
+            continue
+    return "", ""
+
+
+def _title_cell(text: str) -> bool:
+    t = (text or "").strip()
+    if not t or t.isdecimal() or is_name_head(t) or is_banner_row([t]):
+        return False
+    if re.search(r"(?:https?://|magnet:|ed2k://)", t, re.I):
+        return False
+    if t.lower() in ("download", "link", "url", "点击转存", "点击下载", "转存", "链接", "下载"):
+        return False
+    # 不让纯画质、字幕、TMDB 编号列压过片名列。
+    plain = re.sub(r"(?:4k|2160p?|1080p?|720p?|uhd|remux|bluray|blu-ray|web-dl|h\.?26[45]|"
+                   r"中文|中字|国语|简中|繁中|简繁|字幕|无字幕|蓝光|原盘|杜比视界|简体|繁体|英语|中英)", "", t, flags=re.I)
+    return bool(re.search(r"[A-Za-z\u3400-\u9fff]", plain))
+
+
+def _infer_name_column(grid: List[List[str]], start: int) -> int:
+    scores = []
+    for ci in range(max((len(r) for r in grid), default=0)):
+        values = [row[ci] for row in grid[start:start + 100] if ci < len(row) and _title_cell(row[ci])]
+        score = sum(10 + min(len(value.strip()), 40) / 10 for value in values) - ci / 100
+        scores.append((score, -ci))
+    return -max(scores)[1] if scores else 0
 
 
 def _collect_links(row: List[str], href_row: List[Optional[str]],
@@ -163,27 +221,22 @@ def parse_sheet(sheet_id: str, sheet_name: str,
     """
     if not grid:
         return []
-    hdr_row, name_col = _find_header(grid)
+    hdr_row, name_col = _find_header(grid, hrefs)
     start = hdr_row + 1 if hdr_row >= 0 else 0
 
-    # 标题列兜底：取平均文本最长的列
+    # 无表头时按非链接、非数字、非纯规格的文本列推断名称。
     if name_col is None:
-        best_len, best_col = 0, 0
-        ncols = max((len(r) for r in grid), default=0)
-        for ci in range(ncols):
-            avg = sum(len(grid[r][ci]) for r in range(start, len(grid))
-                      if ci < len(grid[r])) / max(1, len(grid) - start)
-            if avg > best_len:
-                best_len, best_col = avg, ci
-        name_col = best_col
+        name_col = _infer_name_column(grid, start)
 
-    tmdb_col = None
+    tmdb_col = year_col = None
     res_col = sub_col = None
     if hdr_row >= 0:
         for ci, c in enumerate(grid[hdr_row]):
             t = (c or "").strip().lower()
             if "tmdb" in t:
                 tmdb_col = ci
+            elif t in ("年份", "年代", "上映年份", "year", "release year"):
+                year_col = ci
             elif res_col is None and any(h in t for h in RES_HEADS):
                 res_col = ci
             elif sub_col is None and any(h in t for h in SUB_HEADS):
@@ -222,9 +275,10 @@ def parse_sheet(sheet_id: str, sheet_name: str,
         if not any((c or "").strip() for c in row):
             continue
         title = (row[name_col] if name_col < len(row) else "").strip()
-        if not title or is_name_head(title):
-            continue
         own = _collect_links(row, href_row(r))
+        if (not title or is_name_head(title) and not own
+                or re.match(r"^(?:https?://|magnet:|ed2k://)", title, re.I)):
+            continue
         if any(is_resource_link(k) for k, _ in own):
             any_resource = True
         candidates.append((r, title, own))
@@ -242,15 +296,20 @@ def parse_sheet(sheet_id: str, sheet_name: str,
             links, sheet_bundle = [], False            # 整表无资源链接：留空，稍后统一填外链
 
         row = grid[r]
-        year = ""
-        m = _YEAR_RE.search(title)
-        if m:
-            year = m.group(1)
+        year = extract_year(title)
+        if year_col is not None and year_col < len(row):
+            ym = re.fullmatch(r"(?:18|19|20|21)\d{2}", (row[year_col] or "").strip())
+            if ym:
+                year = ym.group(0)
         tmdbid = ""
+        tmdb_type = ""
         if tmdb_col is not None and tmdb_col < len(row):
-            mm = re.search(r"\d{4,9}", row[tmdb_col] or "")
-            if mm:
-                tmdbid = mm.group(0)
+            tmdbid, tmdb_type = _tmdb_value(row[tmdb_col], numeric=True)
+        for value in list(row) + list(href_row(r)):
+            tid, ttype = _tmdb_value(value or "")
+            if tid and (not tmdbid or tid == tmdbid):
+                tmdbid, tmdb_type = tid, ttype
+                break
 
         spec = " ".join((c or "").strip() for c in row if c and c.strip() != title)
 
@@ -272,6 +331,7 @@ def parse_sheet(sheet_id: str, sheet_name: str,
             "title": title,
             "year": year,
             "tmdbid": tmdbid,
+            "media_type": tmdb_type or media_type_of(sheet_name, title),
             "spec": spec[:300],
             "qtext": qtext,
             "links": links,
@@ -328,6 +388,10 @@ def quality_score(rec: Dict[str, Any]) -> int:
     if has_cn:
         return 1
     return 0
+
+
+def is_4k(rec: Dict[str, Any]) -> bool:
+    return bool(_QUALITY_4K.search(f"{rec.get('title', '')} {rec.get('qtext') or rec.get('spec', '')}"))
 
 
 def pick_best(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
