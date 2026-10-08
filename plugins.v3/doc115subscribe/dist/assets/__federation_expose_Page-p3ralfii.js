@@ -869,7 +869,7 @@ return (_ctx, _cache) => {
                                 ]),
                                 _: 2
                               }, 1024),
-                              (r.sheet_bundle || r.no_link)
+                              (r.sheet_bundle || r.no_link || r.bundle)
                               ? (_openBlock(), _createBlock(_component_v_col, {
                                 key: 1,
                                 cols: "12",
@@ -879,7 +879,7 @@ return (_ctx, _cache) => {
                                   _createElementVNode("div", { class: "text-caption text-medium-emphasis" },
                                     _toDisplayString(r.no_link
                                       ? "该表为纯列表，资源在外部文档：请点上方的链接自行查看（本插件不转存）"
-                                      : "整表打包链接（大包）：请点上方的 115 链接进入网盘自行转存（不按行转存整包）"), 1)
+                                      : "该条目是打包链接（大包），已关闭一键转存：请点上方的 115/磁力 链接自行查看或转存"), 1)
                                 ]),
                                 _: 2
                               }, 1024))

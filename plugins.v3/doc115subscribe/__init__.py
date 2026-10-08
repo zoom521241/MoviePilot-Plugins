@@ -57,7 +57,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.5.1"
+    plugin_version = "0.5.2"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -409,10 +409,11 @@ class Doc115Subscribe(_PluginBase):
         links = [(k, u) for k, u in doc_parser.iter_links(rec) if k and u]
         if not links:
             return False, "该条目没有可用链接"
-        # 「整表打包链接 / 纯列表（无链接）」的条目：按需求只做搜索，不按行转存整包
-        if rec.get("sheet_bundle"):
-            return False, (f"{rec.get('title')}：这是整表「打包链接（大包）」，"
-                           f"请点击结果里的 115 链接进入网盘自行转存（避免误转整包）")
+        # 「大包」（整表打包链接 / 多行共用同一链接 / 纯列表无链接）条目：只做搜索，
+        # 不做一键转存（避免误转整包），由用户点结果里的链接自行查看/转存。
+        if rec.get("sheet_bundle") or rec.get("bundle") or rec.get("no_link"):
+            return False, (f"{rec.get('title')}：该条目是打包链接（大包），已关闭一键转存；"
+                           f"请点击结果里的 115/磁力 链接自行查看或转存")
         target = to or self.resolve_media_type(rec)
         save_path = self.build_save_path(rec, target)
         tr = self._transfers()
