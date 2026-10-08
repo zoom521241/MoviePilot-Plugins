@@ -34,9 +34,17 @@ const _hoisted_19 = {
   class: "text-caption mt-1 text-medium-emphasis",
   style: {"word-break":"break-all"}
 };
-const _hoisted_20 = { class: "text-caption mt-1" };
-const _hoisted_21 = { class: "text-medium-emphasis" };
-const _hoisted_22 = {
+const _hoisted_20 = {
+  key: 0,
+  class: "text-caption mt-1",
+  style: {"border-radius":"6px","padding":"6px 8px","background":"rgba(255, 180, 0, 0.14)"}
+};
+const _hoisted_21 = {
+  key: 1,
+  class: "text-caption mt-1"
+};
+const _hoisted_22 = { class: "text-medium-emphasis" };
+const _hoisted_23 = {
   key: 0,
   class: "ml-2"
 };
@@ -199,6 +207,36 @@ async function loadRecords() {
     setMsg(`读取转存记录失败：${describeError(e)}`, 'error');
   } finally {
     busy.records = false;
+  }
+}
+
+async function deleteRecord(r) {
+  if (!window.confirm(`删除这条记录？\n${r.title}`)) return
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_delete', { id: r.id }));
+    if (res.code === 0) {
+      setMsg('已删除该条记录', 'success');
+      await loadRecords();
+    } else {
+      setMsg(res.msg || '删除失败', 'error');
+    }
+  } catch (e) {
+    setMsg(`删除失败：${describeError(e)}`, 'error');
+  }
+}
+
+async function clearRecords() {
+  if (!window.confirm('清空全部转存记录？（不影响 115 网盘里的文件）')) return
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_delete', {}));
+    if (res.code === 0) {
+      setMsg('已清空转存记录', 'success');
+      await loadRecords();
+    } else {
+      setMsg(res.msg || '清空失败', 'error');
+    }
+  } catch (e) {
+    setMsg(`清空失败：${describeError(e)}`, 'error');
   }
 }
 
@@ -1077,7 +1115,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, { class: "text-subtitle-1 d-flex align-center flex-wrap" }, {
               default: _withCtx(() => [
-                _cache[33] || (_cache[33] = _createElementVNode("span", null, "转存记录", -1)),
+                _cache[34] || (_cache[34] = _createElementVNode("span", null, "转存记录", -1)),
                 _createVNode(_component_v_chip, {
                   size: "x-small",
                   color: "primary",
@@ -1088,7 +1126,7 @@ return (_ctx, _cache) => {
                   ]),
                   _: 1
                 }),
-                _cache[34] || (_cache[34] = _createElementVNode("span", { class: "text-caption text-medium-emphasis ml-2" }, "（最多保留最近 200 条）", -1)),
+                _cache[35] || (_cache[35] = _createElementVNode("span", { class: "text-caption text-medium-emphasis ml-2" }, "（最多保留最近 200 条）", -1)),
                 _createVNode(_component_v_spacer),
                 _createVNode(_component_v_btn, {
                   size: "small",
@@ -1101,7 +1139,20 @@ return (_ctx, _cache) => {
                     _createTextVNode(" 刷新 ", -1)
                   ]))]),
                   _: 1
-                }, 8, ["loading"])
+                }, 8, ["loading"]),
+                _createVNode(_component_v_btn, {
+                  size: "small",
+                  variant: "text",
+                  color: "error",
+                  "prepend-icon": "mdi-delete-sweep",
+                  disabled: !records.value.length,
+                  onClick: clearRecords
+                }, {
+                  default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
+                    _createTextVNode(" 清空 ", -1)
+                  ]))]),
+                  _: 1
+                }, 8, ["disabled"])
               ]),
               _: 1
             }),
@@ -1113,7 +1164,7 @@ return (_ctx, _cache) => {
                       type: "info",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
+                      default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
                         _createTextVNode(" 还没有转存 / 离线下载记录。去「搜索」页转存一条试试。 ", -1)
                       ]))]),
                       _: 1
@@ -1163,7 +1214,26 @@ return (_ctx, _cache) => {
                               _: 2
                             }, 1032, ["color"]),
                             _createVNode(_component_v_spacer),
-                            _createElementVNode("span", _hoisted_18, _toDisplayString(r.submitted_at), 1)
+                            _createElementVNode("span", _hoisted_18, _toDisplayString(r.submitted_at), 1),
+                            _createVNode(_component_v_btn, {
+                              icon: "",
+                              size: "x-small",
+                              variant: "text",
+                              color: "error",
+                              class: "ml-1",
+                              title: "删除这条记录",
+                              onClick: $event => (deleteRecord(r))
+                            }, {
+                              default: _withCtx(() => [
+                                _createVNode(_component_v_icon, null, {
+                                  default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
+                                    _createTextVNode("mdi-delete", -1)
+                                  ]))]),
+                                  _: 1
+                                })
+                              ]),
+                              _: 1
+                            }, 8, ["onClick"])
                           ]),
                           _createElementVNode("div", _hoisted_19, [
                             _createTextVNode(" 目标：" + _toDisplayString(r.final_path) + " ", 1),
@@ -1180,12 +1250,14 @@ return (_ctx, _cache) => {
                             height: "8",
                             rounded: ""
                           }, null, 8, ["model-value", "color"]),
-                          _createElementVNode("div", _hoisted_20, [
-                            _createElementVNode("span", _hoisted_21, _toDisplayString(r.message || ''), 1),
-                            (r.status === 'downloading')
-                              ? (_openBlock(), _createElementBlock("span", _hoisted_22, _toDisplayString(r.progress || 0) + "%", 1))
-                              : _createCommentVNode("", true)
-                          ])
+                          (r.status === 'downloading' && (r.progress || 0) >= 100)
+                            ? (_openBlock(), _createElementBlock("div", _hoisted_20, _toDisplayString(r.message || '离线任务已完成，但文件未出现在暂存目录'), 1))
+                            : (_openBlock(), _createElementBlock("div", _hoisted_21, [
+                                _createElementVNode("span", _hoisted_22, _toDisplayString(r.message || ''), 1),
+                                (r.status === 'downloading')
+                                  ? (_openBlock(), _createElementBlock("span", _hoisted_23, _toDisplayString(r.progress || 0) + "%", 1))
+                                  : _createCommentVNode("", true)
+                              ]))
                         ]),
                         _: 2
                       }, 1024)

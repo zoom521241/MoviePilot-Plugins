@@ -59,7 +59,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.6.0"
+    plugin_version = "0.6.1"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -370,12 +370,50 @@ class Doc115Subscribe(_PluginBase):
                             pct = int(float(t.get("percentDone") or 0))
                         except (TypeError, ValueError):
                             pct = 0
+                        fields: Dict[str, Any] = {}
                         if pct != r.get("progress"):
-                            store.update(r["id"], progress=pct)
-                            r["progress"] = pct
+                            fields["progress"] = pct
+                        # 100% 但在暂存目录找不到文件：给出提示（115 偶发"任务完成但未落盘"）
+                        if pct >= 100:
+                            name = str(t.get("name") or "")
+                            staging = str(r.get("staging_path") or "")
+                            if name and staging:
+                                if tr.path_exists(f"{staging}/{name}"):
+                                    fields["message"] = f"离线已下完，等待搬到 {r.get('final_path')}"
+                                else:
+                                    fields["message"] = (
+                                        "离线任务显示已完成，但文件未出现在暂存目录："
+                                        "若是重复提交同一种子，115 会去重且不会重新下载，文件不会再产生"
+                                    )
+                        if fields:
+                            store.update(r["id"], **fields)
+                            r.update(fields)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"115文档订阅与查询：刷新离线进度失败：{exc}")
         return {"code": 0, "data": recs}
+
+    def delete_record(self, rec_id: str = "") -> Dict[str, Any]:
+        """删除一条（或不传 id 则清空）转存记录；同时清掉对应的待处理离线任务。"""
+        store = self._records()
+        if not rec_id:
+            n = store.clear()
+            self._save_pending([])
+            return {"code": 0, "data": {"deleted": n, "cleared": True}}
+        rec = None
+        for r in store.list():
+            if r.get("id") == rec_id:
+                rec = r
+                break
+        if not rec:
+            return {"code": 1, "msg": "记录不存在"}
+        ok = store.delete(rec_id)
+        h = str(rec.get("hash") or "").lower()
+        if h:
+            items = self._load_pending()
+            keep = [i for i in items if str(i.get("hash") or "").lower() != h]
+            if len(keep) != len(items):
+                self._save_pending(keep)
+        return {"code": 0, "data": {"deleted": 1 if ok else 0}}
 
     def _ensure_index(self):
         """内存里没有索引时，从磁盘已保存的文件加载（避免重启/重载后又要重建）。"""
@@ -542,6 +580,8 @@ class Doc115Subscribe(_PluginBase):
              "auth": "bear", "methods": ["POST"], "summary": "检查离线下载并搬运到最终目录"},
             {"path": "/records", "endpoint": self.api_records,
              "auth": "bear", "methods": ["GET"], "summary": "转存/离线记录与进度"},
+            {"path": "/records_delete", "endpoint": self.api_records_delete,
+             "auth": "bear", "methods": ["POST"], "summary": "删除转存记录（不传 id 则清空）"},
             {"path": "/run_subscribe", "endpoint": self.api_run_subscribe,
              "auth": "bear", "methods": ["POST"], "summary": "手动同步电影订阅"},
             {"path": "/qr_start", "endpoint": self.api_qr_start,
@@ -683,6 +723,11 @@ class Doc115Subscribe(_PluginBase):
         except (TypeError, ValueError):
             n = 200
         return {"code": 0, "data": data[:max(1, n)]}
+
+    def api_records_delete(self, payload: dict = None) -> Dict[str, Any]:
+        """前端传 {id} 删除单条；不传 id（或 id 为空）则清空全部。"""
+        body = payload or {}
+        return self.delete_record(str(body.get("id") or ""))
 
     def api_run_subscribe(self) -> Dict[str, Any]:
         return self.run_subscribe()

@@ -89,3 +89,11 @@ class RecordStore:
         items = self._load()
         self._save([])
         return len(items)
+
+    def delete(self, rec_id: str) -> bool:
+        items = self._load()
+        keep = [it for it in items if it.get("id") != rec_id]
+        if len(keep) == len(items):
+            return False
+        self._save(keep)
+        return True

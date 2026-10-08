@@ -221,6 +221,16 @@
           <v-btn size="small" variant="text" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords">
             刷新
           </v-btn>
+          <v-btn
+            size="small"
+            variant="text"
+            color="error"
+            prepend-icon="mdi-delete-sweep"
+            :disabled="!records.length"
+            @click="clearRecords"
+          >
+            清空
+          </v-btn>
         </v-card-title>
         <v-card-text>
           <v-alert v-if="!records.length" type="info" variant="tonal">
@@ -241,6 +251,17 @@
                 </v-chip>
                 <v-spacer />
                 <span class="text-caption text-medium-emphasis">{{ r.submitted_at }}</span>
+                <v-btn
+                  icon
+                  size="x-small"
+                  variant="text"
+                  color="error"
+                  class="ml-1"
+                  title="删除这条记录"
+                  @click="deleteRecord(r)"
+                >
+                  <v-icon>mdi-delete</v-icon>
+                </v-btn>
               </div>
               <div class="text-caption mt-1 text-medium-emphasis" style="word-break: break-all">
                 目标：{{ r.final_path }}
@@ -255,7 +276,14 @@
                 height="8"
                 rounded
               />
-              <div class="text-caption mt-1">
+              <div
+                v-if="r.status === 'downloading' && (r.progress || 0) >= 100"
+                class="text-caption mt-1"
+                style="border-radius: 6px; padding: 6px 8px; background: rgba(255, 180, 0, 0.14)"
+              >
+                {{ r.message || '离线任务已完成，但文件未出现在暂存目录' }}
+              </div>
+              <div v-else class="text-caption mt-1">
                 <span class="text-medium-emphasis">{{ r.message || '' }}</span>
                 <span v-if="r.status === 'downloading'" class="ml-2">{{ r.progress || 0 }}%</span>
               </div>
@@ -418,6 +446,36 @@ async function loadRecords() {
     setMsg(`读取转存记录失败：${describeError(e)}`, 'error')
   } finally {
     busy.records = false
+  }
+}
+
+async function deleteRecord(r) {
+  if (!window.confirm(`删除这条记录？\n${r.title}`)) return
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_delete', { id: r.id }))
+    if (res.code === 0) {
+      setMsg('已删除该条记录', 'success')
+      await loadRecords()
+    } else {
+      setMsg(res.msg || '删除失败', 'error')
+    }
+  } catch (e) {
+    setMsg(`删除失败：${describeError(e)}`, 'error')
+  }
+}
+
+async function clearRecords() {
+  if (!window.confirm('清空全部转存记录？（不影响 115 网盘里的文件）')) return
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_delete', {}))
+    if (res.code === 0) {
+      setMsg('已清空转存记录', 'success')
+      await loadRecords()
+    } else {
+      setMsg(res.msg || '清空失败', 'error')
+    }
+  } catch (e) {
+    setMsg(`清空失败：${describeError(e)}`, 'error')
   }
 }
 
