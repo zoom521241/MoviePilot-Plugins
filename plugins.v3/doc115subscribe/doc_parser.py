@@ -87,19 +87,30 @@ def is_name_head(text: str) -> bool:
     return t.lower() in NAME_HEADS_EN
 
 
+# 「横幅行」：表头区/整表打包链接所在的行（尤其是单列「目录型」表）
+BANNER_HINTS = ("打包链接", "大包链接", "点我返回", "点我直达", "点击直达", "点击这里",
+                "点击进去", "复制资源", "资源列表", "目录", "快捷键")
+
+
+def is_banner_row(row: List[str]) -> bool:
+    txt = " ".join((c or "") for c in (row or []))
+    return any(h in txt for h in BANNER_HINTS)
+
+
 def _find_header(grid: List[List[str]]) -> Tuple[int, Optional[int]]:
     """在前 12 行里找表头 -> (表头行号, 名称列号)。找不到返回 (-1, None)。"""
     best = (-1, None, -1)
     for r in range(min(12, len(grid))):
         row = grid[r]
         non_empty = sum(1 for c in row if c.strip())
-        if non_empty < 2:
-            continue
         name_col = None
         for ci, c in enumerate(row):
             if is_name_head(c):
                 name_col = ci
                 break
+        # 单列表（如「动画电影1000部」）里「名称」独占一列，non_empty<2 也要认
+        if name_col is None and non_empty < 2:
+            continue
         score = non_empty + (10 if name_col is not None else 0)
         if score > best[2]:
             best = (r, name_col, score)
@@ -170,45 +181,56 @@ def parse_sheet(sheet_id: str, sheet_name: str,
     def href_row(r: int) -> List[Optional[str]]:
         return hrefs[r] if r < len(hrefs) else []
 
-    # 表头区（表头行之前）的链接：整表「打包链接」通常挂在这里
+    # 「表头区」= 表头行之前的行 + 顶部若干行里明显的横幅行。
+    # 很多「合集/目录」表是**单列**结构、没有真正的表头行（如 老电影 / 动漫原盘），
+    # 整表打包链接就挂在第 1~2 行的横幅里（"打包链接，点我直达"），必须把它们算作表头。
+    top_end = min(8, len(grid))
+    banner_rows = {r for r in range(top_end) if is_banner_row(grid[r])}
+    header_area = set(range(0, start)) | banner_rows
+
     header_links: List[Tuple[str, str]] = []
-    for r in range(0, start):
+    for r in sorted(header_area):
         header_links.extend(_collect_links(grid[r], href_row(r)))
     header_links = dedup_links(header_links)
 
-    # 表头里的普通网页链接（如外部 KDocs 文档），用于「纯列表表」的参考展示
+    # 表头/横幅里的普通网页链接（如外部 KDocs 文档），用于「纯列表表」的参考展示
     header_http: List[str] = []
-    for r in range(0, start):
+    for r in sorted(header_area):
         for href in href_row(r):
             if href and classify_link(normalize_url(href)) == LINK_OTHER_HTTP:
                 header_http.append(normalize_url(href).rstrip("#&"))
     header_http = list(dict.fromkeys(header_http))
 
-    records: List[Dict[str, Any]] = []
-    link_counter: Dict[str, int] = {}
-    any_resource = bool(header_links)
-
+    # 第一遍：收集「数据行」及其自带链接；判断整表是否存在资源链接
+    any_resource = any(is_resource_link(k) for k, _ in header_links)
+    candidates: List[Tuple[int, str, List[Tuple[str, str]]]] = []
     for r in range(start, len(grid)):
+        if r in header_area:
+            continue
         row = grid[r]
         if not any((c or "").strip() for c in row):
             continue
         title = (row[name_col] if name_col < len(row) else "").strip()
         if not title or is_name_head(title):
             continue
-
         own = _collect_links(row, href_row(r))
-        if own:
-            links = own
-            sheet_bundle = False
-        elif header_links:
-            links = header_links          # 整表打包链接 -> 下放到数据行
-            sheet_bundle = True
-        else:
-            links = []
-            sheet_bundle = False
-        if any(is_resource_link(k) for k, _ in links):
+        if any(is_resource_link(k) for k, _ in own):
             any_resource = True
+        candidates.append((r, title, own))
 
+    records: List[Dict[str, Any]] = []
+    link_counter: Dict[str, int] = {}
+    for r, title, own in candidates:
+        if own:
+            links, sheet_bundle = own, False
+        elif header_links:
+            links, sheet_bundle = header_links, True   # 整表打包链接 -> 下放到数据行
+        elif any_resource:
+            continue        # 有链接的表里，没链接的行视为标题/分隔行，跳过
+        else:
+            links, sheet_bundle = [], False            # 整表无资源链接：留空，稍后统一填外链
+
+        row = grid[r]
         year = ""
         m = _YEAR_RE.search(title)
         if m:
