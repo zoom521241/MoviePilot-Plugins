@@ -439,7 +439,8 @@ function statusColor(s) { return (STATUS_STYLE[s] || {}).color || 'grey' }
 async function loadRecords() {
   busy.records = true
   try {
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 60000 }))
+    // 该接口会顺带检测离线任务：已下完且落盘的会立即搬到最终目录
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 120000 }))
     if (res.code === 0) records.value = res.data || []
     else setMsg(res.msg || '读取转存记录失败', 'error')
   } catch (e) {
@@ -447,6 +448,20 @@ async function loadRecords() {
   } finally {
     busy.records = false
   }
+}
+
+// 站在「转存记录」页且有下载中的任务时，自动轮询刷新（进度条会自己走，搬运也会被自动触发）
+let recTimer = null
+function stopRecTimer() {
+  if (recTimer) { clearInterval(recTimer); recTimer = null }
+}
+function startRecTimer() {
+  stopRecTimer()
+  recTimer = setInterval(() => {
+    if (tab.value !== 'records') return
+    if (!records.value.some((r) => r.status === 'downloading' || r.status === 'moving')) return
+    loadRecords()
+  }, 20000)
 }
 
 async function deleteRecord(r) {
@@ -696,11 +711,15 @@ async function transfer(pageIdx, to) {
 onMounted(() => {
   loadStatus()
   loadRecords()
+  startRecTimer()
 })
 watch(tab, (v) => {
   if (v === 'records') loadRecords()
 })
-onBeforeUnmount(stopQrTimer)
+onBeforeUnmount(() => {
+  stopQrTimer()
+  stopRecTimer()
+})
 </script>
 
 <style>

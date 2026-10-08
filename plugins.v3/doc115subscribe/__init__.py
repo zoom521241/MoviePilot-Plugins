@@ -59,7 +59,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.6.1"
+    plugin_version = "0.6.2"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -91,6 +91,8 @@ class Doc115Subscribe(_PluginBase):
     _search_results: List[Dict[str, Any]] = []
     _page_msg: str = ""
     _mt_cache: Dict[str, str] = {}
+    _tr: Any = None            # 缓存的 115 操作句柄
+    _tr_cookie: str = ""       # 缓存对应的 Cookie
 
     # ---------------------------------------------------------------------
     def init_plugin(self, config: dict = None):
@@ -103,6 +105,8 @@ class Doc115Subscribe(_PluginBase):
         self._qr_lock = threading.Lock()
         self._search_results = []
         self._page_msg = ""
+        self._tr = None
+        self._tr_cookie = ""
         if config:
             self._enabled = bool(config.get("enabled", False))
             self._doc_url = config.get("doc_url") or self.__class__._doc_url
@@ -140,7 +144,7 @@ class Doc115Subscribe(_PluginBase):
             )
         self._scheduler.add_job(
             self.check_offline_tasks,
-            trigger=IntervalTrigger(minutes=10),
+            trigger=IntervalTrigger(minutes=1),
             name="115文档订阅与查询-离线任务整理",
         )
         self._scheduler.start()
@@ -169,7 +173,7 @@ class Doc115Subscribe(_PluginBase):
                 if isinstance(cfg, dict):
                     val = (cfg.get(field) or "").strip()
                     if val:
-                        logger.info(f"115文档订阅与查询：复用 {key}.{field} 的 115 Cookie")
+                        logger.debug(f"115文档订阅与查询：复用 {key}.{field} 的 115 Cookie")
                         return val
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"115文档订阅与查询：读取其它插件 115 Cookie 失败：{exc}")
@@ -279,29 +283,21 @@ class Doc115Subscribe(_PluginBase):
                     f"完成后搬到 {final_path}）：{rec.get('title')} [{h[:12]}]")
         return h
 
-    def check_offline_tasks(self) -> Dict[str, Any]:
-        """检查离线下载进度：完成后从暂存目录搬到最终目录（走 115网盘Plus）。
+    def _process_offline(self, tr, store: RecordStore) -> Dict[str, int]:
+        """检查离线任务：**已下完且已落盘**的，从暂存目录搬到最终目录。
 
-        整理由 115 生活事件驱动（P115StrmHelper 监控网盘目录变化），本插件不再写 MP 下载历史：
-        文件一旦出现在 电影/电视剧 下载目录，就会产生 115 事件并被整理。
+        返回 ``{"pending": n, "finished": n, "moved": n}``。
+        整理由 115 生活事件驱动（搬到 电影/电视剧 目录这个动作本身就是事件），本插件不写 MP 下载历史。
         """
         items = self._load_pending()
-        tr = self._transfers()
-        if not tr:
-            return {"code": 1, "msg": "未配置 115 Cookie"}
-        try:
-            tasks = tr.list_tasks()
-        except Exception as exc:  # noqa: BLE001
-            return {"code": 1, "msg": f"查询 115 离线任务失败：{exc}"}
+        if not items:
+            return {"pending": 0, "finished": 0, "moved": 0}
+        tasks = tr.list_tasks()
         by_hash: Dict[str, Dict[str, Any]] = {}
         for t in tasks:
             h = str(t.get("info_hash") or "").lower()
             if h:
                 by_hash[h] = t
-
-        store = self._records()
-        if not items:
-            return {"code": 0, "data": {"pending": 0, "finished": 0, "moved": 0}}
 
         moved, finished, remain = 0, 0, []
         for it in items:
@@ -320,11 +316,13 @@ class Doc115Subscribe(_PluginBase):
                 remain.append(it)
                 continue
 
-            # 100% —— 校验是否真的落盘到暂存目录（115 偶发"任务完成但文件未落盘"）
+            # 100% —— 必须校验文件**真的落盘**到暂存目录（115 偶发"任务完成但文件未落盘"）
             src = f"{staging}/{name}" if (staging and name) else ""
             if not src or not tr.path_exists(src):
-                self._update_record(store, h, status="downloading", progress=100,
-                                    message="离线任务已完成，等待文件落盘")
+                self._update_record(
+                    store, h, status="downloading", progress=100,
+                    message="离线任务显示已完成，但文件未出现在暂存目录："
+                            "若是重复提交同一种子，115 会去重且不会重新下载，文件不会再产生")
                 remain.append(it)
                 continue
 
@@ -343,7 +341,18 @@ class Doc115Subscribe(_PluginBase):
                 remain.append(it)
         if moved or finished:
             self._save_pending(remain)
-        return {"code": 0, "data": {"pending": len(remain), "finished": finished, "moved": moved}}
+        return {"pending": len(remain), "finished": finished, "moved": moved}
+
+    def check_offline_tasks(self) -> Dict[str, Any]:
+        """定时/按钮触发：检测离线任务，完成且落盘的自动搬到最终目录。"""
+        tr = self._transfers()
+        if not tr:
+            return {"code": 1, "msg": "未配置 115 Cookie"}
+        try:
+            data = self._process_offline(tr, self._records())
+        except Exception as exc:  # noqa: BLE001
+            return {"code": 1, "msg": f"查询 115 离线任务失败：{exc}"}
+        return {"code": 0, "data": data}
 
     @staticmethod
     def _update_record(store: RecordStore, info_hash: str, **fields: Any) -> None:
@@ -352,45 +361,20 @@ class Doc115Subscribe(_PluginBase):
             store.update(rec["id"], **fields)
 
     def records_view(self, refresh: bool = True) -> Dict[str, Any]:
-        """详情页「转存记录」页数据：历史记录 + 离线任务实时进度。"""
+        """详情页「转存记录」页数据：历史记录 + 离线任务实时进度。
+
+        ``refresh=True`` 时会**顺带执行一次离线检查与搬运**，所以打开/刷新记录页
+        就能让"已下完还没搬"的条目立即搬走，不必等定时任务。
+        """
         store = self._records()
-        recs = store.list()
         if refresh:
             try:
                 tr = self._transfers()
                 if tr:
-                    tasks = {str(t.get("info_hash") or "").lower(): t for t in tr.list_tasks()}
-                    for r in recs:
-                        if r.get("status") not in ("downloading", "moving"):
-                            continue
-                        t = tasks.get(str(r.get("hash") or "").lower())
-                        if not t:
-                            continue
-                        try:
-                            pct = int(float(t.get("percentDone") or 0))
-                        except (TypeError, ValueError):
-                            pct = 0
-                        fields: Dict[str, Any] = {}
-                        if pct != r.get("progress"):
-                            fields["progress"] = pct
-                        # 100% 但在暂存目录找不到文件：给出提示（115 偶发"任务完成但未落盘"）
-                        if pct >= 100:
-                            name = str(t.get("name") or "")
-                            staging = str(r.get("staging_path") or "")
-                            if name and staging:
-                                if tr.path_exists(f"{staging}/{name}"):
-                                    fields["message"] = f"离线已下完，等待搬到 {r.get('final_path')}"
-                                else:
-                                    fields["message"] = (
-                                        "离线任务显示已完成，但文件未出现在暂存目录："
-                                        "若是重复提交同一种子，115 会去重且不会重新下载，文件不会再产生"
-                                    )
-                        if fields:
-                            store.update(r["id"], **fields)
-                            r.update(fields)
+                    self._process_offline(tr, store)
             except Exception as exc:  # noqa: BLE001
-                logger.debug(f"115文档订阅与查询：刷新离线进度失败：{exc}")
-        return {"code": 0, "data": recs}
+                logger.debug(f"115文档订阅与查询：刷新离线进度/搬运失败：{exc}")
+        return {"code": 0, "data": store.list()}
 
     def delete_record(self, rec_id: str = "") -> Dict[str, Any]:
         """删除一条（或不传 id 则清空）转存记录；同时清掉对应的待处理离线任务。"""
@@ -446,11 +430,16 @@ class Doc115Subscribe(_PluginBase):
 
     # ---- 115 操作 ----------------------------------------------------------
     def _transfers(self) -> Optional[P115Transfer]:
+        """115 操作句柄（按 Cookie 缓存，避免每次都新建并刷日志）。"""
         cookie = self.get_p115_cookie()
         if not cookie:
             return None
+        if self._tr is not None and self._tr_cookie == cookie:
+            return self._tr
         try:
-            return P115Transfer(cookie)
+            self._tr = P115Transfer(cookie)
+            self._tr_cookie = cookie
+            return self._tr
         except P115Error as exc:
             logger.error(f"115文档订阅与查询：初始化 115 客户端失败：{exc}")
             return None
