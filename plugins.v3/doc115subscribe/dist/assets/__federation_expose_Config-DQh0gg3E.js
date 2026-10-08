@@ -1,4 +1,4 @@
-import { importShared } from './__federation_fn_import-JrT3xvdd.js';
+import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,toDisplayString:_toDisplayString,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,createElementBlock:_createElementBlock} = await importShared('vue');
 
@@ -100,7 +100,7 @@ return (_ctx, _cache) => {
   return (_openBlock(), _createBlock(_component_v_card, { variant: "outlined" }, {
     default: _withCtx(() => [
       _createVNode(_component_v_card_title, { class: "text-subtitle-1" }, {
-        default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
+        default: _withCtx(() => [...(_cache[13] || (_cache[13] = [
           _createTextVNode("115文档订阅与查询 · 设置", -1)
         ]))]),
         _: 1
@@ -228,7 +228,7 @@ return (_ctx, _cache) => {
                 density: "comfortable",
                 class: "mt-3"
               }, {
-                default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
+                default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
                   _createTextVNode(" 关闭「写入下载历史」后，MP 不会知道这次转存，文件会一直留在下载目录、不会被整理， 也不会触发 STRM 生成与媒体库刷新。 ", -1)
                 ]))]),
                 _: 1
@@ -359,7 +359,7 @@ return (_ctx, _cache) => {
             loading: loading.value,
             onClick: _cache[12] || (_cache[12] = $event => (load(true)))
           }, {
-            default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
+            default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
               _createTextVNode("重新读取配置", -1)
             ]))]),
             _: 1
@@ -369,9 +369,9 @@ return (_ctx, _cache) => {
             color: "primary",
             loading: saving.value,
             "prepend-icon": "mdi-content-save",
-            onClick: _cache[13] || (_cache[13] = $event => (save()))
+            onClick: save
           }, {
-            default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
+            default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
               _createTextVNode("保存配置", -1)
             ]))]),
             _: 1
