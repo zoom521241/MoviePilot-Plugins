@@ -59,7 +59,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.7.0"
+    plugin_version = "0.7.1"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -518,16 +518,26 @@ class Doc115Subscribe(_PluginBase):
                 ports.append(p)
         for port in ports:
             try:
-                url = (f"http://127.0.0.1:{port}/api/v1/subscribe/"
-                       f"?apikey={token}&page=1&count=500")
-                with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310
-                    data = json.loads(resp.read().decode("utf-8"))
+                out: List[Dict[str, Any]] = []
+                for page in range(1, 6):          # 每页 100 条（MP 对 count 有上限，传大会 422）
+                    url = (f"http://127.0.0.1:{port}/api/v1/subscribe/"
+                           f"?apikey={token}&page={page}&count=100")
+                    # ⚠️ 必须带 User-Agent：MP 的 API 会拒绝 urllib 默认 UA 的请求
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "MoviePilot-Doc115Subscribe"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                        data = json.loads(resp.read().decode("utf-8"))
+                    rows = data.get("data") if isinstance(data, dict) else data
+                    if not isinstance(rows, list):
+                        break
+                    out.extend(rows)
+                    if len(rows) < 100:
+                        break
+                if out:
+                    return out
             except Exception:  # noqa: BLE001
                 continue
-            rows = data.get("data") if isinstance(data, dict) else data
-            if isinstance(rows, list):
-                return rows
-        logger.warning("115文档订阅与查询：读取 MP 订阅列表失败（API_TOKEN 或端口不一致）")
+        logger.warning("115文档订阅与查询：读取 MP 订阅列表失败（API_TOKEN / 端口不一致）")
         return []
 
     def run_subscribe(self) -> Dict[str, Any]:

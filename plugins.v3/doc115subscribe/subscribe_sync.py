@@ -19,8 +19,9 @@ MOVIE_SHEET_HINT = ("最新电影",)
 
 
 def _norm_title(t: str) -> str:
-    """归一化片名：去空格、去括号内容、统一小写。"""
-    s = re.sub(r"[（(].*?[)）]", "", t or "")
+    """归一化片名：去掉发布组/合集等各类括号内容，再去空格与标点，统一小写。"""
+    s = t or ""
+    s = re.sub(r"[【\[（(「『].*?[】\]）)」』]", "", s)
     s = re.sub(r"[\s\-_.·:：!！?？,，/\\|]", "", s)
     return s.lower()
 
@@ -43,9 +44,15 @@ def match_subscriptions(records: Iterable[Dict[str, Any]],
                         ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """把订阅与文档记录配对，返回 [(订阅, 选中的记录)]。
 
-    匹配优先级：**TMDBID 相等** > 「片名(+年份)」相同。
+    匹配优先级：
+      1. **TMDBID 相等**（最准）
+      2. 「片名(+年份)」归一化后**完全相同**
+      3. 归一化后**订阅名是文档标题的前缀**（文档标题常带「发布组/合集/字幕/英文名」等后缀），
+         要求订阅名 ≥4 个字符且年份不冲突 —— 避免「八仙」误配「八仙饭店」这类短名误判。
+
     同一订阅命中多条时，用 doc_parser.pick_best 选最优（4K+中文优先，其次最新）。
     """
+    records = list(records)
     by_tmdb: Dict[str, List[Dict[str, Any]]] = {}
     by_title: Dict[str, List[Dict[str, Any]]] = {}
     for r in records:
@@ -66,6 +73,18 @@ def match_subscriptions(records: Iterable[Dict[str, Any]],
             year = str(sub.get("year") or "").strip()
             if year:
                 cands = [c for c in cands if not c.get("year") or c["year"] == year] or cands
+        if not cands:
+            # 兜底：订阅名是文档标题的前缀（文档标题常带发布组/合集/字幕后缀）
+            nsub = _norm_title(sub.get("title", ""))
+            year = str(sub.get("year") or "").strip()
+            if len(nsub) >= 4:
+                for r in records:
+                    if not _norm_title(r.get("title", "")).startswith(nsub):
+                        continue
+                    ry = str(r.get("year") or "").strip()
+                    if year and ry and year != ry:
+                        continue
+                    cands.append(r)
         if not cands:
             continue
         best = doc_parser.pick_best(cands)
