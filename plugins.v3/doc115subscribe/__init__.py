@@ -59,7 +59,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.6.2"
+    plugin_version = "0.6.3"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -144,7 +144,7 @@ class Doc115Subscribe(_PluginBase):
             )
         self._scheduler.add_job(
             self.check_offline_tasks,
-            trigger=IntervalTrigger(minutes=1),
+            trigger=IntervalTrigger(seconds=20),
             name="115文档订阅与查询-离线任务整理",
         )
         self._scheduler.start()
