@@ -59,7 +59,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.6.4"
+    plugin_version = "0.7.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -344,7 +344,8 @@ class Doc115Subscribe(_PluginBase):
                 moved += 1
                 finished += 1
                 self._update_record(store, h, status="done", progress=100,
-                                    message=f"已搬到 {final}，等待 115 整理")
+                                    message=f"已搬到 {final}，等待 115 整理",
+                                    item_name=name, moved_at=time.time())
                 logger.info(f"115文档订阅与查询：离线下载完成并已搬到最终目录（等待 115 整理）："
                             f"{it.get('title')} -> {final}")
             else:
@@ -402,6 +403,38 @@ class Doc115Subscribe(_PluginBase):
         if rec:
             store.update(rec["id"], **fields)
 
+    def _refresh_organized(self, store: RecordStore) -> None:
+        """回填「已整理」状态：已搬到最终目录的条目，若文件已不在下载目录 → 说明 115 整理完成。
+
+        只在**打开记录页**时跑（用户主动看），不改后台"搬完即停"的节流策略；
+        只检查最近 6 小时内搬过去的、且知道文件名的条目。
+        """
+        tr = self._transfers()
+        if not tr:
+            return
+        now = time.time()
+        checked = 0
+        for r in store.list():
+            if r.get("status") != "done":
+                continue
+            name = str(r.get("item_name") or "")
+            final = str(r.get("final_path") or "")
+            moved_at = float(r.get("moved_at") or 0)
+            if not name or not final or not moved_at:
+                continue                      # 115 分享转存拿不到文件名，跳过
+            if now - moved_at > 6 * 3600:
+                continue                      # 超过 6 小时就不再追问
+            if checked >= 5:
+                break
+            checked += 1
+            try:
+                if not tr.path_exists(f"{final}/{name}"):
+                    store.update(r["id"], status="organized",
+                                 message=f"已整理完成（文件已移出 {final}）")
+                    logger.info(f"115文档订阅与查询：检测到已整理：{r.get('title')}")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"115文档订阅与查询：检查整理状态失败：{exc}")
+
     def records_view(self, refresh: bool = True) -> Dict[str, Any]:
         """详情页「转存记录」页数据：历史记录 + 离线任务实时进度。
 
@@ -412,6 +445,7 @@ class Doc115Subscribe(_PluginBase):
         if refresh:
             try:
                 self.check_offline_tasks(force=False)
+                self._refresh_organized(store)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"115文档订阅与查询：刷新离线进度/搬运失败：{exc}")
         return {"code": 0, "data": store.list()}
@@ -438,6 +472,114 @@ class Doc115Subscribe(_PluginBase):
             if len(keep) != len(items):
                 self._save_pending(keep)
         return {"code": 0, "data": {"deleted": 1 if ok else 0}}
+
+    # ---- 订阅同步（仅电影）--------------------------------------------------
+    @property
+    def subscribed_path(self):
+        return self.get_data_path_local() / "subscribed.json"
+
+    def _load_subscribed(self) -> set:
+        """已按订阅转存过的去重键（tmdb:xxx / title:xxx）。"""
+        try:
+            data = json.loads(self.subscribed_path.read_text(encoding="utf-8"))
+            return set(data) if isinstance(data, list) else set()
+        except Exception:
+            return set()
+
+    def _save_subscribed(self, keys) -> None:
+        try:
+            self.subscribed_path.parent.mkdir(parents=True, exist_ok=True)
+            self.subscribed_path.write_text(
+                json.dumps(sorted(keys), ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"115文档订阅与查询：保存订阅去重记录失败：{exc}")
+
+    def _mp_subscribes(self) -> List[Dict[str, Any]]:
+        """读取 MP 订阅列表。
+
+        走 MoviePilot 自己的 API（``/api/v1/subscribe/``）而不是内部应用层服务——
+        V3 的订阅链重构频繁，公开 API 反而是最稳定的契约。
+        """
+        import urllib.request
+
+        try:
+            from app.core.config import settings
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"115文档订阅与查询：读取 MP 配置失败，无法同步订阅：{exc}")
+            return []
+        token = (getattr(settings, "API_TOKEN", "") or "").strip()
+        ports: List[int] = []
+        for p in (getattr(settings, "PORT", None), 5000, 5001, 3000):
+            try:
+                p = int(p)
+            except (TypeError, ValueError):
+                continue
+            if p and p not in ports:
+                ports.append(p)
+        for port in ports:
+            try:
+                url = (f"http://127.0.0.1:{port}/api/v1/subscribe/"
+                       f"?apikey={token}&page=1&count=500")
+                with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            rows = data.get("data") if isinstance(data, dict) else data
+            if isinstance(rows, list):
+                return rows
+        logger.warning("115文档订阅与查询：读取 MP 订阅列表失败（API_TOKEN 或端口不一致）")
+        return []
+
+    def run_subscribe(self) -> Dict[str, Any]:
+        """按 MP 的**电影**订阅，去「最新电影」工作表找资源并转存到 115。"""
+        if not self._enabled:
+            return {"code": 1, "msg": "插件未启用"}
+        self._ensure_index()
+        if not self._index or not self._index.records:
+            return {"code": 1, "msg": "本地索引为空，请先刷新索引"}
+        subs: List[Dict[str, Any]] = []
+        for s in self._mp_subscribes():
+            if str(s.get("type") or "") != "电影":
+                continue
+            source = str(s.get("media_source") or "")
+            if source in ("", "themoviedb"):
+                tmdbid = str(s.get("media_id") or s.get("tmdbid") or "").strip()
+            else:
+                tmdbid = str(s.get("tmdbid") or "").strip()
+            title = str(s.get("name") or s.get("title") or "").strip()
+            if not title and not tmdbid:
+                continue
+            subs.append({"title": title, "year": str(s.get("year") or "").strip(),
+                         "tmdbid": tmdbid})
+        if not subs:
+            return {"code": 0, "data": {"movie_subs": 0, "matched": 0, "transferred": 0}}
+        pairs = subscribe_sync.match_subscriptions(
+            subscribe_sync.movie_records(self._index.records), subs)
+        done = self._load_subscribed()
+        matched = transferred = skipped = failed = 0
+        for sub, rec in pairs:
+            key = subscribe_sync.transfer_key(sub, rec)
+            if key in done:
+                skipped += 1
+                continue
+            matched += 1
+            try:
+                ok, msg = self.do_transfer(rec)
+            except Exception as exc:  # noqa: BLE001
+                ok, msg = False, f"{type(exc).__name__}: {exc}"
+            if ok:
+                transferred += 1
+                done.add(key)
+                self._save_subscribed(done)
+                logger.info(f"115文档订阅与查询：订阅命中并转存 {rec.get('title')}（{msg}）")
+            else:
+                failed += 1
+                logger.warning(f"115文档订阅与查询：订运转存失败 {rec.get('title')}：{msg}")
+        logger.info(f"115文档订阅与查询：订阅同步完成：电影订阅 {len(subs)} 个，"
+                    f"本次新命中 {matched} 条，转存 {transferred} 条，跳过 {skipped} 条，失败 {failed} 条")
+        return {"code": 0, "data": {"movie_subs": len(subs), "matched": matched,
+                                    "transferred": transferred, "skipped": skipped,
+                                    "failed": failed}}
 
     def _ensure_index(self):
         """内存里没有索引时，从磁盘已保存的文件加载（避免重启/重载后又要重建）。"""
@@ -557,7 +699,7 @@ class Doc115Subscribe(_PluginBase):
                             "kind": kind, "url": url, "hash": "",
                             "staging_path": final_path, "final_path": final_path,
                             "status": "done",
-                            "message": f"已转存到 {final_path}，等待 115 整理",
+                            "message": f"已转存到 {final_path}；整理由 115 助手接管",
                         })
             except Exception as exc:  # noqa: BLE001
                 errs.append(str(exc))

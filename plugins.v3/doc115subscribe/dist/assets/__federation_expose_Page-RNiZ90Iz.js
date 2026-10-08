@@ -189,7 +189,8 @@ const STATUS_STYLE = {
   submitted: { name: '已转存', color: 'blue-darken-2' },
   downloading: { name: '下载中', color: 'blue-darken-2' },
   moving: { name: '搬运中', color: 'amber-darken-3' },
-  done: { name: '已完成', color: 'green-darken-2' },
+  done: { name: '已搬入下载目录', color: 'amber-darken-3' },
+  organized: { name: '已整理', color: 'green-darken-2' },
   failed: { name: '失败', color: 'red-darken-2' },
 };
 function kindName(k) { return (KIND_STYLE[k] || {}).name || k }
@@ -1264,7 +1265,7 @@ return (_ctx, _cache) => {
                           ]),
                           _createVNode(_component_v_progress_linear, {
                             class: "mt-2",
-                            "model-value": r.status === 'done' ? 100 : (r.progress || 0),
+                            "model-value": (r.status === 'done' || r.status === 'organized') ? 100 : (r.progress || 0),
                             color: statusColor(r.status),
                             height: "8",
                             rounded: ""
