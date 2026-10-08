@@ -59,7 +59,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "从腾讯文档追更表读取资源：定时为电影订阅转存到115，并支持插件内跨表搜索转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.6.3"
+    plugin_version = "0.6.4"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -93,6 +93,8 @@ class Doc115Subscribe(_PluginBase):
     _mt_cache: Dict[str, str] = {}
     _tr: Any = None            # 缓存的 115 操作句柄
     _tr_cookie: str = ""       # 缓存对应的 Cookie
+    _offline_next_ts: float = 0.0    # 下一次允许检查离线任务的时间戳（节流）
+    _offline_change_ts: float = 0.0  # 上次进度发生变化的时间戳（用于死种退避）
 
     # ---------------------------------------------------------------------
     def init_plugin(self, config: dict = None):
@@ -107,6 +109,8 @@ class Doc115Subscribe(_PluginBase):
         self._page_msg = ""
         self._tr = None
         self._tr_cookie = ""
+        self._offline_next_ts = 0.0
+        self._offline_change_ts = 0.0
         if config:
             self._enabled = bool(config.get("enabled", False))
             self._doc_url = config.get("doc_url") or self.__class__._doc_url
@@ -144,7 +148,7 @@ class Doc115Subscribe(_PluginBase):
             )
         self._scheduler.add_job(
             self.check_offline_tasks,
-            trigger=IntervalTrigger(seconds=20),
+            trigger=IntervalTrigger(seconds=15),
             name="115文档订阅与查询-离线任务整理",
         )
         self._scheduler.start()
@@ -279,19 +283,22 @@ class Doc115Subscribe(_PluginBase):
                 "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
             self._save_pending(items)
+        # 有新任务 → 让检查立刻开始（不受节流影响）
+        self._offline_next_ts = 0.0
+        self._offline_change_ts = 0.0
         logger.info(f"115文档订阅与查询：已登记离线任务（先落 {submit_path}，"
                     f"完成后搬到 {final_path}）：{rec.get('title')} [{h[:12]}]")
         return h
 
-    def _process_offline(self, tr, store: RecordStore) -> Dict[str, int]:
+    def _process_offline(self, tr, store: RecordStore) -> Dict[str, Any]:
         """检查离线任务：**已下完且已落盘**的，从暂存目录搬到最终目录。
 
-        返回 ``{"pending": n, "finished": n, "moved": n}``。
+        返回 ``{"pending", "finished", "moved", "maxpct", "changed"}``。
         整理由 115 生活事件驱动（搬到 电影/电视剧 目录这个动作本身就是事件），本插件不写 MP 下载历史。
         """
         items = self._load_pending()
         if not items:
-            return {"pending": 0, "finished": 0, "moved": 0}
+            return {"pending": 0, "finished": 0, "moved": 0, "maxpct": 0, "changed": False}
         tasks = tr.list_tasks()
         by_hash: Dict[str, Dict[str, Any]] = {}
         for t in tasks:
@@ -300,6 +307,7 @@ class Doc115Subscribe(_PluginBase):
                 by_hash[h] = t
 
         moved, finished, remain = 0, 0, []
+        maxpct, changed = 0, False
         for it in items:
             h = str(it.get("hash") or "").lower()
             t = by_hash.get(h) or {}
@@ -307,6 +315,10 @@ class Doc115Subscribe(_PluginBase):
                 pct = int(float(t.get("percentDone") or 0))
             except (TypeError, ValueError):
                 pct = 0
+            maxpct = max(maxpct, pct)
+            if pct != it.get("last_pct"):
+                changed = True
+                it["last_pct"] = pct
             name = str(t.get("name") or "")
             staging = str(it.get("staging_path") or "")
             final = str(it.get("final_path") or "")
@@ -339,19 +351,49 @@ class Doc115Subscribe(_PluginBase):
                 self._update_record(store, h, status="failed", progress=100, message=err)
                 logger.warning(f"115文档订阅与查询：离线文件搬运失败 {it.get('title')}：{err}")
                 remain.append(it)
-        if moved or finished:
+        if moved or finished or changed:
             self._save_pending(remain)
-        return {"pending": len(remain), "finished": finished, "moved": moved}
+        return {"pending": len(remain), "finished": finished, "moved": moved,
+                "maxpct": maxpct, "changed": changed}
 
-    def check_offline_tasks(self) -> Dict[str, Any]:
-        """定时/按钮触发：检测离线任务，完成且落盘的自动搬到最终目录。"""
+    def check_offline_tasks(self, force: bool = False) -> Dict[str, Any]:
+        """检查离线任务并按需搬运（**自适应节流**，避免频繁访问 115）。
+
+        * 没有待搬运任务时：直接返回，**一次 115 请求都不发**；
+        * 有任务时按进度自适应间隔：下载中 90s、接近完成(≥99%) 15s、进度 10 分钟没变化 300s；
+        * ``force=True``（按钮 / 刚提交转存）忽略节流立即检查。
+        """
+        now = time.time()
+        if not force and now < self._offline_next_ts:
+            return {"code": 0, "data": {"skipped": 1}}
         tr = self._transfers()
         if not tr:
             return {"code": 1, "msg": "未配置 115 Cookie"}
         try:
             data = self._process_offline(tr, self._records())
         except Exception as exc:  # noqa: BLE001
+            self._offline_next_ts = now + 300          # 出错退避 5 分钟
             return {"code": 1, "msg": f"查询 115 离线任务失败：{exc}"}
+
+        if not data.get("pending"):
+            # 搬完就停：没有待处理任务 → 不再设置下一次检查（也就不会再请求 115）
+            self._offline_next_ts = 0
+            self._offline_change_ts = 0
+        else:
+            if data.get("changed"):
+                self._offline_change_ts = now
+            elif not self._offline_change_ts:
+                self._offline_change_ts = now
+            stalled = self._offline_change_ts and (now - self._offline_change_ts) > 600
+            if stalled:
+                interval = 300                          # 10 分钟没动静 → 死种退避，5 分钟一问
+            elif data.get("maxpct", 0) >= 99:
+                interval = 15                           # 快下完了 → 加密，下完立刻搬
+            else:
+                interval = 90                           # 下载中 → 90 秒一问
+            self._offline_next_ts = now + interval
+            logger.debug(f"115文档订阅与查询：离线检查下一次将于 {interval}s 后（"
+                         f"pending={data['pending']} maxpct={data['maxpct']} stalled={bool(stalled)}）")
         return {"code": 0, "data": data}
 
     @staticmethod
@@ -363,15 +405,13 @@ class Doc115Subscribe(_PluginBase):
     def records_view(self, refresh: bool = True) -> Dict[str, Any]:
         """详情页「转存记录」页数据：历史记录 + 离线任务实时进度。
 
-        ``refresh=True`` 时会**顺带执行一次离线检查与搬运**，所以打开/刷新记录页
-        就能让"已下完还没搬"的条目立即搬走，不必等定时任务。
+        ``refresh=True`` 时按**节流规则**顺带跑一次离线检查（不会因此额外增加 115 请求频率）；
+        想强制立即检查请用按钮（``/check_offline``）。
         """
         store = self._records()
         if refresh:
             try:
-                tr = self._transfers()
-                if tr:
-                    self._process_offline(tr, store)
+                self.check_offline_tasks(force=False)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"115文档订阅与查询：刷新离线进度/搬运失败：{exc}")
         return {"code": 0, "data": store.list()}
@@ -702,7 +742,8 @@ class Doc115Subscribe(_PluginBase):
         return {"code": 0 if ok else 1, "msg": msg}
 
     def api_check_offline(self) -> Dict[str, Any]:
-        return self.check_offline_tasks()
+        """按钮/手动触发：忽略节流，立即检查一次。"""
+        return self.check_offline_tasks(force=True)
 
     def api_records(self, limit: int = 200) -> Dict[str, Any]:
         """详情页「转存记录」页：历史转存/离线记录 + 实时进度。"""
