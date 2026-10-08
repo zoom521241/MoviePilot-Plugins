@@ -69,6 +69,12 @@
       </v-col>
     </v-row>
 
+    <v-tabs v-model="tab" density="comfortable" class="mb-3">
+      <v-tab value="search">搜索</v-tab>
+      <v-tab value="records">转存记录</v-tab>
+    </v-tabs>
+
+    <template v-if="tab === 'search'">
     <v-card v-if="qrImage" variant="outlined" class="mb-3">
       <v-card-text class="text-center">
         <img
@@ -203,6 +209,61 @@
     <v-alert v-else-if="searched" type="info" variant="tonal">
       没有找到匹配的资源，换个关键词试试。
     </v-alert>
+    </template>
+
+    <template v-else>
+      <v-card variant="outlined">
+        <v-card-title class="text-subtitle-1 d-flex align-center flex-wrap">
+          <span>转存记录</span>
+          <v-chip size="x-small" color="primary" class="ml-2">{{ records.length }} 条</v-chip>
+          <span class="text-caption text-medium-emphasis ml-2">（最多保留最近 200 条）</span>
+          <v-spacer />
+          <v-btn size="small" variant="text" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords">
+            刷新
+          </v-btn>
+        </v-card-title>
+        <v-card-text>
+          <v-alert v-if="!records.length" type="info" variant="tonal">
+            还没有转存 / 离线下载记录。去「搜索」页转存一条试试。
+          </v-alert>
+          <v-card v-for="(r, i) in records" :key="i" variant="tonal" class="mb-2">
+            <v-card-text class="py-2">
+              <div class="d-flex align-center flex-wrap">
+                <span class="font-weight-bold text-body-1 text-primary">{{ r.title }}</span>
+                <v-chip size="x-small" :color="r.type === 'movie' ? 'indigo' : 'teal'" class="ml-2">
+                  {{ r.type === 'movie' ? '电影' : '电视剧' }}
+                </v-chip>
+                <v-chip size="x-small" variant="flat" :color="kindColor(r.kind)" class="ml-1">
+                  {{ kindName(r.kind) }}
+                </v-chip>
+                <v-chip size="x-small" variant="flat" :color="statusColor(r.status)" class="ml-1">
+                  {{ statusName(r.status) }}
+                </v-chip>
+                <v-spacer />
+                <span class="text-caption text-medium-emphasis">{{ r.submitted_at }}</span>
+              </div>
+              <div class="text-caption mt-1 text-medium-emphasis" style="word-break: break-all">
+                目标：{{ r.final_path }}
+                <template v-if="r.kind !== '115_share' && r.staging_path && r.staging_path !== r.final_path">
+                  （离线先落 {{ r.staging_path }}）
+                </template>
+              </div>
+              <v-progress-linear
+                class="mt-2"
+                :model-value="r.status === 'done' ? 100 : (r.progress || 0)"
+                :color="statusColor(r.status)"
+                height="8"
+                rounded
+              />
+              <div class="text-caption mt-1">
+                <span class="text-medium-emphasis">{{ r.message || '' }}</span>
+                <span v-if="r.status === 'downloading'" class="ml-2">{{ r.progress || 0 }}%</span>
+              </div>
+            </v-card-text>
+          </v-card>
+        </v-card-text>
+      </v-card>
+    </template>
   </div>
 </template>
 
@@ -223,12 +284,16 @@ const status = reactive({
 })
 const msg = ref('')
 const msgType = ref('info')
-const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false })
+const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false })
 const qrImage = ref('')
 const qrTip = ref('等待扫码')
 const keyword = ref('')
 const results = ref([])
 const searched = ref(false)
+
+// ---- 页签：搜索 / 转存记录 ----
+const tab = ref('search')
+const records = ref([])
 
 // ---- 筛选与分页 ----
 const page = ref(1)
@@ -323,6 +388,37 @@ function specTokens(text) {
 function setMsg(text, type = 'info') {
   msg.value = text
   msgType.value = type
+}
+
+// ---- 转存记录 ----
+const KIND_STYLE = {
+  '115_share': { name: '115分享', color: 'deep-purple' },
+  magnet: { name: '磁力', color: 'blue-darken-3' },
+  ed2k: { name: 'ed2k', color: 'teal-darken-3' },
+}
+const STATUS_STYLE = {
+  submitted: { name: '已转存', color: 'blue-darken-2' },
+  downloading: { name: '下载中', color: 'blue-darken-2' },
+  moving: { name: '搬运中', color: 'amber-darken-3' },
+  done: { name: '已完成', color: 'green-darken-2' },
+  failed: { name: '失败', color: 'red-darken-2' },
+}
+function kindName(k) { return (KIND_STYLE[k] || {}).name || k }
+function kindColor(k) { return (KIND_STYLE[k] || {}).color || 'grey' }
+function statusName(s) { return (STATUS_STYLE[s] || {}).name || s }
+function statusColor(s) { return (STATUS_STYLE[s] || {}).color || 'grey' }
+
+async function loadRecords() {
+  busy.records = true
+  try {
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 60000 }))
+    if (res.code === 0) records.value = res.data || []
+    else setMsg(res.msg || '读取转存记录失败', 'error')
+  } catch (e) {
+    setMsg(`读取转存记录失败：${describeError(e)}`, 'error')
+  } finally {
+    busy.records = false
+  }
 }
 
 function close() {
@@ -539,7 +635,13 @@ async function transfer(pageIdx, to) {
   }
 }
 
-onMounted(loadStatus)
+onMounted(() => {
+  loadStatus()
+  loadRecords()
+})
+watch(tab, (v) => {
+  if (v === 'records') loadRecords()
+})
 onBeforeUnmount(stopQrTimer)
 </script>
 

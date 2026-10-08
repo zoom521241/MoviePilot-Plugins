@@ -27,7 +27,7 @@
       </v-row>
 
       <v-row dense>
-        <v-col cols="12" md="6">
+        <v-col cols="12">
           <v-switch
             v-model="cfg.create_subdir"
             color="primary"
@@ -35,20 +35,7 @@
             label="转存时按「片名 (年份)」建子目录（推荐开启，便于 MP 整理识别）"
           />
         </v-col>
-        <v-col cols="12" md="6">
-          <v-switch
-            v-model="cfg.record_history"
-            color="primary"
-            hide-details
-            label="转存后写入 MP 下载历史（触发整理 / STRM 生成，强烈建议开启）"
-          />
-        </v-col>
       </v-row>
-
-      <v-alert v-if="!cfg.record_history" type="warning" variant="tonal" density="comfortable" class="mt-3">
-        关闭「写入下载历史」后，MP 不会知道这次转存，文件会一直留在下载目录、不会被整理，
-        也不会触发 STRM 生成与媒体库刷新。
-      </v-alert>
 
       <v-text-field
         v-model="cfg.doc_url"
@@ -103,6 +90,17 @@
         </v-col>
       </v-row>
 
+      <v-text-field
+        v-model="cfg.magnet_staging_path"
+        label="磁力 / ed2k 暂存目录"
+        variant="outlined"
+        density="comfortable"
+        class="mt-3"
+        hide-details
+        hint="磁力/ed2k 先离线下载到这里，完成后由本插件走「115网盘Plus」搬到上面的电影/电视剧目录（115 分享链接不受影响，直接进最终目录）"
+        persistent-hint
+      />
+
       <v-row dense class="mt-3">
         <v-col cols="12" md="6">
           <v-text-field
@@ -150,12 +148,12 @@ const DEFAULTS = {
   p115_cookie: '',
   movie_path: '/115-影视/115-downloads/电影',
   tv_path: '/115-影视/115-downloads/电视剧',
+  magnet_staging_path: '/115-影视/115-downloads/磁力链接',
   subscribe_enabled: true,
   subscribe_cron: '0 21 * * *',
   index_cron: '0 6 * * *',
   use_agent: true,
   create_subdir: true,
-  record_history: true,
 }
 
 const cfg = reactive({ ...DEFAULTS })
