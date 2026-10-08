@@ -125,7 +125,12 @@ class P115Transfer:
         """只读校验分享是否可用，返回 (是否可用, 不可用原因)。
 
         115 对「分享已取消 / 已过期 / 提取码错误」等情况，在转存接口里只回一句
-        「参数错误」，很难排查；先用 share_info 探一次，就能给出确切原因。
+        「参数错误」，很难排查；先探一次分享信息，就能给出确切原因。
+
+        ⚠️ 必须用 ``share_snap``（``/share/snap``，第三方分享接口）而不是
+        ``share_info``（``/share/shareinfo``，**只能查当前账号自己的分享**）：
+        用 share_info 查别人的分享，115 一律返回「分享已取消」，会把
+        **所有**第三方 115 分享误判为失效。
         """
         url = normalize_115_share(share_url)
         info = share_extract_payload(url)
@@ -134,9 +139,12 @@ class P115Transfer:
             return False, "无法解析分享链接"
         try:
             self._limiter.wait()
-            resp = self.client.share_info({
+            resp = self.client.share_snap({
                 "share_code": code,
                 "receive_code": info.get("receive_code") or "",
+                "cid": 0,
+                "limit": 1,
+                "offset": 0,
             })
         except Exception:  # noqa: BLE001
             return True, ""      # 预检本身异常就不拦，交给正式转存去判断

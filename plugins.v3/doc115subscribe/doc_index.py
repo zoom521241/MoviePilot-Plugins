@@ -17,7 +17,7 @@ except ImportError:  # 直接作为顶层模块加载（脚本/单测）
     import doc_parser
     from doc_client import DocError, TencentDocsClient
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 
 
 class DocIndex:
@@ -84,6 +84,8 @@ class DocIndex:
                 "quality_score": doc_parser.quality_score(rec),
                 "qtext": rec.get("qtext", ""),
                 "bundle": rec.get("bundle", False),
+                "sheet_bundle": rec.get("sheet_bundle", False),
+                "no_link": rec.get("no_link", False),
                 "links": links,
             })
         return out

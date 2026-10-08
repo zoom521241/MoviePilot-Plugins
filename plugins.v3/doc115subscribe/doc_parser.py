@@ -13,10 +13,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:  # 作为包的一部分加载（MoviePilot 运行时）
     from .link_router import (LINK_115_SHARE, LINK_ED2K, LINK_MAGNET,
-                              classify_link, dedup_links, extract_links)
+                              LINK_OTHER_HTTP, classify_link, dedup_links,
+                              extract_links, is_resource_link, normalize_url)
 except ImportError:  # 直接作为顶层模块加载（脚本/单测）
     from link_router import (LINK_115_SHARE, LINK_ED2K, LINK_MAGNET,
-                             classify_link, dedup_links, extract_links)
+                             LINK_OTHER_HTTP, classify_link, dedup_links,
+                             extract_links, is_resource_link, normalize_url)
 
 # 工作表 -> 资源大类
 SHEET_KINDS = [
@@ -32,6 +34,8 @@ SHEET_KINDS = [
 ]
 
 NAME_HEADS = ("名称", "名字", "标题", "影视名称", "片名", "剧名", "资源名", "影片")
+# 英文表头（如 高清影视之家 的 Title/Name 列）；必须整格等于才算，避免误伤含 name 的片名
+NAME_HEADS_EN = ("title", "name", "movie", "film")
 LINK_HEADS = ("链接", "转存", "地址", "下载")
 RES_HEADS = ("分辨率", "清晰度", "画质", "规格")
 SUB_HEADS = ("字幕", "语言", "中字")
@@ -73,6 +77,16 @@ def media_type_of(sheet_name: str, title: str = "") -> str:
     return "movie"
 
 
+def is_name_head(text: str) -> bool:
+    """判断一个单元格是否是「名称/标题」表头（含英文 Title/Name，需整格匹配）。"""
+    t = (text or "").strip()
+    if not t or len(t) > 8:
+        return False
+    if any(h in t for h in NAME_HEADS):
+        return True
+    return t.lower() in NAME_HEADS_EN
+
+
 def _find_header(grid: List[List[str]]) -> Tuple[int, Optional[int]]:
     """在前 12 行里找表头 -> (表头行号, 名称列号)。找不到返回 (-1, None)。"""
     best = (-1, None, -1)
@@ -83,8 +97,7 @@ def _find_header(grid: List[List[str]]) -> Tuple[int, Optional[int]]:
             continue
         name_col = None
         for ci, c in enumerate(row):
-            txt = (c or "").strip()
-            if any(h in txt for h in NAME_HEADS) and len(txt) <= 8:
+            if is_name_head(c):
                 name_col = ci
                 break
         score = non_empty + (10 if name_col is not None else 0)
@@ -93,9 +106,39 @@ def _find_header(grid: List[List[str]]) -> Tuple[int, Optional[int]]:
     return best[0], best[1]
 
 
+def _collect_links(row: List[str], href_row: List[Optional[str]],
+                   include_external: bool = False) -> List[Tuple[str, str]]:
+    """收集一行里的资源链接：单元格文本 + 单元格超链接 -> [(kind, url)]。
+
+    超链接里可能带错误的前缀（如 ``https://ed2k://...``），统一走 normalize_url。
+    """
+    raw: List[Tuple[str, str]] = []
+    for c in (row or []):
+        raw.extend(extract_links(c or "", include_other=include_external))
+    for href in (href_row or []):
+        if not href:
+            continue
+        u = normalize_url(href)
+        k = classify_link(u)
+        if k is None:
+            continue
+        if k == LINK_OTHER_HTTP and not include_external:
+            continue
+        raw.append((k, u.rstrip("#&")))
+    return dedup_links(raw)
+
+
 def parse_sheet(sheet_id: str, sheet_name: str,
                 grid: List[List[str]], hrefs: List[List[Optional[str]]]) -> List[Dict[str, Any]]:
-    """把一张工作表解析成资源记录列表。"""
+    """把一张工作表解析成资源记录列表。
+
+    关键（真实文档踩坑）：
+      * 链接**不一定在数据行里**——很多「合集/目录」表的表头挂着一个整表
+        「打包链接」，数据行只有「序号 + 名称」。这类表要把表头链接**下放**到
+        每一行，并标记 ``sheet_bundle=True``（整表打包，大包）。
+      * 整表没有任何资源链接（只在表头挂了个外部文档链接，如 KDocs）的表：
+        仍然保留记录用于**搜索**，标记 ``no_link=True``，并把外部链接作为参考展示。
+    """
     if not grid:
         return []
     hdr_row, name_col = _find_header(grid)
@@ -104,8 +147,10 @@ def parse_sheet(sheet_id: str, sheet_name: str,
     # 标题列兜底：取平均文本最长的列
     if name_col is None:
         best_len, best_col = 0, 0
-        for ci in range(len(grid[0])):
-            avg = sum(len(grid[r][ci]) for r in range(start, len(grid))) / max(1, len(grid) - start)
+        ncols = max((len(r) for r in grid), default=0)
+        for ci in range(ncols):
+            avg = sum(len(grid[r][ci]) for r in range(start, len(grid))
+                      if ci < len(grid[r])) / max(1, len(grid) - start)
             if avg > best_len:
                 best_len, best_col = avg, ci
         name_col = best_col
@@ -122,29 +167,47 @@ def parse_sheet(sheet_id: str, sheet_name: str,
             elif sub_col is None and any(h in t for h in SUB_HEADS):
                 sub_col = ci
 
+    def href_row(r: int) -> List[Optional[str]]:
+        return hrefs[r] if r < len(hrefs) else []
+
+    # 表头区（表头行之前）的链接：整表「打包链接」通常挂在这里
+    header_links: List[Tuple[str, str]] = []
+    for r in range(0, start):
+        header_links.extend(_collect_links(grid[r], href_row(r)))
+    header_links = dedup_links(header_links)
+
+    # 表头里的普通网页链接（如外部 KDocs 文档），用于「纯列表表」的参考展示
+    header_http: List[str] = []
+    for r in range(0, start):
+        for href in href_row(r):
+            if href and classify_link(normalize_url(href)) == LINK_OTHER_HTTP:
+                header_http.append(normalize_url(href).rstrip("#&"))
+    header_http = list(dict.fromkeys(header_http))
+
     records: List[Dict[str, Any]] = []
     link_counter: Dict[str, int] = {}
+    any_resource = bool(header_links)
 
     for r in range(start, len(grid)):
         row = grid[r]
         if not any((c or "").strip() for c in row):
             continue
         title = (row[name_col] if name_col < len(row) else "").strip()
-        if not title or any(h in title for h in NAME_HEADS):
+        if not title or is_name_head(title):
             continue
 
-        # 收集整行的资源链接：单元格文本 + 单元格超链接
-        raw_links: List[Tuple[str, str]] = []
-        for ci, c in enumerate(row):
-            raw_links.extend(extract_links(c or ""))
-        for ci, href in enumerate(hrefs[r] if r < len(hrefs) else []):
-            if href:
-                k = classify_link(href)
-                if k and k != "http":
-                    raw_links.append((k, href.rstrip("#&")))
-        links = dedup_links(raw_links)
-        if not links:
-            continue
+        own = _collect_links(row, href_row(r))
+        if own:
+            links = own
+            sheet_bundle = False
+        elif header_links:
+            links = header_links          # 整表打包链接 -> 下放到数据行
+            sheet_bundle = True
+        else:
+            links = []
+            sheet_bundle = False
+        if any(is_resource_link(k) for k, _ in links):
+            any_resource = True
 
         year = ""
         m = _YEAR_RE.search(title)
@@ -179,11 +242,22 @@ def parse_sheet(sheet_id: str, sheet_name: str,
             "spec": spec[:300],
             "qtext": qtext,
             "links": links,
+            "sheet_bundle": sheet_bundle,
         })
 
-    # 标记「打包链接」：同一个链接被很多行共用
+    # 整表没有任何资源链接（如只在表头挂了外部文档链接的纯列表表）：仅搜索
+    if records and not any_resource:
+        ref = [(LINK_OTHER_HTTP, u) for u in header_http]
+        for rec in records:
+            rec["no_link"] = True
+            rec["links"] = list(ref)
+
+    # 标记「打包链接」：同一个链接被很多行共用（或整表共用表头打包链接）
     data_rows = max(1, len(records))
     for rec in records:
+        if rec.get("sheet_bundle"):
+            rec["bundle"] = True
+            continue
         rec["bundle"] = any(link_counter.get(u, 0) >= 3 and link_counter.get(u, 0) >= 0.1 * data_rows
                             for _, u in rec["links"])
     return records

@@ -110,6 +110,19 @@ function linkColor(kind) { return (LINK_STYLE[kind] || {}).color || 'grey' }
 function linkName(kind) { return (LINK_STYLE[kind] || {}).name || kind }
 function linkIcon(kind) { return (LINK_STYLE[kind] || {}).icon || 'mdi-link' }
 
+function shortUrl(u) {
+  let t = String(u || '');
+  t = t.replace(/^https?:\/\//i, '');
+  if (/^ed2k:\/\//i.test(t)) { const p = t.split('|'); return p.length > 2 ? p[2] : t }
+  return t.length > 44 ? t.slice(0, 44) + '…' : t;
+}
+function linkHref(u) {
+  let t = String(u || '');
+  if (/^(ed2k:\/\/|magnet:)/i.test(t)) return t;
+  if (!/^https?:\/\//i.test(t)) t = 'https://' + t;
+  return t;
+}
+
 const SPEC_RE = /(4K|2160[pP]|1080[pP]|720[pP]|REMUX|UHD|HDR10\+?|HDR|杜比视界|Dolby\s?Vision|Atmos|蓝光原盘|原盘|中文字幕|简繁|简体|繁体|国语|双语|粤语|无中字)/gi;
 function specTokens(text) {
   const t = (text || '').slice(0, 100);
@@ -841,19 +854,37 @@ return (_ctx, _cache) => {
                                         variant: "flat",
                                         color: linkColor(lk.kind),
                                         "prepend-icon": linkIcon(lk.kind),
+                                        href: linkHref(lk.url),
+                                        target: "_blank",
+                                        rel: "noopener",
                                         class: "mr-1"
                                       }, {
                                         default: _withCtx(() => [
-                                          _createTextVNode(_toDisplayString(linkName(lk.kind)), 1)
+                                          _createTextVNode(_toDisplayString(linkName(lk.kind)) + " " + _toDisplayString(shortUrl(lk.url)), 1)
                                         ]),
                                         _: 2
-                                      }, 1032, ["color", "prepend-icon"]))
+                                      }, 1032, ["color", "prepend-icon", "href"]))
                                     }), 128))
                                   ])
                                 ]),
                                 _: 2
                               }, 1024),
-                              _createVNode(_component_v_col, {
+                              (r.sheet_bundle || r.no_link)
+                              ? (_openBlock(), _createBlock(_component_v_col, {
+                                key: 1,
+                                cols: "12",
+                                md: "4"
+                              }, {
+                                default: _withCtx(() => [
+                                  _createElementVNode("div", { class: "text-caption text-medium-emphasis" },
+                                    _toDisplayString(r.no_link
+                                      ? "该表为纯列表，资源在外部文档：请点上方的链接自行查看（本插件不转存）"
+                                      : "整表打包链接（大包）：请点上方的 115 链接进入网盘自行转存（不按行转存整包）"), 1)
+                                ]),
+                                _: 2
+                              }, 1024))
+                              : (_openBlock(), _createBlock(_Fragment, { key: 2 }, [
+_createVNode(_component_v_col, {
                                 cols: "6",
                                 md: "2"
                               }, {
@@ -891,6 +922,7 @@ return (_ctx, _cache) => {
                                 ]),
                                 _: 2
                               }, 1024)
+                              ], 64))
                             ]),
                             _: 2
                           }, 1024)
