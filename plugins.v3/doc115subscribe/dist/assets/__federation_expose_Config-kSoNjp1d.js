@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
 
-const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,toDisplayString:_toDisplayString,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,createElementVNode:_createElementVNode} = await importShared('vue');
+const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,createVNode:_createVNode,createTextVNode:_createTextVNode,withCtx:_withCtx,toDisplayString:_toDisplayString,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode} = await importShared('vue');
 
 
 const {onMounted,reactive,ref} = await importShared('vue');
@@ -13,7 +13,7 @@ const _sfc_main = {
   model: { type: Object, default: () => ({}) },
   api: { type: Object, default: () => ({ get: async () => ({}), post: async () => ({}) }) },
 },
-  emits: ['action'],
+  emits: ['action', 'close'],
   setup(__props, { emit: __emit }) {
 
 const props = __props;
@@ -73,6 +73,10 @@ async function load(showTip = false) {
   }
 }
 
+function close() {
+  emit('close');
+}
+
 async function save() {
   if (saving.value || loading.value) return
   if ((cfg.clear_tencent_cookie && cfg.tencent_cookie.trim()) || (cfg.clear_p115_cookie && cfg.p115_cookie.trim())) {
@@ -110,6 +114,9 @@ function unwrap(res) {
 onMounted(() => load());
 
 return (_ctx, _cache) => {
+  const _component_v_spacer = _resolveComponent("v-spacer");
+  const _component_v_icon = _resolveComponent("v-icon");
+  const _component_v_btn = _resolveComponent("v-btn");
   const _component_v_card_title = _resolveComponent("v-card-title");
   const _component_v_alert = _resolveComponent("v-alert");
   const _component_v_switch = _resolveComponent("v-switch");
@@ -119,17 +126,33 @@ return (_ctx, _cache) => {
   const _component_v_text_field = _resolveComponent("v-text-field");
   const _component_v_checkbox = _resolveComponent("v-checkbox");
   const _component_v_card_text = _resolveComponent("v-card-text");
-  const _component_v_btn = _resolveComponent("v-btn");
-  const _component_v_spacer = _resolveComponent("v-spacer");
   const _component_v_card_actions = _resolveComponent("v-card-actions");
   const _component_v_card = _resolveComponent("v-card");
 
   return (_openBlock(), _createBlock(_component_v_card, { variant: "outlined" }, {
     default: _withCtx(() => [
-      _createVNode(_component_v_card_title, { class: "text-subtitle-1" }, {
-        default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
-          _createTextVNode("115文档订阅与查询 · 设置", -1)
-        ]))]),
+      _createVNode(_component_v_card_title, { class: "text-subtitle-1 d-flex align-center" }, {
+        default: _withCtx(() => [
+          _cache[17] || (_cache[17] = _createElementVNode("span", null, "115文档订阅与查询 · 设置", -1)),
+          _createVNode(_component_v_spacer),
+          _createVNode(_component_v_btn, {
+            icon: "",
+            size: "small",
+            variant: "text",
+            title: "关闭",
+            onClick: close
+          }, {
+            default: _withCtx(() => [
+              _createVNode(_component_v_icon, null, {
+                default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
+                  _createTextVNode("mdi-close", -1)
+                ]))]),
+                _: 1
+              })
+            ]),
+            _: 1
+          })
+        ]),
         _: 1
       }),
       _createVNode(_component_v_card_text, null, {
@@ -229,7 +252,7 @@ return (_ctx, _cache) => {
             "hide-details": "",
             label: "允许订阅获取新资源版本"
           }, null, 8, ["modelValue"]),
-          _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "开启后，同一影片出现不同资源链接时可以重新获取，可能产生多个版本。", -1)),
+          _cache[18] || (_cache[18] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "开启后，同一影片出现不同资源链接时可以重新获取，可能产生多个版本。", -1)),
           _createVNode(_component_v_text_field, {
             modelValue: cfg.doc_url,
             "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((cfg.doc_url) = $event)),
@@ -382,19 +405,29 @@ return (_ctx, _cache) => {
             loading: loading.value,
             onClick: _cache[15] || (_cache[15] = $event => (load(true)))
           }, {
-            default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
+            default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
               _createTextVNode("重新读取配置", -1)
             ]))]),
             _: 1
           }, 8, ["loading"]),
           _createVNode(_component_v_spacer),
           _createVNode(_component_v_btn, {
+            variant: "text",
+            "prepend-icon": "mdi-close",
+            onClick: close
+          }, {
+            default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+              _createTextVNode("关闭", -1)
+            ]))]),
+            _: 1
+          }),
+          _createVNode(_component_v_btn, {
             color: "primary",
             loading: saving.value,
             "prepend-icon": "mdi-content-save",
             onClick: save
           }, {
-            default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+            default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
               _createTextVNode("保存配置", -1)
             ]))]),
             _: 1

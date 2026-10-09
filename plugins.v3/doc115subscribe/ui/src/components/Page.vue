@@ -233,35 +233,35 @@
         <v-card-title class="text-subtitle-1 d-flex align-center flex-wrap">
           <span>转存记录</span>
           <v-chip size="x-small" color="primary" class="ml-2">{{ records.length }} 条</v-chip>
-          <span class="text-caption text-medium-emphasis ml-2">
-            （整理结果以 MP 的「整理记录」为准核对；最多保留最近 200 条）
-          </span>
           <v-spacer />
-          <v-btn
-            size="small"
-            variant="text"
-            color="primary"
-            prepend-icon="mdi-check-decagram-outline"
-            :loading="busy.verify"
-            :disabled="!records.length"
-            @click="verifyRecords"
-          >
-            核对整理
-          </v-btn>
-          <v-btn size="small" variant="text" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords">
-            刷新
-          </v-btn>
-          <v-btn
-            size="small"
-            variant="text"
-            color="error"
-            prepend-icon="mdi-delete-sweep"
-            :disabled="!records.length"
-            @click="clearRecords"
-          >
-            清空
-          </v-btn>
+          <v-btn-group variant="text" density="comfortable" divided>
+            <v-btn
+              size="small"
+              color="primary"
+              prepend-icon="mdi-check-decagram-outline"
+              :loading="busy.verify"
+              :disabled="!records.length"
+              @click="verifyRecords"
+            >
+              核对整理
+            </v-btn>
+            <v-btn size="small" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords">
+              刷新
+            </v-btn>
+            <v-btn
+              size="small"
+              color="error"
+              prepend-icon="mdi-delete-sweep"
+              :disabled="!records.length"
+              @click="clearRecords"
+            >
+              清空
+            </v-btn>
+          </v-btn-group>
         </v-card-title>
+        <v-card-subtitle class="text-caption pt-0">
+          整理结果以 MoviePilot 的「整理记录」为准核对；最多保留最近 200 条。
+        </v-card-subtitle>
         <v-card-text>
           <v-alert v-if="!records.length" type="info" variant="tonal">
             还没有转存 / 离线下载记录。去「搜索」页转存一条试试。

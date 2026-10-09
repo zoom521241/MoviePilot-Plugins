@@ -1,6 +1,12 @@
 <template>
   <v-card variant="outlined">
-    <v-card-title class="text-subtitle-1">115文档订阅与查询 · 设置</v-card-title>
+    <v-card-title class="text-subtitle-1 d-flex align-center">
+      <span>115文档订阅与查询 · 设置</span>
+      <v-spacer />
+      <v-btn icon size="small" variant="text" title="关闭" @click="close">
+        <v-icon>mdi-close</v-icon>
+      </v-btn>
+    </v-card-title>
     <v-card-text>
       <v-alert v-if="msg" :type="msgType" variant="tonal" density="comfortable" class="mb-3">{{ msg }}</v-alert>
 
@@ -131,6 +137,7 @@
     <v-card-actions>
       <v-btn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load(true)">重新读取配置</v-btn>
       <v-spacer />
+      <v-btn variant="text" prepend-icon="mdi-close" @click="close">关闭</v-btn>
       <v-btn color="primary" :loading="saving" prepend-icon="mdi-content-save" @click="save">保存配置</v-btn>
     </v-card-actions>
   </v-card>
@@ -143,7 +150,7 @@ const props = defineProps({
   model: { type: Object, default: () => ({}) },
   api: { type: Object, default: () => ({ get: async () => ({}), post: async () => ({}) }) },
 })
-const emit = defineEmits(['action'])
+const emit = defineEmits(['action', 'close'])
 
 const DEFAULTS = {
   enabled: false,
@@ -197,6 +204,10 @@ async function load(showTip = false) {
   } finally {
     loading.value = false
   }
+}
+
+function close() {
+  emit('close')
 }
 
 async function save() {

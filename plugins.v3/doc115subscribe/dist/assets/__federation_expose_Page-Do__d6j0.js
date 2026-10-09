@@ -613,6 +613,8 @@ return (_ctx, _cache) => {
   const _component_v_card_title = _resolveComponent("v-card-title");
   const _component_v_progress_linear = _resolveComponent("v-progress-linear");
   const _component_v_pagination = _resolveComponent("v-pagination");
+  const _component_v_btn_group = _resolveComponent("v-btn-group");
+  const _component_v_card_subtitle = _resolveComponent("v-card-subtitle");
 
   return (_openBlock(), _createElementBlock("div", _hoisted_1, [
     _createVNode(_component_v_row, {
@@ -1364,48 +1366,59 @@ return (_ctx, _cache) => {
                   ]),
                   _: 1
                 }),
-                _cache[41] || (_cache[41] = _createElementVNode("span", { class: "text-caption text-medium-emphasis ml-2" }, " （整理结果以 MP 的「整理记录」为准核对；最多保留最近 200 条） ", -1)),
                 _createVNode(_component_v_spacer),
-                _createVNode(_component_v_btn, {
-                  size: "small",
+                _createVNode(_component_v_btn_group, {
                   variant: "text",
-                  color: "primary",
-                  "prepend-icon": "mdi-check-decagram-outline",
-                  loading: busy.verify,
-                  disabled: !records.value.length,
-                  onClick: verifyRecords
+                  density: "comfortable",
+                  divided: ""
                 }, {
-                  default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
-                    _createTextVNode(" 核对整理 ", -1)
-                  ]))]),
+                  default: _withCtx(() => [
+                    _createVNode(_component_v_btn, {
+                      size: "small",
+                      color: "primary",
+                      "prepend-icon": "mdi-check-decagram-outline",
+                      loading: busy.verify,
+                      disabled: !records.value.length,
+                      onClick: verifyRecords
+                    }, {
+                      default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
+                        _createTextVNode(" 核对整理 ", -1)
+                      ]))]),
+                      _: 1
+                    }, 8, ["loading", "disabled"]),
+                    _createVNode(_component_v_btn, {
+                      size: "small",
+                      "prepend-icon": "mdi-refresh",
+                      loading: busy.records,
+                      onClick: loadRecords
+                    }, {
+                      default: _withCtx(() => [...(_cache[38] || (_cache[38] = [
+                        _createTextVNode(" 刷新 ", -1)
+                      ]))]),
+                      _: 1
+                    }, 8, ["loading"]),
+                    _createVNode(_component_v_btn, {
+                      size: "small",
+                      color: "error",
+                      "prepend-icon": "mdi-delete-sweep",
+                      disabled: !records.value.length,
+                      onClick: clearRecords
+                    }, {
+                      default: _withCtx(() => [...(_cache[39] || (_cache[39] = [
+                        _createTextVNode(" 清空 ", -1)
+                      ]))]),
+                      _: 1
+                    }, 8, ["disabled"])
+                  ]),
                   _: 1
-                }, 8, ["loading", "disabled"]),
-                _createVNode(_component_v_btn, {
-                  size: "small",
-                  variant: "text",
-                  "prepend-icon": "mdi-refresh",
-                  loading: busy.records,
-                  onClick: loadRecords
-                }, {
-                  default: _withCtx(() => [...(_cache[38] || (_cache[38] = [
-                    _createTextVNode(" 刷新 ", -1)
-                  ]))]),
-                  _: 1
-                }, 8, ["loading"]),
-                _createVNode(_component_v_btn, {
-                  size: "small",
-                  variant: "text",
-                  color: "error",
-                  "prepend-icon": "mdi-delete-sweep",
-                  disabled: !records.value.length,
-                  onClick: clearRecords
-                }, {
-                  default: _withCtx(() => [...(_cache[39] || (_cache[39] = [
-                    _createTextVNode(" 清空 ", -1)
-                  ]))]),
-                  _: 1
-                }, 8, ["disabled"])
+                })
               ]),
+              _: 1
+            }),
+            _createVNode(_component_v_card_subtitle, { class: "text-caption pt-0" }, {
+              default: _withCtx(() => [...(_cache[41] || (_cache[41] = [
+                _createTextVNode(" 整理结果以 MoviePilot 的「整理记录」为准核对；最多保留最近 200 条。 ", -1)
+              ]))]),
               _: 1
             }),
             _createVNode(_component_v_card_text, null, {

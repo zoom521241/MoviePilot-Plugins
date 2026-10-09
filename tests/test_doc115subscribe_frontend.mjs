@@ -16,7 +16,7 @@ function component(name, api) {
   const helpers = { ...vue, onMounted() {}, onBeforeUnmount() {} }
   const names = name === 'Page'
     ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterLink,busy,resultVersion,close,startQr,checkQr,qrSessionId,records,verifyRecords'
-    : 'load,save,cfg,secrets,msg,msgType'
+    : 'load,save,cfg,secrets,msg,msgType,close'
   const setup = new Function('helpers', 'suppliedProps', 'suppliedEmit', `
     const { computed, reactive, ref, watch, onMounted, onBeforeUnmount } = helpers;
     const defineProps = () => suppliedProps;
@@ -160,6 +160,16 @@ test('successful config save cannot ask the host to overwrite stored secrets', a
   assert.equal(payload.clear_tencent_cookie, false)
   assert.equal(config.emitted.some(([event]) => event === 'save'), false)
   assert.equal(config.msgType.value, 'success')
+})
+
+test('config page exposes a close action that tells the host to dismiss it', async () => {
+  const config = component('Config', {
+    get: async () => ({ code: 0, data: {} }),
+    post: async () => ({ code: 0 }),
+  })
+  assert.equal(typeof config.close, 'function')
+  config.close()
+  assert.equal(config.emitted.some(([event]) => event === 'close'), true)
 })
 
 test('QR checks do not overlap and pass the visible session identity', async () => {
