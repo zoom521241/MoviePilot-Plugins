@@ -604,6 +604,34 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.plugin.saved_configs[-1]["tencent_cookie"], "synthetic-new-cookie")
         current.close.assert_called_once()
 
+    def test_background_organize_check_skips_when_nothing_pending(self):
+        """没有未确认的记录时，后台核对不查任何接口。"""
+        store = Mock()
+        store.list.return_value = [
+            {"id": "1", "status": "organized", "organization_confirmed": True, "title": "done one"},
+        ]
+        with patch.object(self.plugin, "_records", return_value=store), \
+                patch.object(self.plugin, "verify_organization") as verify:
+            data = self.plugin.check_organization()
+        self.assertTrue(data["data"]["skipped"])
+        verify.assert_not_called()
+
+    def test_background_organize_check_runs_for_pending_records(self):
+        """有「已搬入下载目录但未确认」的记录时，后台核对强制跑一次。"""
+        store = Mock()
+        store.list.return_value = [
+            {"id": "1", "status": "done", "title": "share one"},
+            {"id": "2", "status": "unverified", "title": "legacy one"},
+            {"id": "3", "status": "downloading", "title": "still downloading"},
+        ]
+        summary = {"checked": 2, "confirmed": 2, "partial": 0, "failed": 0}
+        with patch.object(self.plugin, "_records", return_value=store), \
+                patch.object(self.plugin, "verify_organization", return_value=dict(summary)) as verify:
+            data = self.plugin.check_organization()
+        verify.assert_called_once_with(force=True)
+        self.assertEqual(data["data"]["pending"], 2)
+        self.assertEqual(data["data"]["confirmed"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

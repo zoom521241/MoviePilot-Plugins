@@ -38,7 +38,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.9.3"
+    plugin_version = "0.9.4"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -141,6 +141,9 @@ class Doc115Subscribe(_PluginBase):
                     id="doc115-subscribe", name="115文档电影订阅", **options)
             scheduler.add_job(self.check_offline_tasks, trigger=IntervalTrigger(seconds=15),
                               id="doc115-offline", name="115文档离线搬运", **options)
+            # 后台自动核对「本次资源是否已整理入库」：只调本机 MP 的整理记录接口，不访问 115。
+            scheduler.add_job(self.check_organization, trigger=IntervalTrigger(minutes=5),
+                              id="doc115-organize", name="115文档整理核对", **options)
             self._scheduler = scheduler
             try:
                 scheduler.start()
@@ -803,6 +806,7 @@ class Doc115Subscribe(_PluginBase):
                    ("check_offline", self.api_check_offline, "POST"), ("records", self.api_records, "GET"),
                    ("records_delete", self.api_records_delete, "POST"), ("cancel_task", self.api_cancel_task, "POST"),
                    ("records_verify", self.api_records_verify, "POST"),
+                   ("check_organization", self.check_organization, "POST"),
                    ("retry_task", self.api_retry_task, "POST"), ("run_subscribe", self.run_subscribe, "POST"),
                    ("qr_start", self.api_qr_start, "GET"), ("qr_status", self.api_qr_check, "GET")]
         return [{"path": "/" + name, "endpoint": endpoint, "auth": "bear", "methods": [method], "summary": name}
@@ -1120,6 +1124,33 @@ class Doc115Subscribe(_PluginBase):
                 return {"code": 0, "data": self.verify_organization(force=True)}
             except Exception as exc:
                 return {"code": 1, "msg": self._error(exc)}
+
+    def check_organization(self):
+        """后台定时核对「本次转存/离线下载的资源是否已整理入库」（每 5 分钟）。
+
+        只在存在**未确认**的记录时才去查 MP 的整理记录；没有待核对项就直接跳过，
+        不产生任何请求。只调本机 MP 接口，不访问 115。
+        """
+        self._ensure_runtime()
+        if not self._enabled:
+            return {"code": 1, "msg": "插件未启用"}
+        pending_states = ("done", "unverified", "organized", "partial", "missing")
+        try:
+            store = self._records()
+            pending = [r for r in store.list()
+                       if not r.get("organization_confirmed")
+                       and str(r.get("status") or "") in pending_states]
+        except Exception as exc:  # noqa: BLE001
+            return {"code": 1, "msg": self._error(exc)}
+        if not pending:
+            return {"code": 0, "data": {"skipped": True, "reason": "没有待核对的记录"}}
+        with self._operation_lock:
+            try:
+                data = self.verify_organization(force=True)
+            except Exception as exc:  # noqa: BLE001
+                return {"code": 1, "msg": self._error(exc)}
+        data["pending"] = len(pending)
+        return {"code": 0, "data": data}
 
     def api_records_delete(self, payload: dict = None):
         with self._operation_lock:

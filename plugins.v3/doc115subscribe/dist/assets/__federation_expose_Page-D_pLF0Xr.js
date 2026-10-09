@@ -234,7 +234,7 @@ function startRecTimer() {
   stopRecTimer();
   recTimer = setInterval(() => {
     if (tab.value !== 'records') return
-    if (!records.value.some(isActiveTask)) return
+    if (!records.value.some((r) => isActiveTask(r) || isPendingOrganize(r))) return
     loadRecords();
   }, 20000);
 }
@@ -270,6 +270,11 @@ async function clearRecords() {
 }
 
 function isActiveTask(r) { return ['submitting', 'submitted', 'downloading', 'waiting', 'awaiting_move', 'moving'].includes(r.status) && r.kind !== '115_share' }
+// 已搬入下载目录、但还没确认整理入库的记录：页面开着时也要继续轮询（含 115 分享转存）
+function isPendingOrganize(r) {
+  return !r.organization_confirmed
+    && ['done', 'unverified', 'organized', 'partial', 'missing'].includes(r.status)
+}
 async function retryTask(r) {
   if (retrying[r.id]) return
   retrying[r.id] = true;
