@@ -235,17 +235,7 @@
           <v-chip size="x-small" color="primary" class="ml-2">{{ records.length }} 条</v-chip>
           <v-spacer />
           <v-btn-group variant="text" density="comfortable" divided>
-            <v-btn
-              size="small"
-              color="primary"
-              prepend-icon="mdi-check-decagram-outline"
-              :loading="busy.verify"
-              :disabled="!records.length"
-              @click="verifyRecords"
-            >
-              核对整理
-            </v-btn>
-            <v-btn size="small" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords">
+            <v-btn size="small" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords(true)">
               刷新
             </v-btn>
             <v-btn
@@ -260,7 +250,7 @@
           </v-btn-group>
         </v-card-title>
         <v-card-subtitle class="text-caption pt-0">
-          整理结果以 MoviePilot 的「整理记录」为准核对；最多保留最近 200 条。
+          点「刷新」会一并按 MoviePilot 的「整理记录」核对整理结果；最多保留最近 200 条。
         </v-card-subtitle>
         <v-card-text>
           <v-alert v-if="!records.length" type="info" variant="tonal">
@@ -345,7 +335,7 @@ const status = reactive({
 })
 const msg = ref('')
 const msgType = ref('info')
-const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false, verify: false })
+const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false })
 const qrImage = ref('')
 const qrTip = ref('等待扫码')
 const qrSessionId = ref('')
@@ -477,12 +467,16 @@ function kindColor(k) { return (KIND_STYLE[k] || {}).color || 'grey' }
 function statusName(s) { return (STATUS_STYLE[s] || {}).name || s }
 function statusColor(s) { return (STATUS_STYLE[s] || {}).color || 'grey' }
 
-async function loadRecords() {
+async function loadRecords(force = false) {
   if (busy.records || disposed) return
   busy.records = true
   try {
-    // 仅读取记录；离线检查与搬运由独立后台任务执行。
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 120000 }))
+    // 读取记录；force=true（点「刷新」）时让后端**强制**用 MP 整理记录核对一次整理结果，
+    // 否则走后端 30 秒节流（打开页面 / 定时轮询）。
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', {
+      params: force ? { verify: 1 } : undefined,
+      timeout: 180000,
+    }))
     if (res.code === 0) records.value = res.data || []
     else setMsg(res.msg || '读取转存记录失败', 'error')
   } catch (e) {
@@ -519,26 +513,6 @@ async function deleteRecord(r) {
   } catch (e) {
     setMsg(`删除失败：${describeError(e)}`, 'error')
   }
-}
-
-async function verifyRecords() {
-  busy.verify = true
-  try {
-    // 用 MP 的「整理记录」核对：是否真的入库、整包是否齐全（剧集按集号去重统计）
-    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_verify', {}, { timeout: 180000 }))
-    if (res.code === 0) {
-      const d = res.data || {}
-      setMsg(`整理核对完成：检查 ${d.checked || 0} 条，已入库 ${d.confirmed || 0} 条，未齐全 ${d.partial || 0} 条，失败 ${d.failed || 0} 条`,
-        d.failed ? 'warning' : 'success')
-    } else {
-      setMsg(res.msg || '核对失败', 'error')
-    }
-  } catch (e) {
-    setMsg(`核对失败：${describeError(e)}`, 'error')
-  } finally {
-    busy.verify = false
-  }
-  await loadRecords()
 }
 
 async function clearRecords() {

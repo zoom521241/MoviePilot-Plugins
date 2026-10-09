@@ -38,7 +38,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.9.1"
+    plugin_version = "0.9.2"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -931,9 +931,14 @@ class Doc115Subscribe(_PluginBase):
     def api_check_offline(self):
         return self.check_offline_tasks(force=True)
 
-    def api_records(self, limit: int = 200):
+    def api_records(self, limit: int = 200, verify: str = ""):
+        """转存记录。
+
+        ``verify`` 传 1/true 时**强制**用 MP 整理记录核对一次（「刷新」按钮走这里）；
+        不传则按 30 秒节流顺带核对（打开页面、定时轮询走这里）。
+        """
         try:
-            self.verify_organization()          # 顺带用 MP 整理记录核对"是否真的入库"（内部有节流）
+            self.verify_organization(force=str(verify).strip().lower() in ("1", "true", "yes", "force"))
             return {"code": 0, "data": self._records().list()[:max(1, min(200, int(limit)))]}
         except Exception as exc:
             return {"code": 1, "msg": self._error(exc)}

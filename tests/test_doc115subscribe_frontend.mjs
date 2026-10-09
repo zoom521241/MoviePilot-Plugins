@@ -15,7 +15,7 @@ function component(name, api) {
   const emitted = []
   const helpers = { ...vue, onMounted() {}, onBeforeUnmount() {} }
   const names = name === 'Page'
-    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterLink,busy,resultVersion,close,startQr,checkQr,qrSessionId,records,verifyRecords'
+    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterLink,busy,resultVersion,close,startQr,checkQr,qrSessionId,records,loadRecords'
     : 'load,save,cfg,secrets,msg,msgType,close'
   const setup = new Function('helpers', 'suppliedProps', 'suppliedEmit', `
     const { computed, reactive, ref, watch, onMounted, onBeforeUnmount } = helpers;
@@ -66,25 +66,21 @@ test('server filters and page are sent before full total is displayed', async ()
   assert.equal(page.results.value.length, 1)
 })
 
-test('organize verification hits the verify endpoint then reloads records', async () => {
+test('refresh verifies the organize result while polling refresh does not', async () => {
   const calls = []
   const page = component('Page', {
-    post: async (path, payload) => {
-      calls.push([path, payload])
-      if (path.endsWith('/records_verify')) {
-        return { code: 0, data: { checked: 2, confirmed: 1, partial: 0, failed: 0 } }
-      }
-      return { code: 0, data: [] }
-    },
-    get: async (path) => {
-      calls.push([path, null])
+    get: async (path, options) => {
+      calls.push([path, options])
       return { code: 0, data: [{ id: 'r1', status: 'organized', title: 'demo' }] }
     },
+    post: async () => ({ code: 0 }),
   })
-  await page.verifyRecords()
-  assert.equal(calls[0][0].endsWith('/records_verify'), true)
-  assert.equal(calls.some(([p]) => String(p).endsWith('/records')), true)
+  await page.loadRecords(true)
+  assert.equal(calls[0][0].endsWith('/records'), true)
+  assert.equal(calls[0][1]?.params?.verify, 1)
   assert.equal(page.records.value.length, 1)
+  await page.loadRecords()
+  assert.equal(calls[1][1]?.params, undefined)
 })
 
 test('late search response cannot replace a newer result or its index version', async () => {

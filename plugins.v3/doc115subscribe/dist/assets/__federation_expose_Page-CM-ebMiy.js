@@ -74,7 +74,7 @@ const status = reactive({
 });
 const msg = ref('');
 const msgType = ref('info');
-const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false, verify: false });
+const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false });
 const qrImage = ref('');
 const qrTip = ref('等待扫码');
 const qrSessionId = ref('');
@@ -206,12 +206,16 @@ function kindColor(k) { return (KIND_STYLE[k] || {}).color || 'grey' }
 function statusName(s) { return (STATUS_STYLE[s] || {}).name || s }
 function statusColor(s) { return (STATUS_STYLE[s] || {}).color || 'grey' }
 
-async function loadRecords() {
+async function loadRecords(force = false) {
   if (busy.records || disposed) return
   busy.records = true;
   try {
-    // 仅读取记录；离线检查与搬运由独立后台任务执行。
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 120000 }));
+    // 读取记录；force=true（点「刷新」）时让后端**强制**用 MP 整理记录核对一次整理结果，
+    // 否则走后端 30 秒节流（打开页面 / 定时轮询）。
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', {
+      params: force ? { verify: 1 } : undefined,
+      timeout: 180000,
+    }));
     if (res.code === 0) records.value = res.data || [];
     else setMsg(res.msg || '读取转存记录失败', 'error');
   } catch (e) {
@@ -248,26 +252,6 @@ async function deleteRecord(r) {
   } catch (e) {
     setMsg(`删除失败：${describeError(e)}`, 'error');
   }
-}
-
-async function verifyRecords() {
-  busy.verify = true;
-  try {
-    // 用 MP 的「整理记录」核对：是否真的入库、整包是否齐全（剧集按集号去重统计）
-    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_verify', {}, { timeout: 180000 }));
-    if (res.code === 0) {
-      const d = res.data || {};
-      setMsg(`整理核对完成：检查 ${d.checked || 0} 条，已入库 ${d.confirmed || 0} 条，未齐全 ${d.partial || 0} 条，失败 ${d.failed || 0} 条`,
-        d.failed ? 'warning' : 'success');
-    } else {
-      setMsg(res.msg || '核对失败', 'error');
-    }
-  } catch (e) {
-    setMsg(`核对失败：${describeError(e)}`, 'error');
-  } finally {
-    busy.verify = false;
-  }
-  await loadRecords();
 }
 
 async function clearRecords() {
@@ -626,7 +610,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_v_col, { cols: "10" }, {
           default: _withCtx(() => [
             _createElementVNode("div", _hoisted_2, [
-              _cache[7] || (_cache[7] = _createTextVNode(" 115文档订阅与查询 ", -1)),
+              _cache[8] || (_cache[8] = _createTextVNode(" 115文档订阅与查询 ", -1)),
               (status.version)
                 ? (_openBlock(), _createBlock(_component_v_chip, {
                     key: 0,
@@ -659,7 +643,7 @@ return (_ctx, _cache) => {
             }, {
               default: _withCtx(() => [
                 _createVNode(_component_v_icon, null, {
-                  default: _withCtx(() => [...(_cache[8] || (_cache[8] = [
+                  default: _withCtx(() => [...(_cache[9] || (_cache[9] = [
                     _createTextVNode("mdi-close", -1)
                   ]))]),
                   _: 1
@@ -687,9 +671,9 @@ return (_ctx, _cache) => {
             : _createCommentVNode("", true)
         ]),
         _createElementVNode("div", null, [
-          _cache[9] || (_cache[9] = _createTextVNode(" 本地索引：", -1)),
+          _cache[10] || (_cache[10] = _createTextVNode(" 本地索引：", -1)),
           _createElementVNode("span", _hoisted_4, _toDisplayString(status.record_count), 1),
-          _cache[10] || (_cache[10] = _createTextVNode(" 条 / ", -1)),
+          _cache[11] || (_cache[11] = _createTextVNode(" 条 / ", -1)),
           _createElementVNode("span", _hoisted_5, _toDisplayString(status.sheet_count), 1),
           _createTextVNode(" 张表， 更新于 " + _toDisplayString(status.built_at_text) + " ｜115 Cookie：", 1),
           _createElementVNode("span", {
@@ -708,7 +692,7 @@ return (_ctx, _cache) => {
           style: {"white-space":"pre-wrap"}
         }, {
           default: _withCtx(() => [
-            _cache[11] || (_cache[11] = _createElementVNode("div", null, "索引存在未更新的工作表，部分结果可能已过时：", -1)),
+            _cache[12] || (_cache[12] = _createElementVNode("div", null, "索引存在未更新的工作表，部分结果可能已过时：", -1)),
             _createTextVNode(_toDisplayString(indexWarnings.value.join('\n')), 1)
           ]),
           _: 1
@@ -772,7 +756,7 @@ return (_ctx, _cache) => {
               "prepend-icon": "mdi-database-refresh",
               onClick: refreshIndex
             }, {
-              default: _withCtx(() => [...(_cache[12] || (_cache[12] = [
+              default: _withCtx(() => [...(_cache[13] || (_cache[13] = [
                 _createTextVNode(" 刷新索引 ", -1)
               ]))]),
               _: 1
@@ -814,7 +798,7 @@ return (_ctx, _cache) => {
               "prepend-icon": "mdi-check-decagram",
               onClick: _cache[1] || (_cache[1] = $event => (checkQr()))
             }, {
-              default: _withCtx(() => [...(_cache[13] || (_cache[13] = [
+              default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
                 _createTextVNode(" 检查扫码状态 ", -1)
               ]))]),
               _: 1
@@ -834,7 +818,7 @@ return (_ctx, _cache) => {
               "prepend-icon": "mdi-download-network",
               onClick: checkOffline
             }, {
-              default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
+              default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
                 _createTextVNode(" 检查离线下载与搬运 ", -1)
               ]))]),
               _: 1
@@ -854,7 +838,7 @@ return (_ctx, _cache) => {
               "prepend-icon": "mdi-sync",
               onClick: runSubscribe
             }, {
-              default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
+              default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
                 _createTextVNode(" 手动同步电影订阅 ", -1)
               ]))]),
               _: 1
@@ -873,13 +857,13 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_tab, { value: "search" }, {
-          default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
+          default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
             _createTextVNode("搜索", -1)
           ]))]),
           _: 1
         }),
         _createVNode(_component_v_tab, { value: "records" }, {
-          default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
+          default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
             _createTextVNode("转存记录", -1)
           ]))]),
           _: 1
@@ -904,7 +888,7 @@ return (_ctx, _cache) => {
                         alt: "扫码登录"
                       }, null, 8, _hoisted_6),
                       _createElementVNode("div", _hoisted_7, "用微信扫码登录腾讯文档（" + _toDisplayString(qrTip.value) + "）", 1),
-                      _cache[18] || (_cache[18] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 二维码过期后请点「换一张二维码」；请只扫描当前页面显示的二维码。 ", -1))
+                      _cache[19] || (_cache[19] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 二维码过期后请点「换一张二维码」；请只扫描当前页面显示的二维码。 ", -1))
                     ]),
                     _: 1
                   })
@@ -954,7 +938,7 @@ return (_ctx, _cache) => {
                             loading: busy.search,
                             onClick: doSearch
                           }, {
-                            default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+                            default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
                               _createTextVNode(" 搜索 ", -1)
                             ]))]),
                             _: 1
@@ -1004,7 +988,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "all"
                           }, {
-                            default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+                            default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
                               _createTextVNode("全部", -1)
                             ]))]),
                             _: 1
@@ -1013,7 +997,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "movie"
                           }, {
-                            default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
+                            default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
                               _createTextVNode("电影", -1)
                             ]))]),
                             _: 1
@@ -1022,7 +1006,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "tv"
                           }, {
-                            default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
+                            default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
                               _createTextVNode("电视剧", -1)
                             ]))]),
                             _: 1
@@ -1043,7 +1027,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "all"
                           }, {
-                            default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
+                            default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
                               _createTextVNode("不限画质", -1)
                             ]))]),
                             _: 1
@@ -1052,7 +1036,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "4k"
                           }, {
-                            default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
+                            default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
                               _createTextVNode("4K", -1)
                             ]))]),
                             _: 1
@@ -1061,7 +1045,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "cn"
                           }, {
-                            default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
+                            default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
                               _createTextVNode("中文字幕", -1)
                             ]))]),
                             _: 1
@@ -1081,7 +1065,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "all"
                           }, {
-                            default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
+                            default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
                               _createTextVNode("不限来源", -1)
                             ]))]),
                             _: 1
@@ -1090,7 +1074,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "share"
                           }, {
-                            default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
+                            default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
                               _createTextVNode("115转存", -1)
                             ]))]),
                             _: 1
@@ -1099,7 +1083,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "magnet"
                           }, {
-                            default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
+                            default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
                               _createTextVNode("磁力", -1)
                             ]))]),
                             _: 1
@@ -1108,7 +1092,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "ed2k"
                           }, {
-                            default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
+                            default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
                               _createTextVNode("ed2k", -1)
                             ]))]),
                             _: 1
@@ -1117,7 +1101,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             value: "doc"
                           }, {
-                            default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
+                            default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
                               _createTextVNode("仅文档", -1)
                             ]))]),
                             _: 1
@@ -1144,7 +1128,7 @@ return (_ctx, _cache) => {
                               variant: "tonal",
                               class: "mb-2"
                             }, {
-                              default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
+                              default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
                                 _createTextVNode("没有找到匹配的资源，可调整筛选或换个关键词。", -1)
                               ]))]),
                               _: 1
@@ -1194,7 +1178,7 @@ return (_ctx, _cache) => {
                                                 color: "deep-orange",
                                                 class: "mr-1"
                                               }, {
-                                                default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+                                                default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
                                                   _createTextVNode("打包链接", -1)
                                                 ]))]),
                                                 _: 1
@@ -1206,7 +1190,7 @@ return (_ctx, _cache) => {
                                             : _createCommentVNode("", true)
                                         ]),
                                         _createElementVNode("div", _hoisted_13, [
-                                          _cache[33] || (_cache[33] = _createElementVNode("span", { class: "text-medium-emphasis" }, "规格：", -1)),
+                                          _cache[34] || (_cache[34] = _createElementVNode("span", { class: "text-medium-emphasis" }, "规格：", -1)),
                                           (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(specTokens(r.qtext), (tk, ti) => {
                                             return (_openBlock(), _createElementBlock("span", {
                                               key: ti,
@@ -1215,7 +1199,7 @@ return (_ctx, _cache) => {
                                           }), 128))
                                         ]),
                                         _createElementVNode("div", _hoisted_14, [
-                                          _cache[34] || (_cache[34] = _createElementVNode("span", { class: "text-medium-emphasis" }, "链接：", -1)),
+                                          _cache[35] || (_cache[35] = _createElementVNode("span", { class: "text-medium-emphasis" }, "链接：", -1)),
                                           (_openBlock(true), _createElementBlock(_Fragment, null, _renderList((r.links || []), (lk, li) => {
                                             return (_openBlock(), _createBlock(_component_v_chip, {
                                               key: li,
@@ -1265,7 +1249,7 @@ return (_ctx, _cache) => {
                                                 disabled: busy.search || !!transferring[r.record_id] || !r.record_id,
                                                 onClick: $event => (transfer(r, 'movie'))
                                               }, {
-                                                default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
+                                                default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
                                                   _createTextVNode("转存到电影", -1)
                                                 ]))]),
                                                 _: 1
@@ -1285,7 +1269,7 @@ return (_ctx, _cache) => {
                                                 disabled: busy.search || !!transferring[r.record_id] || !r.record_id,
                                                 onClick: $event => (transfer(r, 'tv'))
                                               }, {
-                                                default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
+                                                default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
                                                   _createTextVNode("转存到电视剧", -1)
                                                 ]))]),
                                                 _: 1
@@ -1375,22 +1359,9 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_btn, {
                       size: "small",
-                      color: "primary",
-                      "prepend-icon": "mdi-check-decagram-outline",
-                      loading: busy.verify,
-                      disabled: !records.value.length,
-                      onClick: verifyRecords
-                    }, {
-                      default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
-                        _createTextVNode(" 核对整理 ", -1)
-                      ]))]),
-                      _: 1
-                    }, 8, ["loading", "disabled"]),
-                    _createVNode(_component_v_btn, {
-                      size: "small",
                       "prepend-icon": "mdi-refresh",
                       loading: busy.records,
-                      onClick: loadRecords
+                      onClick: _cache[7] || (_cache[7] = $event => (loadRecords(true)))
                     }, {
                       default: _withCtx(() => [...(_cache[38] || (_cache[38] = [
                         _createTextVNode(" 刷新 ", -1)
@@ -1417,7 +1388,7 @@ return (_ctx, _cache) => {
             }),
             _createVNode(_component_v_card_subtitle, { class: "text-caption pt-0" }, {
               default: _withCtx(() => [...(_cache[41] || (_cache[41] = [
-                _createTextVNode(" 整理结果以 MoviePilot 的「整理记录」为准核对；最多保留最近 200 条。 ", -1)
+                _createTextVNode(" 点「刷新」会一并按 MoviePilot 的「整理记录」核对整理结果；最多保留最近 200 条。 ", -1)
               ]))]),
               _: 1
             }),
