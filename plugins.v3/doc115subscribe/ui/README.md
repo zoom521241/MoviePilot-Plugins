@@ -45,8 +45,9 @@ npm run build:preview          # 独立可打开的预览版（自带 Vuetify，
 npm run dev            # 开发态（Vite dev server，自动带 Vuetify）
 npm run build:preview  # 或构建成一份可离线打开的静态页（dist-preview/index.html）
 ```
-`src/App.vue` 是开发态壳子（注入桩 api），按钮会因没有后端而报错，但布局/交互与线上一致；
-真实数据要在 MoviePilot 里看。
+`src/App.vue` 是开发态合成测试壳子：注入完全本地的桩 API，搜索、提交与核对都不访问 MP、115 或腾讯文档。提供明暗主题、320/360/390px 宽度与 200% 字体选项，包含 20 集中 1 集整理前被删除的任务。合成接口调用记录可验证选定的链接来源与电影/电视剧目录。不要把预览里的成功响应当作真实转存验证。
+
+Node 合成测试：在仓库根运行 `node --test tests/test_doc115subscribe_frontend.mjs`。覆盖请求身份、成功/失败/部分/查询错误结果、确认面板、轮询生命周期、取消旧搜索请求和样式对比度；发布前还需通过浏览器读取实际联邦产物的计算样式与窄屏布局。
 
 ## 目录结构
 
@@ -59,8 +60,9 @@ ui/
     ├── main.js                    开发态挂载（createVuetify）
     ├── App.vue                    开发态壳子
     ├── components/
-    │   ├── Page.vue               详情页：状态/工具/搜索/筛选/分页/结果卡片
-    │   └── Config.vue             设置页：开关/路径/cron/Cookie
+    │   ├── Page.vue               搜索/电影订阅/任务；来源与保存目录确认
+    │   └── Config.vue             基础设置与折叠高级设置
+    ├── styles/doc115.css          插件命名空间语义颜色与响应式布局
     └── vuetify/
         ├── defaults.ts            组件默认值
         └── theme.ts               主题（light/dark/purple/transparent）
@@ -72,6 +74,9 @@ ui/
   所以 `src/main.js` 里装配 Vuetify 的那段**只在 DEV 生效**，生产构建会被摇掉，
   产物里不含 Vuetify 全量样式（否则会与宿主重复、体积多几百 KB）。
   组件里的 `v-btn` / `v-card` 等是 `resolveComponent` 解析宿主全局注册的组件，无需自己 import。
+- 字段和状态使用 `doc115-*` 类与 CSS 变量，不依赖宿主材质颜色 utility；根节点通过宿主 `dark` 布尔属性选择主题，兼容自定义主题名。
+- 页面刷新只读本地任务，活动任务页可见时从 20 秒开始轮询，无变化或失败会延长间隔；切页、隐藏、失活、关闭会停止轮询。扫码轮询仅在设置面板可见时运行。
+- 写操作使用宿主注入的会话 API，动作由后端 `allowed_actions` 提供并在执行时再次授权校验，不把后台 Token 发给浏览器。
 - 构建保持 `minify: false`：产物未压缩、可读，便于线上排查与紧急热修（与历史产物一致）。
 - 结果卡片里「大包」（`sheet_bundle` / `bundle` / `no_link`）条目**不显示转存按钮**，
   只显示可点击的 115/磁力 链接与提示文案（与后端 `do_transfer` 的拦截保持一致）。

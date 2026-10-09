@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_doc115subscribe_backend import PLUGIN_PATH, STUBS, rec, SyntheticTransfer
+from test_doc115subscribe_backend import PLUGIN_PATH, STUBS, rec, SyntheticTransfer, drive_worker
 
 FRAMEWORKS = all(importlib.util.find_spec(name) for name in ("fastapi", "httpx", "apscheduler"))
 
@@ -73,9 +73,11 @@ class FrameworkTests(unittest.TestCase):
             "index_version": data["index_version"], "to": "tv"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["code"], 0)
+        self.assertEqual(self.transfer.calls, [])
+        drive_worker(self.plugin)
         self.assertEqual(len(self.transfer.calls), 1)
         self.assertIn("/电视剧/", self.transfer.calls[0][2])
-        self.assertEqual(self.client.get("/records").json()["data"][0]["title"], "Synthetic TV")
+        self.assertEqual(self.client.get("/records").json()["data"]["records"][0]["title"], "Synthetic TV")
 
     def test_real_http_config_masks_secrets_and_rejects_invalid_cron(self):
         response = self.client.get("/get_config").json()
@@ -124,7 +126,7 @@ class FrameworkTests(unittest.TestCase):
 
     def test_real_scheduler_reloads_and_stops_without_cloud_calls(self):
         # All schedules are far in the future; nothing is allowed to contact a server.
-        config = {"enabled": True, "index_cron": "0 0 1 1 *", "subscribe_cron": "0 0 1 1 *"}
+        config = {"enabled": True, "subscribe_enabled": True, "index_cron": "0 0 1 1 *", "subscribe_cron": "0 0 1 1 *"}
         self.plugin.init_plugin(config)
         old = self.plugin._scheduler
         self.assertIsInstance(old, self.Scheduler)

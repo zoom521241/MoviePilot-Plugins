@@ -93,6 +93,13 @@ STUBS.update({
     "app.chain.media": module("app.chain.media", MediaChain=FakeMediaChain),
     "app.core.config": module("app.core.config", settings=types.SimpleNamespace(API_TOKEN="synthetic-only", PORT=5000)),
     "app.db.systemconfig_oper": module("app.db.systemconfig_oper", SystemConfigOper=lambda: types.SimpleNamespace(get=lambda _: {})),
+    "app.api": module("app.api"),
+    "app.api.dependencies": module("app.api.dependencies"),
+    "app.api.dependencies.auth": module("app.api.dependencies.auth", get_current_active_superuser=lambda: types.SimpleNamespace(is_superuser=True)),
+    # Unit simulations must not initialize an installed cloud SDK or its native
+    # dependencies while the rest of the MoviePilot namespace is stubbed.
+    "p115client": module("p115client"),
+    "p115client.util": module("p115client.util"),
 })
 
 
@@ -142,6 +149,54 @@ class SyntheticTransfer:
         self.calls.append((kind, url, path))
         return self.outcomes.pop(0) if self.outcomes else (True, "synthetic accepted")
 
+    def _submit(self, kind, url, path):
+        ok, message = self.add_resource(kind, url, path)
+        if not ok:
+            error = main.P115Error(message)
+            error.definite_failure = True
+            error.not_sent = True  # synthetic rejection proves no cloud mutation
+            raise error
+
+    def prepare_share(self, url, path, state=None):
+        return copy.deepcopy(state or {"items": [{"id": "source-1", "name": "Synthetic File.mkv"}],
+                                       "cid": "42", "complete": True, "received": 0, "done": False})
+
+    def share_manifest_slice(self, url, cursor=None):
+        return {"items": [{"relative_path": "Synthetic File.mkv", "name": "Synthetic File.mkv",
+                           "required": True, "role": "movie"}], "cursor": None, "complete": True}
+
+    def receive_prepared(self, url, path, state, before_submit=None):
+        if before_submit:
+            before_submit({"kind": "share_receive", "source_ids": ["source-1"], "cid": "42"})
+        self._submit("115_share", url, path)
+        state = copy.deepcopy(state)
+        state.update(received=len(state["items"]), done=True)
+        return state
+
+    def offline_add(self, url, path, before_submit=None):
+        if before_submit:
+            before_submit({"kind": "offline_add", "url": url})
+        self._submit("magnet", url, path)
+        self.last_offline_result = types.SimpleNamespace(accepted=True, file_id="", actual_cid="42", requested_cid="42", uncertain=False)
+        return self.last_offline_result
+
+    def list_tasks_slice(self, cursor=None):
+        return {"items": [], "cursor": None, "complete": True}
+
+    @staticmethod
+    def get_file_info(file_id):
+        return None
+
+
+def drive_worker(plugin, ticks=1, advance=3600):
+    """Advance a synthetic clock; exercise the real persistent worker stages."""
+    results = []
+    now = time.time()
+    for tick in range(ticks):
+        with patch("time.time", return_value=now + advance * (tick + 1)):
+            results.append(plugin.check_offline_tasks())
+    return results
+
 
 class SyntheticQr:
     def __init__(self, session="synthetic-session", state=None):
@@ -168,6 +223,7 @@ class BackendTests(unittest.TestCase):
         FakeScheduler.fail_next_start = False
         FakeMediaChain.calls = []
         self.plugin.init_plugin({**main.Doc115Subscribe.DEFAULTS, "enabled": True,
+                                 "subscribe_enabled": True,
                                  "doc_url": "https://docs.qq.com/sheet/SyntheticDocument",
                                  "tencent_cookie": "synthetic-tencent-cookie", "p115_cookie": "synthetic-115-cookie"})
 
@@ -196,6 +252,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(result["data"]["total"], 1)
         selected = result["data"]["records"][0]
         with patch.object(self.plugin, "do_transfer", return_value=(True, "synthetic accepted")) as transfer:
+            self.plugin._last_transfer_result = {}
             response = self.plugin.api_transfer({"record_id": selected["record_id"], "index_version": index.index_version,
                                                  "to": "tv", "keyword": "different input", "index": 0})
         self.assertEqual(response["code"], 0)
@@ -357,6 +414,8 @@ class BackendTests(unittest.TestCase):
         transfer = SyntheticTransfer()
         with patch.object(self.plugin, "_transfers", return_value=transfer):
             response = self.plugin.run_subscribe()
+            self.assertEqual(transfer.calls, [])
+            drive_worker(self.plugin)
         self.assertEqual(response["data"]["transferred"], 1)
         self.assertEqual(len(transfer.calls), 1)
         self.assertEqual(self.plugin._records().list()[0]["status"], "done")
@@ -367,6 +426,7 @@ class BackendTests(unittest.TestCase):
         transfer = SyntheticTransfer([(False, "synthetic expired mirror"), (True, "synthetic accepted")])
         with patch.object(self.plugin, "_transfers", return_value=transfer):
             response = self.plugin.run_subscribe()
+            drive_worker(self.plugin, ticks=4)
         self.assertEqual(len(transfer.calls), 2)
         self.assertEqual(response["data"]["transferred"], 1)
         self.assertEqual(self.plugin._subscription_store().list()[0]["status"], "complete")
@@ -377,6 +437,7 @@ class BackendTests(unittest.TestCase):
         transfer = SyntheticTransfer()
         with patch.object(self.plugin, "_transfers", return_value=transfer):
             response = self.plugin.run_subscribe()
+            drive_worker(self.plugin)
         self.assertEqual(response["data"]["transferred"], 1)
         self.assertEqual(transfer.calls[0][1], "https://115.com/s/SYNTHETIC1080")
 
@@ -388,6 +449,7 @@ class BackendTests(unittest.TestCase):
         transfer = SyntheticTransfer()
         with patch.object(self.plugin, "_transfers", return_value=transfer):
             response = self.plugin.run_subscribe()
+            drive_worker(self.plugin)
         self.assertEqual(response["code"], 0)
         self.assertEqual(response["data"]["failed"], 1)
         self.assertEqual(response["data"]["transferred"], 1)
@@ -402,9 +464,10 @@ class BackendTests(unittest.TestCase):
         transfer = SyntheticTransfer([(False, "synthetic upgrade failed"), (True, "synthetic lower quality")])
         with patch.object(self.plugin, "_transfers", return_value=transfer):
             response = self.plugin.run_subscribe()
+            drive_worker(self.plugin, ticks=3)
         self.assertEqual(response["code"], 0)
         self.assertEqual(len(transfer.calls), 1)
-        self.assertEqual(response["data"]["failed"], 1)
+        self.assertEqual(self.plugin._records().list()[0]["acquisition_status"], "failed")
         state = self.plugin._subscription_store().list()[0]
         self.assertEqual((state["status"], state["quality_score"]), ("complete", 1))
 
@@ -418,15 +481,18 @@ class BackendTests(unittest.TestCase):
         transfer.assert_not_called()
         self.assertEqual(self.plugin._subscription_store().list()[0]["status"], "failed")
 
-    def test_transfer_preflight_failure_keeps_original_error_and_allows_fallback(self):
+    def test_transfer_preflight_auth_failure_keeps_original_error_and_does_not_try_mirrors(self):
         self.install_index([rec(qtext="4K 中字"), rec(qtext="1080P 中字", row=2)])
         self.subscribe()
         with patch.object(self.plugin, "_transfers", side_effect=main.P115Error("synthetic invalid Cookie")) as transfer:
             response = self.plugin.run_subscribe()
+            self.assertEqual(transfer.call_count, 0)
+            result = drive_worker(self.plugin)[0]
         self.assertEqual(response["code"], 0)
-        self.assertEqual(response["data"]["failed"], 1)
-        self.assertEqual(transfer.call_count, 2)
-        self.assertIn("synthetic invalid Cookie", response["data"]["errors"][0])
+        self.assertEqual(transfer.call_count, 1)
+        self.assertEqual(result["code"], 1)
+        self.assertIn("synthetic invalid Cookie", result["msg"])
+        self.assertIn("synthetic invalid Cookie", self.plugin._records().list()[0]["last_error"])
 
     def test_unsupported_external_rules_block_automatic_download(self):
         self.install_index([rec()])
@@ -442,30 +508,32 @@ class BackendTests(unittest.TestCase):
         transfer = SyntheticTransfer()
         with patch.object(self.plugin, "_transfers", return_value=transfer):
             first = self.plugin.run_subscribe()
+            drive_worker(self.plugin)
             second = self.plugin.run_subscribe()
         self.assertEqual(first["data"]["transferred"], 1)
         self.assertEqual(second["data"]["skipped"], 1)
         self.assertEqual(len(transfer.calls), 1)
 
-    def test_pending_subscription_is_not_completed_and_failed_task_can_retry(self):
+    def test_pending_subscription_is_not_completed_and_failed_task_is_not_blindly_resubmitted(self):
         self.install_index([rec(links=[("magnet", "magnet:?xt=urn:btih:" + "a" * 40)])])
         self.subscribe()
         transfer = SyntheticTransfer()
         with patch.object(self.plugin, "_transfers", return_value=transfer):
             self.plugin.run_subscribe()
+            drive_worker(self.plugin)
             self.assertEqual(self.plugin._subscription_store().list()[0]["status"], "pending")
             self.assertEqual(self.plugin.run_subscribe()["data"]["skipped"], 1)
-            self.plugin._pending().update("a" * 40, status="failed")
-            self.plugin._records().update(self.plugin._records().list()[0]["id"], status="failed")
-            self.assertEqual(self.plugin.run_subscribe()["data"]["transferred"], 1)
-        self.assertEqual(len(transfer.calls), 2)
+            self.plugin._records().update(self.plugin._records().list()[0]["id"], status="failed", acquisition_status="failed")
+            self.plugin.run_subscribe()
+        self.assertEqual(len(transfer.calls), 1)
 
     def test_failed_previous_mirror_does_not_keep_successful_share_pending(self):
         self.install_index([rec()])
         self.subscribe()
-        self.plugin._pending().upsert({"hash": "a" * 40, "subscription_key": "tmdb:550", "status": "failed"})
+        self.plugin._records().add({"hash": "a" * 40, "subscription_key": "tmdb:550", "status": "failed", "acquisition_status": "failed"})
         with patch.object(self.plugin, "_transfers", return_value=SyntheticTransfer()):
             response = self.plugin.run_subscribe()
+            drive_worker(self.plugin)
         self.assertEqual(response["data"]["transferred"], 1)
         self.assertEqual(self.plugin._subscription_store().list()[0]["status"], "complete")
 
@@ -486,8 +554,7 @@ class BackendTests(unittest.TestCase):
             response = self.plugin.run_subscribe()
         self.assertEqual(response["code"], 0)
         self.assertEqual(transfer.calls, [])
-        state = self.plugin._subscription_store().list()[0]
-        self.assertNotEqual(state["status"], "complete")
+        self.assertFalse(any(state["status"] == "complete" for state in self.plugin._subscription_store().list()))
 
     def test_existing_completed_history_can_complete_subscription_without_resubmit(self):
         candidate = rec()
@@ -525,7 +592,14 @@ class BackendTests(unittest.TestCase):
             def read(self):
                 return self.body
         self.blocked_urlopen.side_effect = [Response(batch) for batch in pages]
-        records = self.plugin._mp_subscribes()
+        self.plugin._mp().opener = self.blocked_urlopen
+        deferred = self.plugin._mp()._permit.__globals__["MPDeferred"]
+        with self.plugin._mp().work_slice():
+            with self.assertRaises(deferred):
+                self.plugin._mp_subscribes()
+        self.assertEqual(self.blocked_urlopen.call_count, 5)
+        with self.plugin._mp().work_slice():
+            records = self.plugin._mp_subscribes()
         self.assertEqual(len(records), 601)
         self.assertEqual(self.blocked_urlopen.call_count, 7)
         self.assertIn("page=7", self.blocked_urlopen.call_args.args[0].full_url)
@@ -606,47 +680,35 @@ class BackendTests(unittest.TestCase):
 
     def test_background_organize_check_skips_when_nothing_pending(self):
         """没有未确认的记录时，后台核对不查任何接口。"""
-        store = Mock()
-        store.list.return_value = [
-            {"id": "1", "status": "organized", "organization_confirmed": True, "title": "done one"},
-        ]
-        with patch.object(self.plugin, "_records", return_value=store), \
-                patch.object(self.plugin, "verify_organization") as verify:
+        self.plugin._records().add({"status": "done", "acquisition_status": "saved", "organization_status": "success", "organization_confirmed": True, "title": "done one"})
+        with patch.object(self.plugin, "_mp_api_json") as query:
             data = self.plugin.check_organization()
-        self.assertTrue(data["data"]["skipped"])
-        verify.assert_not_called()
+        self.assertEqual(data["data"]["checked"], 0)
+        query.assert_not_called()
 
     def test_background_organize_check_runs_for_pending_records(self):
-        """有「已搬入下载目录但未确认」的记录时，后台核对强制跑一次。"""
-        store = Mock()
-        store.list.return_value = [
-            {"id": "1", "status": "done", "title": "share one"},
-            {"id": "2", "status": "unverified", "title": "legacy one"},
-            {"id": "3", "status": "downloading", "title": "still downloading"},
-        ]
-        summary = {"checked": 2, "confirmed": 2, "partial": 0, "failed": 0, "unfound": 0}
-        with patch.object(self.plugin, "_records", return_value=store), \
-                patch.object(self.plugin, "verify_organization", return_value=dict(summary)) as verify:
+        """仅已获取且到期的批次核对，下载中的批次不查询MP历史。"""
+        store = self.plugin._records()
+        store.add({"status": "done", "acquisition_status": "saved", "title": "share one"})
+        store.add({"status": "unverified", "acquisition_status": "saved", "title": "legacy one"})
+        store.add({"status": "downloading", "acquisition_status": "downloading", "title": "still downloading"})
+        with patch.object(self.plugin, "_mp_api_json", return_value={"data": {"list": [], "total": 0}}) as query:
             data = self.plugin.check_organization()
-        verify.assert_called_once_with(force=True)
-        self.assertEqual(data["data"]["pending"], 2)
-        self.assertEqual(data["data"]["confirmed"], 2)
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(data["data"]["checked"], 2)
+        self.assertEqual(data["data"]["confirmed"], 0)
 
     def test_organize_check_ignores_given_up_records(self):
         """已判「未找到整理记录」的记录不再进入后台核对（否则会永远查下去）。"""
-        store = Mock()
-        store.list.return_value = [
-            {"id": "1", "status": "unfound", "org_giveup": True, "title": "deleted by hand"},
-            {"id": "2", "status": "organized", "organization_confirmed": True, "title": "confirmed"},
-        ]
-        with patch.object(self.plugin, "_records", return_value=store), \
-                patch.object(self.plugin, "verify_organization") as verify:
+        self.plugin._records().add({"status": "done", "acquisition_status": "saved", "organization_status": "paused", "org_giveup": True, "title": "deleted by hand"})
+        self.plugin._records().add({"status": "done", "acquisition_status": "saved", "organization_status": "success", "organization_confirmed": True, "title": "confirmed"})
+        with patch.object(self.plugin, "_mp_api_json") as query:
             data = self.plugin.check_organization()
-        self.assertTrue(data["data"]["skipped"])
-        verify.assert_not_called()
+        self.assertEqual(data["data"]["checked"], 0)
+        query.assert_not_called()
 
     def test_organize_check_backs_off_then_gives_up(self):
-        """查不到整理记录时先指数退避，连续多次后判「未找到整理记录」并移出自动核对池。"""
+        """空历史只退避；24小时后暂停核对并保留获取与防重事实。"""
         store = self.plugin._records()
         record = store.add({"title": "synthetic never organised", "type": "movie", "kind": "magnet",
                             "status": "done", "final_path": "/115-影视/115-downloads/电影"})
@@ -654,7 +716,7 @@ class BackendTests(unittest.TestCase):
         def current():
             return [r for r in store.list() if r["id"] == record["id"]][0]
 
-        with patch.object(self.plugin, "_org_entries_for", return_value=[]):
+        with patch.object(self.plugin, "_mp_api_json", return_value={"data": {"list": [], "total": 0}}) as query:
             self.plugin.verify_organization(force=True)
             first = current()
             self.assertEqual(first["org_attempts"], 1)
@@ -665,15 +727,23 @@ class BackendTests(unittest.TestCase):
             self.plugin.verify_organization(force=True)
             self.assertEqual(current()["org_attempts"], 1)
 
-            for _ in range(self.plugin.ORG_GIVEUP_ATTEMPTS - 1):
+            for _ in range(3):
                 store.update(record["id"], org_next_ts=0)           # 模拟退避时间已过
                 self.plugin.verify_organization(force=True)
             final = current()
-            self.assertEqual(final["status"], "unfound")
+            self.assertEqual(final["status"], "done")
+            self.assertFalse(final.get("org_giveup"))
+            future = record["created_ts"] + 86401
+            store.update(record["id"], org_next_ts=0)
+            with patch("time.time", return_value=future):
+                self.plugin.verify_organization()
+            final = current()
             self.assertTrue(final["org_giveup"])
-            self.assertIn("未找到整理记录", final["message"])
-
-        self.assertTrue(self.plugin.check_organization()["data"]["skipped"])
+            self.assertEqual(final["organization_status"], "paused")
+            self.assertEqual(final["acquisition_status"], "saved")
+            query.reset_mock()
+            self.assertEqual(self.plugin.check_organization()["data"]["checked"], 0)
+            query.assert_not_called()
 
 
 if __name__ == "__main__":

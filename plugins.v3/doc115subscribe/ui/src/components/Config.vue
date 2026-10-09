@@ -1,7 +1,7 @@
 <template>
-  <v-card variant="outlined">
+  <v-card variant="outlined" class="doc115-config" :data-doc115-theme="darkTheme ? 'dark' : 'light'">
     <v-card-title class="text-subtitle-1 d-flex align-center">
-      <span>115文档订阅与查询 · 设置</span>
+      <span>115文档订阅与查询 · 设置 <small class="doc115-muted">前端 v0.10.0</small></span>
       <v-spacer />
       <v-btn icon size="small" variant="text" title="关闭" @click="close">
         <v-icon>mdi-close</v-icon>
@@ -16,7 +16,7 @@
         density="comfortable"
         class="mb-3"
       >
-        腾讯文档 Cookie：{{ secrets.tencent_ready ? '已配置，保存时留空会保留' : '未配置，请到「详情」页扫码登录或在此粘贴' }}
+        腾讯文档 Cookie：{{ secrets.tencent_ready ? '已配置，保存时留空会保留' : '未配置，请在插件页面「设置」中扫码登录' }}
         ｜115 Cookie：{{ secrets.p115_ready ? '已配置，保存时留空会保留' : '未单独配置，可复用其它 115 插件' }}
       </v-alert>
 
@@ -39,10 +39,6 @@
           />
         </v-col>
       </v-row>
-      <v-select v-model="cfg.link_mode" :items="linkModes" label="同一资源的多个链接" variant="outlined" density="comfortable" class="mt-3" persistent-hint hint="默认按镜像回退，首个成功即停止；只有明确属于分卷或多份必要文件时才选择全部提交。" />
-      <v-switch v-model="cfg.upgrade_enabled" color="primary" hide-details label="允许订阅获取新资源版本" />
-      <div class="text-caption text-medium-emphasis">开启后，同一影片出现不同资源链接时可以重新获取，可能产生多个版本。</div>
-
       <v-text-field
         v-model="cfg.doc_url"
         label="腾讯文档链接"
@@ -53,32 +49,9 @@
         hide-details
       />
 
-      <v-text-field
-        v-model="cfg.tencent_cookie"
-        label="替换腾讯文档 Cookie（留空保留）"
-        type="password"
-        autocomplete="new-password"
-        variant="outlined"
-        density="comfortable"
-        class="mt-3"
-        hide-details
-        hint="推荐在「详情」页扫码登录；已有 Cookie 不会回显。"
-        persistent-hint
-      />
-      <v-checkbox v-model="cfg.clear_tencent_cookie" label="清除已保存的腾讯文档 Cookie" color="warning" hide-details />
-
-      <v-text-field
-        v-model="cfg.p115_cookie"
-        label="替换 115 Cookie（留空保留）"
-        type="password"
-        autocomplete="new-password"
-        variant="outlined"
-        density="comfortable"
-        class="mt-4"
-        hide-details
-      />
-      <v-checkbox v-model="cfg.clear_p115_cookie" label="清除单独保存的 115 Cookie（改为复用其它 115 插件）" color="warning" hide-details />
-
+      <p class="doc115-muted">下载目录应对应 MP 已配置的 115 存储目录。本插件不修改 MP 监控或整理配置；未核实监控时不能保证保存后会自动整理。</p>
+      <v-select v-if="movieDirectories.length" v-model="selectedMovieDirectory" :items="movieDirectories" label="选择已缓存的 MP 电影下载目录" variant="outlined" density="comfortable" @update:model-value="chooseDirectory('movie', $event)" />
+      <v-select v-if="tvDirectories.length" v-model="selectedTvDirectory" :items="tvDirectories" label="选择已缓存的 MP 电视剧下载目录" variant="outlined" density="comfortable" @update:model-value="chooseDirectory('tv', $event)" />
       <v-row dense class="mt-3">
         <v-col cols="12" md="6">
           <v-text-field
@@ -99,6 +72,13 @@
           />
         </v-col>
       </v-row>
+
+      <details class="doc115-config-advanced">
+      <summary>高级设置（链接策略、计划、Cookie）</summary>
+      <v-select v-model="cfg.link_mode" :items="linkModes" label="自动订阅：同一资源的多个链接" variant="outlined" density="comfortable" class="mt-3" persistent-hint hint="默认镜像回退，仅明确失败后尝试下一来源。手动获取只使用确认面板选定的链接。分卷 / 全部提交只适用于确实需要全部资源的条目。" />
+      <v-switch v-model="cfg.upgrade_enabled" color="primary" hide-details label="允许订阅获取更高画质版本" />
+      <p class="doc115-muted">升级失败保留旧版本。画质无法确认时暂停自动升级判断，避免重复获取。</p>
+      <v-text-field v-model.number="cfg.min_media_size_mb" type="number" min="0" max="1024" step="1" label="整理核对忽略小视频（MB）" variant="outlined" density="comfortable" class="mt-3" persistent-hint hint="默认 10，0 关闭。仅忽略已知体积小于阈值的附带视频；不删除文件，不改 MP 过滤规则。新任务使用新设置。" />
 
       <v-text-field
         v-model="cfg.magnet_staging_path"
@@ -133,6 +113,11 @@
           />
         </v-col>
       </v-row>
+      <v-text-field v-model="cfg.tencent_cookie" label="替换腾讯文档 Cookie（留空保留）" type="password" autocomplete="new-password" variant="outlined" density="comfortable" class="mt-3" hide-details />
+      <v-checkbox v-model="cfg.clear_tencent_cookie" label="清除已保存的腾讯文档 Cookie" color="warning" hide-details />
+      <v-text-field v-model="cfg.p115_cookie" label="替换 115 Cookie（留空保留）" type="password" autocomplete="new-password" variant="outlined" density="comfortable" class="mt-3" hide-details />
+      <v-checkbox v-model="cfg.clear_p115_cookie" label="清除单独保存的 115 Cookie（改为复用其它 115 插件）" color="warning" hide-details />
+      </details>
     </v-card-text>
     <v-card-actions>
       <v-btn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load(true)">重新读取配置</v-btn>
@@ -144,13 +129,16 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, inject, onMounted, reactive, ref } from 'vue'
+import '../styles/doc115.css'
 
 const props = defineProps({
   model: { type: Object, default: () => ({}) },
   api: { type: Object, default: () => ({ get: async () => ({}), post: async () => ({}) }) },
 })
 const emit = defineEmits(['action', 'close'])
+const hostTheme = inject(Symbol.for('vuetify:theme'), null)
+const darkTheme = computed(() => !!(props.model?.dark ?? hostTheme?.current?.value?.dark))
 
 const DEFAULTS = {
   enabled: false,
@@ -162,12 +150,13 @@ const DEFAULTS = {
   movie_path: '/115-影视/115-downloads/电影',
   tv_path: '/115-影视/115-downloads/电视剧',
   magnet_staging_path: '/115-影视/115-downloads/磁力链接',
-  subscribe_enabled: true,
+  subscribe_enabled: false,
   subscribe_cron: '0 21 * * *',
   index_cron: '0 6 * * *',
   create_subdir: true,
   link_mode: 'first',
   upgrade_enabled: false,
+  min_media_size_mb: 10,
 }
 const linkModes = [{ title: '镜像回退（推荐）', value: 'first' }, { title: '分卷 / 多份文件：全部提交', value: 'all' }]
 
@@ -177,6 +166,18 @@ const msg = ref('')
 const msgType = ref('info')
 const saving = ref(false)
 const loading = ref(false)
+const directories = ref([])
+const selectedMovieDirectory = ref(''), selectedTvDirectory = ref('')
+const movieDirectories = computed(() => directoryOptions('movie'))
+const tvDirectories = computed(() => directoryOptions('tv'))
+function directoryOptions(type) {
+  return directories.value.filter(d => (d.media_type === type || !d.media_type || d.media_type === 'all') && ['115', 'u115', '115网盘Plus'].includes(d.storage)).map(d => ({ title: `${d.name || d.storage} · ${d.path} · ${d.monitored === true ? '监控已启用' : '监控未确认'}`, value: d.path }))
+}
+function chooseDirectory(type, path) { if (directoryOptions(type).some(d => d.value === path)) cfg[type === 'tv' ? 'tv_path' : 'movie_path'] = path }
+async function loadDirectories() {
+  try { const res = unwrap(await props.api.get('plugin/Doc115Subscribe/directories')); const data = res.data || {}; if (res.code === 0 && Array.isArray(data.directories || data.records)) directories.value = data.directories || data.records }
+  catch (_) { /* Older hosts can keep the explicit path fields. */ }
+}
 
 async function load(showTip = false) {
   if (loading.value || saving.value) return
@@ -219,7 +220,9 @@ async function save() {
   }
   saving.value = true
   try {
-    const payload = { ...cfg }
+    const minimum = Number(cfg.min_media_size_mb)
+    if (cfg.min_media_size_mb === '' || cfg.min_media_size_mb == null || !Number.isInteger(minimum) || minimum < 0 || minimum > 1024) throw new Error('小视频阈值必须是 0 到 1024 的整数')
+    const payload = { ...cfg, min_media_size_mb: minimum }
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/save_config', payload))
     if (res.code !== 0) throw new Error(res.msg || '配置校验未通过')
     secrets.tencent_ready = cfg.clear_tencent_cookie ? false : !!(cfg.tencent_cookie.trim() || secrets.tencent_ready)
@@ -244,5 +247,11 @@ function unwrap(res) {
   return { code: 0, data: res }
 }
 
-onMounted(() => load())
+onMounted(() => { load(); loadDirectories() })
 </script>
+
+<style scoped>
+.doc115-config-advanced { margin-top: 1rem; border-top: 1px solid var(--doc115-border); padding-top: 0.75rem; }
+.doc115-config-advanced summary { color: var(--doc115-blue); cursor: pointer; padding: 0.5rem 0; }
+.doc115-config .doc115-muted { font-size: 0.875rem; margin: 0.75rem 0; overflow-wrap: anywhere; }
+</style>

@@ -128,7 +128,9 @@ class DocIndex:
         return result
 
     def search_page(self, keyword: str, media_type: str = "all", quality: str = "all",
-                    link_kind: str = "all", page: int = 1, page_size: int = 10) -> Dict[str, Any]:
+                    link_kind: str = "all", page: int = 1, page_size: int = 10, subtitle: str = "all") -> Dict[str, Any]:
+        if subtitle not in ("all", "cn"):
+            raise ValueError("字幕筛选条件无效")
         if media_type not in ("all", "movie", "tv", "unknown") or quality not in ("all", "4k", "cn", "4k_cn", "1080p"):
             raise ValueError("搜索筛选条件无效")
         if link_kind not in ("all", "share", "magnet", "ed2k", "doc"):
@@ -144,6 +146,8 @@ class DocIndex:
                 continue
             text = f"{rec.get('title', '')} {rec.get('qtext') or rec.get('spec', '')}"
             cn = doc_parser.has_chinese(text)
+            if subtitle == "cn" and not cn:
+                continue
             is4k = doc_parser.is_4k(rec)
             if (quality == "4k" and not is4k or quality == "cn" and not cn
                     or quality == "4k_cn" and not (is4k and cn)

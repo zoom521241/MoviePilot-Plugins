@@ -20,7 +20,8 @@ router = ModuleType("link_router")
 router.LINK_115_SHARE = "115_share"
 router.LINK_ED2K = "ed2k"
 router.LINK_MAGNET = "magnet"
-with patch.dict(sys.modules, {SPEC.name: transfer, "link_router": router}):
+with patch.dict(sys.modules, {SPEC.name: transfer, "link_router": router,
+                             "p115client": ModuleType("p115client"), "p115client.util": ModuleType("p115client.util")}):
     SPEC.loader.exec_module(transfer)
 
 BTIH = "0123456789abcdef0123456789abcdef01234567"
