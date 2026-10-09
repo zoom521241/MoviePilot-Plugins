@@ -235,7 +235,7 @@
           <v-chip size="x-small" color="primary" class="ml-2">{{ records.length }} 条</v-chip>
           <v-spacer />
           <v-btn-group variant="text" density="comfortable" divided>
-            <v-btn size="small" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords(true)">
+            <v-btn size="small" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords()">
               刷新
             </v-btn>
             <v-btn
@@ -250,7 +250,7 @@
           </v-btn-group>
         </v-card-title>
         <v-card-subtitle class="text-caption pt-0">
-          点「刷新」会一并按 MoviePilot 的「整理记录」核对整理结果；最多保留最近 200 条。
+          整理结果由后台每 20 秒自动核对；某条想立刻重查就点它右侧的「核对」。最多保留最近 200 条。
         </v-card-subtitle>
         <v-card-text>
           <v-alert v-if="!records.length" type="info" variant="tonal">
@@ -272,6 +272,17 @@
                 </v-chip>
                 <v-spacer />
                 <span class="text-caption text-medium-emphasis">{{ r.submitted_at }}</span>
+                <v-btn
+                  v-if="needsVerify(r)"
+                  size="x-small"
+                  variant="text"
+                  color="primary"
+                  :loading="!!verifying[r.id]"
+                  :disabled="busy.records || !!verifying[r.id]"
+                  @click="verifyOne(r)"
+                >
+                  核对
+                </v-btn>
                 <v-btn v-if="isActiveTask(r)" size="x-small" variant="text" color="warning" :disabled="busy.records" @click="cancelTask(r)">停止自动搬运</v-btn>
                 <v-btn v-if="['failed', 'missing'].includes(r.status)" size="x-small" variant="text" color="primary" :disabled="busy.records || !!retrying[r.id]" :loading="!!retrying[r.id]" @click="retryTask(r)">重试</v-btn>
                 <v-btn
@@ -459,6 +470,7 @@ const STATUS_STYLE = {
   missing: { name: '原目录未找到，整理待确认', color: 'amber-darken-3' },
   unverified: { name: '整理待确认', color: 'amber-darken-3' },
   partial: { name: '部分整理失败', color: 'deep-orange-darken-2' },
+  unfound: { name: '未找到整理记录', color: 'grey-darken-1' },
   organized: { name: '已整理入库', color: 'green-darken-2' },
   failed: { name: '失败', color: 'red-darken-2' },
   cancelled: { name: '已停止自动搬运', color: 'grey' },
@@ -468,16 +480,35 @@ function kindColor(k) { return (KIND_STYLE[k] || {}).color || 'grey' }
 function statusName(s) { return (STATUS_STYLE[s] || {}).name || s }
 function statusColor(s) { return (STATUS_STYLE[s] || {}).color || 'grey' }
 
-async function loadRecords(force = false) {
+// 单条记录的「核对」：只重查这一条（不动其它记录）
+const verifying = reactive({})
+async function verifyOne(r) {
+  if (!r || verifying[r.id]) return
+  verifying[r.id] = true
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_verify', { id: r.id }, { timeout: 180000 }))
+    if (res.code === 0) {
+      const d = res.data || {}
+      if (d.confirmed) setMsg('已确认整理入库', 'success')
+      else if (d.unfound) setMsg('仍未找到整理记录（可能已手动删除）', 'warning')
+      else setMsg('暂未找到整理记录，后台会继续自动核对', 'warning')
+    } else {
+      setMsg(res.msg || '核对失败', 'error')
+    }
+  } catch (e) {
+    setMsg(`核对失败：${describeError(e)}`, 'error')
+  } finally {
+    verifying[r.id] = false
+  }
+  await loadRecords()
+}
+
+async function loadRecords() {
   if (busy.records || disposed) return
   busy.records = true
   try {
-    // 读取记录；force=true（点「刷新」）时让后端**强制**用 MP 整理记录核对一次整理结果，
-    // 否则走后端 30 秒节流（打开页面 / 定时轮询）。
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', {
-      params: force ? { verify: 1 } : undefined,
-      timeout: 180000,
-    }))
+    // 只读取记录：整理核对由后台任务每 20 秒自动做，或点单条记录右侧的「核对」单独重查
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 120000 }))
     if (res.code === 0) records.value = res.data || []
     else setMsg(res.msg || '读取转存记录失败', 'error')
   } catch (e) {
@@ -534,9 +565,11 @@ async function clearRecords() {
 function isActiveTask(r) { return ['submitting', 'submitted', 'downloading', 'waiting', 'awaiting_move', 'moving'].includes(r.status) && r.kind !== '115_share' }
 // 已搬入下载目录、但还没确认整理入库的记录：页面开着时也要继续轮询（含 115 分享转存）
 function isPendingOrganize(r) {
-  return !r.organization_confirmed
+  return !r.organization_confirmed && !r.org_giveup
     && ['done', 'unverified', 'organized', 'partial', 'missing'].includes(r.status)
 }
+// 需要「核对」按钮的记录：还没确认入库、也不是确定失败的
+function needsVerify(r) { return !r.organization_confirmed && r.status !== 'failed' }
 async function retryTask(r) {
   if (retrying[r.id]) return
   retrying[r.id] = true

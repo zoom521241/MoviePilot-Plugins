@@ -38,7 +38,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.9.4"
+    plugin_version = "0.9.5"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -142,7 +142,7 @@ class Doc115Subscribe(_PluginBase):
             scheduler.add_job(self.check_offline_tasks, trigger=IntervalTrigger(seconds=15),
                               id="doc115-offline", name="115文档离线搬运", **options)
             # 后台自动核对「本次资源是否已整理入库」：只调本机 MP 的整理记录接口，不访问 115。
-            scheduler.add_job(self.check_organization, trigger=IntervalTrigger(minutes=5),
+            scheduler.add_job(self.check_organization, trigger=IntervalTrigger(seconds=20),
                               id="doc115-organize", name="115文档整理核对", **options)
             self._scheduler = scheduler
             try:
@@ -935,14 +935,12 @@ class Doc115Subscribe(_PluginBase):
     def api_check_offline(self):
         return self.check_offline_tasks(force=True)
 
-    def api_records(self, limit: int = 200, verify: str = ""):
-        """转存记录。
+    def api_records(self, limit: int = 200):
+        """转存记录（纯读取）。
 
-        ``verify`` 传 1/true 时**强制**用 MP 整理记录核对一次（「刷新」按钮走这里）；
-        不传则按 30 秒节流顺带核对（打开页面、定时轮询走这里）。
+        整理核对不在这里做：后台每 20 秒自动核对，也可以点某一条记录右侧的「核对」单独重查。
         """
         try:
-            self.verify_organization(force=str(verify).strip().lower() in ("1", "true", "yes", "force"))
             return {"code": 0, "data": self._records().list()[:max(1, min(200, int(limit)))]}
         except Exception as exc:
             return {"code": 1, "msg": self._error(exc)}
@@ -1054,29 +1052,52 @@ class Doc115Subscribe(_PluginBase):
                 return narrowed
         return ours
 
-    def verify_organization(self, force: bool = False) -> Dict[str, Any]:
-        """核对「**本次转存/离线下载的资源**是否已经整理完成」——以 MP 的整理记录为证据。
+    ORG_PENDING_STATES = ("done", "unverified", "organized", "partial", "missing", "unfound")
+    ORG_GIVEUP_ATTEMPTS = 4      # 连续查不到 4 次 → 判「未找到整理记录」并移出自动核对池
+    ORG_BACKOFF_BASE = 20        # 退避基数（秒）：20 → 40 → 80 → 160
+    ORG_BACKOFF_MAX = 600        # 退避封顶（秒）
+    ORG_MAX_PER_RUN = 10         # 每轮最多核对多少条
 
-        判定（只看"这批文件"本身是否已被整理，不判断剧集是否完整）：
-          * 找到成功记录 → 「整理完成」，记下入库路径与已入库文件数，置 `organization_confirmed`；
-          * 有成功也有失败 → 「部分整理失败」，带上失败原因；
-          * 全部失败 → 「整理失败」，带上原因与阶段；
-          * 查不到任何记录 → 保持原状（说明尚未被受理/仍在整理，或这本就是旧记录）。
+    @staticmethod
+    def _org_due(rec: Dict[str, Any], now: float) -> bool:
+        """这条记录是否已过退避期、可以再查。"""
+        try:
+            return now >= float(rec.get("org_next_ts") or 0)
+        except (TypeError, ValueError):
+            return True
+
+    def verify_organization(self, force: bool = False, record_id: str = "") -> Dict[str, Any]:
+        """核对「**本次转存/离线下载的那批文件**是否已整理入库」——以 MP 的整理记录为证据。
+
+        两种调用方式：
+          * 自动（``record_id`` 为空）：**最新优先**遍历待核对记录，跳过退避期内的记录，
+            每轮最多 ``ORG_MAX_PER_RUN`` 条；连续 ``ORG_GIVEUP_ATTEMPTS`` 次查不到就判
+            「未找到整理记录」并移出自动核对池（你手动删掉的文件就属于这种）。
+          * 手动（带 ``record_id``）：**只核对这一条**，忽略退避与放弃标记。
+
+        判定：有成功记录 → 已整理入库（记入库文件数与目标路径）；另有失败记录 → 备注失败数；
+        全是失败 → 整理失败（带原因/阶段）。
         """
         store = self._records()
         now = time.time()
-        if not force and now - self._org_check_ts < 30:
+        if not force and now - self._org_check_ts < self.ORG_BACKOFF_BASE:
             return {"skipped": True}
         self._org_check_ts = now
-        checked = confirmed = failed = partial = 0
-        for rec in store.list():
+        checked = confirmed = failed = partial = unfound = 0
+        all_records = store.list()
+        if record_id:
+            records = [r for r in all_records if str(r.get("id") or "") == str(record_id)]
+        else:
+            records = [r for r in reversed(all_records) if not r.get("org_giveup")]   # 最新优先
+        for rec in records:
             if rec.get("organization_confirmed") or rec.get("status") == "failed":
                 continue
-            if rec.get("status") not in ("done", "unverified", "organized", "partial",
-                                         "awaiting_move", "moving", "missing"):
+            if str(rec.get("status") or "") not in self.ORG_PENDING_STATES:
                 continue
-            if checked >= 10:
+            if checked >= self.ORG_MAX_PER_RUN:
                 break
+            if not record_id and not self._org_due(rec, now):
+                continue                       # 还在退避期，跳过（不占用本轮名额）
             title = str(rec.get("title") or "").strip()
             if not title:
                 continue
@@ -1087,21 +1108,36 @@ class Doc115Subscribe(_PluginBase):
                 logger.debug(f"115文档订阅与查询：读取MP整理记录失败：{exc}")
                 break
             if not ours:
-                continue                      # 本批资源还没有整理记录 → 保持"待确认"
+                # 查不到整理记录：退避重试，连续多次仍查不到就判定"未找到"并移出自动池
+                attempts = int(rec.get("org_attempts") or 0) + 1
+                stamp = time.strftime("%m-%d %H:%M", time.localtime(now))
+                if attempts >= self.ORG_GIVEUP_ATTEMPTS:
+                    unfound += 1
+                    store.update(rec["id"], status="unfound", org_giveup=True, org_attempts=attempts,
+                                 org_next_ts=0, org_last_check=now,
+                                 message=f"未找到整理记录（可能已手动删除或未入库），已停止自动核对；"
+                                         f"点本行「核对」可重查（上次核对 {stamp}）")
+                    logger.info(f"115文档订阅与查询：未找到整理记录，停止自动核对：{title}")
+                else:
+                    delay = min(self.ORG_BACKOFF_MAX, self.ORG_BACKOFF_BASE * (2 ** (attempts - 1)))
+                    store.update(rec["id"], org_attempts=attempts, org_next_ts=now + delay,
+                                 org_last_check=now)
+                continue
             ok_entries = [e for e in ours if e.get("status") is True]
             bad_entries = [e for e in ours if e.get("status") is False]
             dest = str((ok_entries or ours)[0].get("dest") or "")[:140]
             tail = f"｜{dest}" if dest else ""
             if ok_entries:
-                # 有成功记录 = 本次这批资源已经整理入库（个别文件失败只作备注，不影响"完成"结论）
                 confirmed += 1
                 note = ""
                 if bad_entries:
                     partial += 1
-                    note = f"（另有 {len(bad_entries)} 个文件整理失败：{str(bad_entries[0].get('errmsg') or '未知原因')[:60]}）"
+                    note = (f"；另有 {len(bad_entries)} 个整理失败："
+                            f"{str(bad_entries[0].get('errmsg') or '未知原因')[:60]}")
                 store.update(rec["id"], status="organized", organization_confirmed=True,
                              organized_at=now, organized_count=len(ok_entries),
-                             organized_failed=len(bad_entries),
+                             organized_failed=len(bad_entries), org_giveup=False,
+                             org_attempts=int(rec.get("org_attempts") or 0), org_next_ts=0,
                              message=f"整理完成：本次资源已入库 {len(ok_entries)} 个文件{note}{tail}")
                 logger.info(f"115文档订阅与查询：整理完成（MP整理记录确认）：{title}｜"
                             f"{len(ok_entries)} 个文件、失败 {len(bad_entries)} 个｜{dest}")
@@ -1115,21 +1151,25 @@ class Doc115Subscribe(_PluginBase):
                                      f"重试 {bad.get('retry_count') or 0} 次）")
         if checked:
             logger.info(f"115文档订阅与查询：整理核对：检查 {checked} 条，完成 {confirmed} 条，"
-                        f"部分失败 {partial} 条，失败 {failed} 条")
-        return {"checked": checked, "confirmed": confirmed, "partial": partial, "failed": failed}
+                        f"部分失败 {partial} 条，失败 {failed} 条，未找到 {unfound} 条")
+        return {"checked": checked, "confirmed": confirmed, "partial": partial,
+                "failed": failed, "unfound": unfound}
 
-    def api_records_verify(self):
+    def api_records_verify(self, payload: dict = None):
+        """核对整理结果：传 ``{"id": ...}`` 只核对这一条；不传则核对全部待核对记录。"""
+        rid = str((payload or {}).get("id") or "")
         with self._operation_lock:
             try:
-                return {"code": 0, "data": self.verify_organization(force=True)}
+                return {"code": 0, "data": self.verify_organization(force=True, record_id=rid)}
             except Exception as exc:
                 return {"code": 1, "msg": self._error(exc)}
 
     def check_organization(self):
-        """后台定时核对「本次转存/离线下载的资源是否已整理入库」（每 5 分钟）。
+        """后台定时核对「本次转存/离线下载的资源是否已整理入库」（每 20 秒）。
 
-        只在存在**未确认**的记录时才去查 MP 的整理记录；没有待核对项就直接跳过，
-        不产生任何请求。只调本机 MP 接口，不访问 115。
+        只在存在**未确认且未放弃**的记录时才去查 MP 的整理记录；没有待核对项就直接跳过，
+        不产生任何请求。查不到的记录会指数退避，连续多次后判「未找到整理记录」并移出池子。
+        只调本机 MP 接口，不访问 115。
         """
         self._ensure_runtime()
         if not self._enabled:
@@ -1137,9 +1177,12 @@ class Doc115Subscribe(_PluginBase):
         pending_states = ("done", "unverified", "organized", "partial", "missing")
         try:
             store = self._records()
+            now = time.time()
             pending = [r for r in store.list()
                        if not r.get("organization_confirmed")
-                       and str(r.get("status") or "") in pending_states]
+                       and not r.get("org_giveup")
+                       and str(r.get("status") or "") in pending_states
+                       and self._org_due(r, now)]
         except Exception as exc:  # noqa: BLE001
             return {"code": 1, "msg": self._error(exc)}
         if not pending:

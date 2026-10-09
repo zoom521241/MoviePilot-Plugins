@@ -15,7 +15,7 @@ function component(name, api) {
   const emitted = []
   const helpers = { ...vue, onMounted() {}, onBeforeUnmount() {} }
   const names = name === 'Page'
-    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterLink,busy,resultVersion,close,startQr,checkQr,qrSessionId,records,loadRecords'
+    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterLink,busy,resultVersion,close,startQr,checkQr,qrSessionId,records,loadRecords,verifyOne,verifying,needsVerify'
     : 'load,save,cfg,secrets,msg,msgType,close'
   const setup = new Function('helpers', 'suppliedProps', 'suppliedEmit', `
     const { computed, reactive, ref, watch, onMounted, onBeforeUnmount } = helpers;
@@ -66,21 +66,47 @@ test('server filters and page are sent before full total is displayed', async ()
   assert.equal(page.results.value.length, 1)
 })
 
-test('refresh verifies the organize result while polling refresh does not', async () => {
+test('per-record verify only asks about that one record', async () => {
   const calls = []
   const page = component('Page', {
     get: async (path, options) => {
-      calls.push([path, options])
+      calls.push(['GET', path, options])
       return { code: 0, data: [{ id: 'r1', status: 'organized', title: 'demo' }] }
     },
-    post: async () => ({ code: 0 }),
+    post: async (path, payload) => {
+      calls.push(['POST', path, payload])
+      return { code: 0, data: { checked: 1, confirmed: 1, partial: 0, failed: 0, unfound: 0 } }
+    },
   })
-  await page.loadRecords(true)
-  assert.equal(calls[0][0].endsWith('/records'), true)
-  assert.equal(calls[0][1]?.params?.verify, 1)
+  await page.verifyOne({ id: 'r1' })
+  assert.equal(calls[0][0], 'POST')
+  assert.equal(calls[0][1].endsWith('/records_verify'), true)
+  assert.deepEqual(calls[0][2], { id: 'r1' })
+  assert.equal(calls.some(([, path]) => String(path).endsWith('/records')), true)
   assert.equal(page.records.value.length, 1)
+  assert.equal(page.verifying.r1, false)
+})
+
+test('records refresh only reads the list and never triggers a global verify', async () => {
+  const calls = []
+  const page = component('Page', {
+    get: async (path, options) => {
+      calls.push(['GET', path, options])
+      return { code: 0, data: [] }
+    },
+    post: async (path, payload) => {
+      calls.push(['POST', path, payload])
+      return { code: 0 }
+    },
+  })
   await page.loadRecords()
-  assert.equal(calls[1][1]?.params, undefined)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][0], 'GET')
+  assert.equal(calls[0][1].endsWith('/records'), true)
+  assert.equal(calls[0][2]?.params, undefined)
+  assert.equal(page.needsVerify({ status: 'done' }), true)
+  assert.equal(page.needsVerify({ status: 'failed' }), false)
+  assert.equal(page.needsVerify({ status: 'organized', organization_confirmed: true }), false)
 })
 
 test('late search response cannot replace a newer result or its index version', async () => {

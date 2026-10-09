@@ -197,6 +197,7 @@ const STATUS_STYLE = {
   missing: { name: '原目录未找到，整理待确认', color: 'amber-darken-3' },
   unverified: { name: '整理待确认', color: 'amber-darken-3' },
   partial: { name: '部分整理失败', color: 'deep-orange-darken-2' },
+  unfound: { name: '未找到整理记录', color: 'grey-darken-1' },
   organized: { name: '已整理入库', color: 'green-darken-2' },
   failed: { name: '失败', color: 'red-darken-2' },
   cancelled: { name: '已停止自动搬运', color: 'grey' },
@@ -206,16 +207,35 @@ function kindColor(k) { return (KIND_STYLE[k] || {}).color || 'grey' }
 function statusName(s) { return (STATUS_STYLE[s] || {}).name || s }
 function statusColor(s) { return (STATUS_STYLE[s] || {}).color || 'grey' }
 
-async function loadRecords(force = false) {
+// 单条记录的「核对」：只重查这一条（不动其它记录）
+const verifying = reactive({});
+async function verifyOne(r) {
+  if (!r || verifying[r.id]) return
+  verifying[r.id] = true;
+  try {
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_verify', { id: r.id }, { timeout: 180000 }));
+    if (res.code === 0) {
+      const d = res.data || {};
+      if (d.confirmed) setMsg('已确认整理入库', 'success');
+      else if (d.unfound) setMsg('仍未找到整理记录（可能已手动删除）', 'warning');
+      else setMsg('暂未找到整理记录，后台会继续自动核对', 'warning');
+    } else {
+      setMsg(res.msg || '核对失败', 'error');
+    }
+  } catch (e) {
+    setMsg(`核对失败：${describeError(e)}`, 'error');
+  } finally {
+    verifying[r.id] = false;
+  }
+  await loadRecords();
+}
+
+async function loadRecords() {
   if (busy.records || disposed) return
   busy.records = true;
   try {
-    // 读取记录；force=true（点「刷新」）时让后端**强制**用 MP 整理记录核对一次整理结果，
-    // 否则走后端 30 秒节流（打开页面 / 定时轮询）。
-    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', {
-      params: force ? { verify: 1 } : undefined,
-      timeout: 180000,
-    }));
+    // 只读取记录：整理核对由后台任务每 20 秒自动做，或点单条记录右侧的「核对」单独重查
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/records', { timeout: 120000 }));
     if (res.code === 0) records.value = res.data || [];
     else setMsg(res.msg || '读取转存记录失败', 'error');
   } catch (e) {
@@ -272,9 +292,11 @@ async function clearRecords() {
 function isActiveTask(r) { return ['submitting', 'submitted', 'downloading', 'waiting', 'awaiting_move', 'moving'].includes(r.status) && r.kind !== '115_share' }
 // 已搬入下载目录、但还没确认整理入库的记录：页面开着时也要继续轮询（含 115 分享转存）
 function isPendingOrganize(r) {
-  return !r.organization_confirmed
+  return !r.organization_confirmed && !r.org_giveup
     && ['done', 'unverified', 'organized', 'partial', 'missing'].includes(r.status)
 }
+// 需要「核对」按钮的记录：还没确认入库、也不是确定失败的
+function needsVerify(r) { return !r.organization_confirmed && r.status !== 'failed' }
 async function retryTask(r) {
   if (retrying[r.id]) return
   retrying[r.id] = true;
@@ -1366,7 +1388,7 @@ return (_ctx, _cache) => {
                       size: "small",
                       "prepend-icon": "mdi-refresh",
                       loading: busy.records,
-                      onClick: _cache[7] || (_cache[7] = $event => (loadRecords(true)))
+                      onClick: _cache[7] || (_cache[7] = $event => (loadRecords()))
                     }, {
                       default: _withCtx(() => [...(_cache[38] || (_cache[38] = [
                         _createTextVNode(" 刷新 ", -1)
@@ -1393,7 +1415,7 @@ return (_ctx, _cache) => {
             }),
             _createVNode(_component_v_card_subtitle, { class: "text-caption pt-0" }, {
               default: _withCtx(() => [...(_cache[41] || (_cache[41] = [
-                _createTextVNode(" 点「刷新」会一并按 MoviePilot 的「整理记录」核对整理结果；最多保留最近 200 条。 ", -1)
+                _createTextVNode(" 整理结果由后台每 20 秒自动核对；某条想立刻重查就点它右侧的「核对」。最多保留最近 200 条。 ", -1)
               ]))]),
               _: 1
             }),
@@ -1460,16 +1482,32 @@ return (_ctx, _cache) => {
                             }, 1032, ["color"]),
                             _createVNode(_component_v_spacer),
                             _createElementVNode("span", _hoisted_18, _toDisplayString(r.submitted_at), 1),
-                            (isActiveTask(r))
+                            (needsVerify(r))
                               ? (_openBlock(), _createBlock(_component_v_btn, {
                                   key: 0,
+                                  size: "x-small",
+                                  variant: "text",
+                                  color: "primary",
+                                  loading: !!verifying[r.id],
+                                  disabled: busy.records || !!verifying[r.id],
+                                  onClick: $event => (verifyOne(r))
+                                }, {
+                                  default: _withCtx(() => [...(_cache[43] || (_cache[43] = [
+                                    _createTextVNode(" 核对 ", -1)
+                                  ]))]),
+                                  _: 1
+                                }, 8, ["loading", "disabled", "onClick"]))
+                              : _createCommentVNode("", true),
+                            (isActiveTask(r))
+                              ? (_openBlock(), _createBlock(_component_v_btn, {
+                                  key: 1,
                                   size: "x-small",
                                   variant: "text",
                                   color: "warning",
                                   disabled: busy.records,
                                   onClick: $event => (cancelTask(r))
                                 }, {
-                                  default: _withCtx(() => [...(_cache[43] || (_cache[43] = [
+                                  default: _withCtx(() => [...(_cache[44] || (_cache[44] = [
                                     _createTextVNode("停止自动搬运", -1)
                                   ]))]),
                                   _: 1
@@ -1477,7 +1515,7 @@ return (_ctx, _cache) => {
                               : _createCommentVNode("", true),
                             (['failed', 'missing'].includes(r.status))
                               ? (_openBlock(), _createBlock(_component_v_btn, {
-                                  key: 1,
+                                  key: 2,
                                   size: "x-small",
                                   variant: "text",
                                   color: "primary",
@@ -1485,7 +1523,7 @@ return (_ctx, _cache) => {
                                   loading: !!retrying[r.id],
                                   onClick: $event => (retryTask(r))
                                 }, {
-                                  default: _withCtx(() => [...(_cache[44] || (_cache[44] = [
+                                  default: _withCtx(() => [...(_cache[45] || (_cache[45] = [
                                     _createTextVNode("重试", -1)
                                   ]))]),
                                   _: 1
@@ -1502,7 +1540,7 @@ return (_ctx, _cache) => {
                             }, {
                               default: _withCtx(() => [
                                 _createVNode(_component_v_icon, null, {
-                                  default: _withCtx(() => [...(_cache[45] || (_cache[45] = [
+                                  default: _withCtx(() => [...(_cache[46] || (_cache[46] = [
                                     _createTextVNode("mdi-delete", -1)
                                   ]))]),
                                   _: 1

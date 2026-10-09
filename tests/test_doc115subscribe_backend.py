@@ -624,13 +624,56 @@ class BackendTests(unittest.TestCase):
             {"id": "2", "status": "unverified", "title": "legacy one"},
             {"id": "3", "status": "downloading", "title": "still downloading"},
         ]
-        summary = {"checked": 2, "confirmed": 2, "partial": 0, "failed": 0}
+        summary = {"checked": 2, "confirmed": 2, "partial": 0, "failed": 0, "unfound": 0}
         with patch.object(self.plugin, "_records", return_value=store), \
                 patch.object(self.plugin, "verify_organization", return_value=dict(summary)) as verify:
             data = self.plugin.check_organization()
         verify.assert_called_once_with(force=True)
         self.assertEqual(data["data"]["pending"], 2)
         self.assertEqual(data["data"]["confirmed"], 2)
+
+    def test_organize_check_ignores_given_up_records(self):
+        """已判「未找到整理记录」的记录不再进入后台核对（否则会永远查下去）。"""
+        store = Mock()
+        store.list.return_value = [
+            {"id": "1", "status": "unfound", "org_giveup": True, "title": "deleted by hand"},
+            {"id": "2", "status": "organized", "organization_confirmed": True, "title": "confirmed"},
+        ]
+        with patch.object(self.plugin, "_records", return_value=store), \
+                patch.object(self.plugin, "verify_organization") as verify:
+            data = self.plugin.check_organization()
+        self.assertTrue(data["data"]["skipped"])
+        verify.assert_not_called()
+
+    def test_organize_check_backs_off_then_gives_up(self):
+        """查不到整理记录时先指数退避，连续多次后判「未找到整理记录」并移出自动核对池。"""
+        store = self.plugin._records()
+        record = store.add({"title": "synthetic never organised", "type": "movie", "kind": "magnet",
+                            "status": "done", "final_path": "/115-影视/115-downloads/电影"})
+
+        def current():
+            return [r for r in store.list() if r["id"] == record["id"]][0]
+
+        with patch.object(self.plugin, "_org_entries_for", return_value=[]):
+            self.plugin.verify_organization(force=True)
+            first = current()
+            self.assertEqual(first["org_attempts"], 1)
+            self.assertGreater(first["org_next_ts"], time.time())   # 进入退避期
+            self.assertEqual(first["status"], "done")               # 还没放弃
+
+            # 后台任务在退避期内不会重复查同一条
+            self.plugin.verify_organization(force=True)
+            self.assertEqual(current()["org_attempts"], 1)
+
+            for _ in range(self.plugin.ORG_GIVEUP_ATTEMPTS - 1):
+                store.update(record["id"], org_next_ts=0)           # 模拟退避时间已过
+                self.plugin.verify_organization(force=True)
+            final = current()
+            self.assertEqual(final["status"], "unfound")
+            self.assertTrue(final["org_giveup"])
+            self.assertIn("未找到整理记录", final["message"])
+
+        self.assertTrue(self.plugin.check_organization()["data"]["skipped"])
 
 
 if __name__ == "__main__":
