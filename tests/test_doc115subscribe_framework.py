@@ -128,12 +128,16 @@ class FrameworkTests(unittest.TestCase):
         self.plugin.init_plugin(config)
         old = self.plugin._scheduler
         self.assertIsInstance(old, self.Scheduler)
-        self.assertEqual(len(old.get_jobs()), 3)
+        # 三个定时任务 + 后台整理核对（doc115-organize）
+        old_ids = {job.id for job in old.get_jobs()}
+        self.assertEqual(len(old.get_jobs()), 4)
+        self.assertIn("doc115-organize", old_ids)
         self.plugin.init_plugin(config)
         current = self.plugin._scheduler
         self.assertIsNot(old, current)
         self.assertFalse(old.running)
-        self.assertEqual(len(current.get_jobs()), 3)
+        self.assertEqual(len(current.get_jobs()), 4)
+        self.assertIn("doc115-organize", {job.id for job in current.get_jobs()})
         self.plugin.stop_service()
         self.assertFalse(current.running)
         self.assertEqual(self.transfer.calls, [])
