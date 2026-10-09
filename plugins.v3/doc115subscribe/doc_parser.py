@@ -413,6 +413,35 @@ def iter_links(rec: Dict[str, Any]):
             yield item[0], item[1]
 
 
+def link_kinds_of(rec: Dict[str, Any]) -> List[str]:
+    """记录里出现的链接类型集合（去重排序）：115_share / magnet / ed2k / other。"""
+    return sorted({str(k) for k, _ in iter_links(rec) if k})
+
+
+def matches_link_kind(rec: Dict[str, Any], want: str) -> bool:
+    """按链接类型筛选一条记录。
+
+    ``want`` 取值：
+      * ``all``    不限
+      * ``share``  含 115 分享链接（可直接转存）
+      * ``magnet`` 含磁力链接
+      * ``ed2k``   含 ed2k 链接
+      * ``doc``    **没有任何可用资源链接**（纯列表/只在外部文档里，插件不能转存）
+    """
+    kinds = set(link_kinds_of(rec))
+    if want in ("", "all"):
+        return True
+    if want == "share":
+        return LINK_115_SHARE in kinds
+    if want == "magnet":
+        return LINK_MAGNET in kinds
+    if want == "ed2k":
+        return LINK_ED2K in kinds
+    if want == "doc":
+        return not (kinds & {LINK_115_SHARE, LINK_MAGNET, LINK_ED2K})
+    return True
+
+
 def search(records: List[Dict[str, Any]], keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
     """按关键词模糊匹配标题（去空格、忽略大小写）。"""
     kw = re.sub(r"\s+", "", (keyword or "")).lower()

@@ -122,20 +122,25 @@ class DocIndex:
                        "quality_score": doc_parser.quality_score(rec),
                        "bundle": bool(rec.get("bundle")), "sheet_bundle": bool(rec.get("sheet_bundle")),
                        "no_link": bool(rec.get("no_link")),
+                       "link_kinds": doc_parser.link_kinds_of(rec),
                        "index_version": self.index_version, "source_doc_id": self.source_doc_id,
                        "links": [{"kind": kind, "url": url} for kind, url in doc_parser.iter_links(rec)]})
         return result
 
     def search_page(self, keyword: str, media_type: str = "all", quality: str = "all",
-                    page: int = 1, page_size: int = 10) -> Dict[str, Any]:
+                    link_kind: str = "all", page: int = 1, page_size: int = 10) -> Dict[str, Any]:
         if media_type not in ("all", "movie", "tv", "unknown") or quality not in ("all", "4k", "cn", "4k_cn", "1080p"):
             raise ValueError("搜索筛选条件无效")
+        if link_kind not in ("all", "share", "magnet", "ed2k", "doc"):
+            raise ValueError("链接类型筛选条件无效")
         page, page_size = max(1, int(page)), max(1, min(100, int(page_size)))
         matches = doc_parser.search(self.records, keyword, limit=len(self.records))
         filtered = []
         for rec in matches:
             mtype = rec.get("media_type") or doc_parser.media_type_of(rec.get("sheet", ""), rec.get("title", ""))
             if media_type != "all" and media_type != mtype:
+                continue
+            if not doc_parser.matches_link_kind(rec, link_kind):
                 continue
             text = f"{rec.get('title', '')} {rec.get('qtext') or rec.get('spec', '')}"
             cn = doc_parser.has_chinese(text)

@@ -132,10 +132,17 @@
           <v-btn size="small" value="movie">电影</v-btn>
           <v-btn size="small" value="tv">电视剧</v-btn>
         </v-btn-toggle>
-        <v-btn-toggle v-model="filterQuality" density="compact" variant="outlined" mandatory>
+        <v-btn-toggle v-model="filterQuality" density="compact" variant="outlined" mandatory class="mr-2">
           <v-btn size="small" value="all">不限画质</v-btn>
           <v-btn size="small" value="4k">4K</v-btn>
           <v-btn size="small" value="cn">中文字幕</v-btn>
+        </v-btn-toggle>
+        <v-btn-toggle v-model="filterLink" density="compact" variant="outlined" mandatory>
+          <v-btn size="small" value="all">不限来源</v-btn>
+          <v-btn size="small" value="share">115转存</v-btn>
+          <v-btn size="small" value="magnet">磁力</v-btn>
+          <v-btn size="small" value="ed2k">ed2k</v-btn>
+          <v-btn size="small" value="doc">仅文档</v-btn>
         </v-btn-toggle>
       </v-card-title>
       <v-card-text>
@@ -226,8 +233,21 @@
         <v-card-title class="text-subtitle-1 d-flex align-center flex-wrap">
           <span>转存记录</span>
           <v-chip size="x-small" color="primary" class="ml-2">{{ records.length }} 条</v-chip>
-          <span class="text-caption text-medium-emphasis ml-2">（最多保留最近 200 条）</span>
+          <span class="text-caption text-medium-emphasis ml-2">
+            （整理结果以 MP 的「整理记录」为准核对；最多保留最近 200 条）
+          </span>
           <v-spacer />
+          <v-btn
+            size="small"
+            variant="text"
+            color="primary"
+            prepend-icon="mdi-check-decagram-outline"
+            :loading="busy.verify"
+            :disabled="!records.length"
+            @click="verifyRecords"
+          >
+            核对整理
+          </v-btn>
           <v-btn size="small" variant="text" prepend-icon="mdi-refresh" :loading="busy.records" @click="loadRecords">
             刷新
           </v-btn>
@@ -325,7 +345,7 @@ const status = reactive({
 })
 const msg = ref('')
 const msgType = ref('info')
-const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false })
+const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false, verify: false })
 const qrImage = ref('')
 const qrTip = ref('等待扫码')
 const qrSessionId = ref('')
@@ -348,9 +368,11 @@ const records = ref([])
 const page = ref(1)
 const filterType = ref('all')
 const filterQuality = ref('all')
+// 链接类型筛选：区分「115 转存 / 磁力 / ed2k / 纯文档（没有可转存的资源链接）」
+const filterLink = ref('all')
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
-watch([filterType, filterQuality], () => {
+watch([filterType, filterQuality, filterLink], () => {
   if (searchedKeyword.value) searchPage(searchedKeyword.value, 1)
 })
 const indexWarnings = computed(() => [...new Set([
@@ -445,7 +467,8 @@ const STATUS_STYLE = {
   moved: { name: '已搬入下载目录', color: 'amber-darken-3' },
   missing: { name: '原目录未找到，整理待确认', color: 'amber-darken-3' },
   unverified: { name: '整理待确认', color: 'amber-darken-3' },
-  organized: { name: '已整理', color: 'green-darken-2' },
+  partial: { name: '部分整理失败', color: 'deep-orange-darken-2' },
+  organized: { name: '已整理入库', color: 'green-darken-2' },
   failed: { name: '失败', color: 'red-darken-2' },
   cancelled: { name: '已停止自动搬运', color: 'grey' },
 }
@@ -496,6 +519,26 @@ async function deleteRecord(r) {
   } catch (e) {
     setMsg(`删除失败：${describeError(e)}`, 'error')
   }
+}
+
+async function verifyRecords() {
+  busy.verify = true
+  try {
+    // 用 MP 的「整理记录」核对：是否真的入库、整包是否齐全（剧集按集号去重统计）
+    const res = unwrap(await props.api.post('plugin/Doc115Subscribe/records_verify', {}, { timeout: 180000 }))
+    if (res.code === 0) {
+      const d = res.data || {}
+      setMsg(`整理核对完成：检查 ${d.checked || 0} 条，已入库 ${d.confirmed || 0} 条，未齐全 ${d.partial || 0} 条，失败 ${d.failed || 0} 条`,
+        d.failed ? 'warning' : 'success')
+    } else {
+      setMsg(res.msg || '核对失败', 'error')
+    }
+  } catch (e) {
+    setMsg(`核对失败：${describeError(e)}`, 'error')
+  } finally {
+    busy.verify = false
+  }
+  await loadRecords()
 }
 
 async function clearRecords() {
@@ -754,6 +797,7 @@ async function searchPage(kw, requestedPage) {
   const serial = ++searchSerial
   const mediaType = filterType.value
   const quality = filterQuality.value
+  const linkKind = filterLink.value
   searchedKeyword.value = kw
   busy.search = true
   searched.value = true
@@ -763,7 +807,8 @@ async function searchPage(kw, requestedPage) {
   page.value = requestedPage
   try {
     const res = unwrap(await props.api.post('plugin/Doc115Subscribe/search', {
-      keyword: kw, media_type: mediaType, quality, page: requestedPage, page_size: pageSize,
+      keyword: kw, media_type: mediaType, quality, link_kind: linkKind,
+      page: requestedPage, page_size: pageSize,
     }, { timeout: 120000 }))
     if (serial !== searchSerial || disposed) return
     if (res.code === 0) {

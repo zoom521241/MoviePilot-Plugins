@@ -38,7 +38,7 @@ class Doc115Subscribe(_PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.8.0"
+    plugin_version = "0.9.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -83,6 +83,7 @@ class Doc115Subscribe(_PluginBase):
                 self._qr_img = b""
                 self._qr_ts = 0.0
                 self._offline_next_ts = 0.0
+                self._org_check_ts = 0.0
                 self._last_refresh = {}
                 self._last_subscribe = {}
 
@@ -801,6 +802,7 @@ class Doc115Subscribe(_PluginBase):
                    ("search", self.api_search, "POST"), ("transfer", self.api_transfer, "POST"),
                    ("check_offline", self.api_check_offline, "POST"), ("records", self.api_records, "GET"),
                    ("records_delete", self.api_records_delete, "POST"), ("cancel_task", self.api_cancel_task, "POST"),
+                   ("records_verify", self.api_records_verify, "POST"),
                    ("retry_task", self.api_retry_task, "POST"), ("run_subscribe", self.run_subscribe, "POST"),
                    ("qr_start", self.api_qr_start, "GET"), ("qr_status", self.api_qr_check, "GET")]
         return [{"path": "/" + name, "endpoint": endpoint, "auth": "bear", "methods": [method], "summary": name}
@@ -905,7 +907,8 @@ class Doc115Subscribe(_PluginBase):
             if not kw:
                 raise ValueError("请输入影视名称")
             data = index.search_page(kw, media_type=body.get("media_type", "all"),
-                quality=body.get("quality", "all"), page=int(body.get("page", 1)), page_size=int(body.get("page_size", 10)))
+                quality=body.get("quality", "all"), link_kind=body.get("link_kind", "all"),
+                page=int(body.get("page", 1)), page_size=int(body.get("page_size", 10)))
             return {"code": 0, "data": data}
         except Exception as exc:
             return {"code": 1, "msg": self._error(exc)}
@@ -930,9 +933,188 @@ class Doc115Subscribe(_PluginBase):
 
     def api_records(self, limit: int = 200):
         try:
+            self.verify_organization()          # 顺带用 MP 整理记录核对"是否真的入库"（内部有节流）
             return {"code": 0, "data": self._records().list()[:max(1, min(200, int(limit)))]}
         except Exception as exc:
             return {"code": 1, "msg": self._error(exc)}
+
+    # ---- 整理结果核对（用 MoviePilot 的「整理记录」作证据）-------------------
+    def _mp_api_json(self, path: str, params: Dict[str, Any]):
+        """调用 MoviePilot 自身 API（本机回环，端口自动探测，带 UA）。"""
+        from app.core.config import settings
+        token = (getattr(settings, "API_TOKEN", "") or "").strip()
+        if not token:
+            raise RuntimeError("MP未配置API_TOKEN")
+        ports = list(dict.fromkeys(int(p) for p in
+                                   (getattr(settings, "PORT", 0), 5000, 5001, 3000)
+                                   if str(p).isdigit() and int(p)))
+        last: Optional[Exception] = None
+        for port in ports:
+            try:
+                query = urllib.parse.urlencode({"apikey": token, **params})
+                req = urllib.request.Request(f"http://127.0.0.1:{port}{path}?{query}",
+                                             headers={"User-Agent": "MoviePilot-Doc115Subscribe"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode())
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+        raise RuntimeError(f"调用MP接口失败：{last}")
+
+    @staticmethod
+    def _org_search_key(title: str) -> str:
+        """把文档标题截成"核心片名"，用于查 MP 整理记录（MP 入库后是「片名 (年份)」）。"""
+        core = re.split(r"[\[（(]|第[一二三四五六七八九十\d]+季|(?<![A-Za-z0-9])S\d{1,2}|Season",
+                        str(title or ""), maxsplit=1)[0]
+        return core.strip(" .-·:：")[:24]
+
+    def _mp_transfer_entries(self, title: str) -> List[Dict[str, Any]]:
+        """按片名通配符查 MP 的「整理记录」，返回条目列表。"""
+        key = self._org_search_key(title)
+        if not key:
+            return []
+        body = self._mp_api_json("/api/v1/history/transfer",
+                                 {"title": f"*{key}*", "page": 1, "count": 200})
+        data = body.get("data") if isinstance(body, dict) else None
+        if isinstance(data, dict):
+            return list(data.get("list") or [])
+        return list(data) if isinstance(data, list) else []
+
+    @staticmethod
+    def _norm_org_text(text: str) -> str:
+        return re.sub(r"[\s\-_.·:：!！?？,，/\\|\[\]【】（）()]", "", str(text or "")).lower()
+
+    @staticmethod
+    def _entry_episodes(entry: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+        """从整理记录里取 (季, 集)。"""
+        for raw in (f"{entry.get('seasons') or ''}{entry.get('episodes') or ''}",
+                    str(entry.get("dest") or ""),
+                    str((entry.get("dest_fileitem") or {}).get("path") or "")):
+            m = re.search(r"[sS](\d{1,2})[eE](\d{1,3})", raw)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+        return None
+
+    @staticmethod
+    def _record_season(title: str) -> Optional[int]:
+        """从记录标题里取季号（第N季 / Sxx / Season N），取不到返回 None。"""
+        t = str(title or "")
+        cn = "一二三四五六七八九十"
+        m = re.search(r"第([一二三四五六七八九十]+|\d+)季", t)
+        if m:
+            raw = m.group(1)
+            if raw.isdigit():
+                return int(raw)
+            return cn.index(raw) + 1 if raw in cn else None
+        m = re.search(r"(?<![A-Za-z0-9])[sS](\d{1,2})(?![0-9])", t)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"Season\s*(\d{1,2})", t, re.I)
+        return int(m.group(1)) if m else None
+
+    def _org_entries_for(self, rec: Dict[str, Any], title: str) -> List[Dict[str, Any]]:
+        """找出**本次转存/离线下载的那批文件**对应的 MP 整理记录。
+
+        先按片名通配符查出该片的所有整理记录（标题严格相等、且季号一致，避免
+        「飞驰人生」误配「飞驰人生3」）；若记录里知道 `item_name`，再用 MP 记录里的
+        **源路径 `src`** 收窄到「本次这批文件」——这是判断"本次资源是否整理完成"的关键。
+        """
+        entries = self._mp_transfer_entries(title)
+        mine = self._norm_org_text(self._org_search_key(title))
+        if not mine:
+            return []
+        want_season = self._record_season(title)
+        ours = []
+        for e in entries:
+            e_norm = self._norm_org_text(e.get("title") or "")
+            e_norm_noyear = re.sub(r"(?:18|19|20|21)\d{2}$", "", e_norm)
+            if not (e_norm == mine or e_norm_noyear == mine):
+                continue
+            ep = self._entry_episodes(e)
+            if want_season is not None and ep and ep[0] != want_season:
+                continue
+            ours.append(e)
+        # 用源路径锁定"本次这批文件"
+        name = str(rec.get("item_name") or "").strip()
+        final = str(rec.get("final_path") or "").strip()
+        if name and final:
+            prefix = f"{final.rstrip('/')}/{name}"
+            narrowed = [e for e in ours
+                        if str(e.get("src") or (e.get("src_fileitem") or {}).get("path") or "")
+                        .startswith(prefix)]
+            if narrowed:
+                return narrowed
+        return ours
+
+    def verify_organization(self, force: bool = False) -> Dict[str, Any]:
+        """核对「**本次转存/离线下载的资源**是否已经整理完成」——以 MP 的整理记录为证据。
+
+        判定（只看"这批文件"本身是否已被整理，不判断剧集是否完整）：
+          * 找到成功记录 → 「整理完成」，记下入库路径与已入库文件数，置 `organization_confirmed`；
+          * 有成功也有失败 → 「部分整理失败」，带上失败原因；
+          * 全部失败 → 「整理失败」，带上原因与阶段；
+          * 查不到任何记录 → 保持原状（说明尚未被受理/仍在整理，或这本就是旧记录）。
+        """
+        store = self._records()
+        now = time.time()
+        if not force and now - self._org_check_ts < 30:
+            return {"skipped": True}
+        self._org_check_ts = now
+        checked = confirmed = failed = partial = 0
+        for rec in store.list():
+            if rec.get("organization_confirmed") or rec.get("status") == "failed":
+                continue
+            if rec.get("status") not in ("done", "unverified", "organized", "partial",
+                                         "awaiting_move", "moving", "missing"):
+                continue
+            if checked >= 10:
+                break
+            title = str(rec.get("title") or "").strip()
+            if not title:
+                continue
+            checked += 1
+            try:
+                ours = self._org_entries_for(rec, title)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"115文档订阅与查询：读取MP整理记录失败：{exc}")
+                break
+            if not ours:
+                continue                      # 本批资源还没有整理记录 → 保持"待确认"
+            ok_entries = [e for e in ours if e.get("status") is True]
+            bad_entries = [e for e in ours if e.get("status") is False]
+            dest = str((ok_entries or ours)[0].get("dest") or "")[:140]
+            tail = f"｜{dest}" if dest else ""
+            if ok_entries:
+                # 有成功记录 = 本次这批资源已经整理入库（个别文件失败只作备注，不影响"完成"结论）
+                confirmed += 1
+                note = ""
+                if bad_entries:
+                    partial += 1
+                    note = f"（另有 {len(bad_entries)} 个文件整理失败：{str(bad_entries[0].get('errmsg') or '未知原因')[:60]}）"
+                store.update(rec["id"], status="organized", organization_confirmed=True,
+                             organized_at=now, organized_count=len(ok_entries),
+                             organized_failed=len(bad_entries),
+                             message=f"整理完成：本次资源已入库 {len(ok_entries)} 个文件{note}{tail}")
+                logger.info(f"115文档订阅与查询：整理完成（MP整理记录确认）：{title}｜"
+                            f"{len(ok_entries)} 个文件、失败 {len(bad_entries)} 个｜{dest}")
+            else:
+                failed += 1
+                bad = bad_entries[0]
+                reason = str(bad.get("errmsg") or "未知原因")
+                stage = str(bad.get("failure_stage") or "-")
+                store.update(rec["id"], status="failed",
+                             message=f"整理失败：{reason[:100]}（阶段 {stage}，"
+                                     f"重试 {bad.get('retry_count') or 0} 次）")
+        if checked:
+            logger.info(f"115文档订阅与查询：整理核对：检查 {checked} 条，完成 {confirmed} 条，"
+                        f"部分失败 {partial} 条，失败 {failed} 条")
+        return {"checked": checked, "confirmed": confirmed, "partial": partial, "failed": failed}
+
+    def api_records_verify(self):
+        with self._operation_lock:
+            try:
+                return {"code": 0, "data": self.verify_organization(force=True)}
+            except Exception as exc:
+                return {"code": 1, "msg": self._error(exc)}
 
     def api_records_delete(self, payload: dict = None):
         with self._operation_lock:

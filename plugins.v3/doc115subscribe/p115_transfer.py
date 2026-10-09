@@ -618,6 +618,67 @@ class P115Transfer:
         except P115NotFound:
             return False
 
+    # -- 媒体文件统计（核对"整包是否全部整理入库"）----------------------------
+    VIDEO_EXTS = (".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".wmv", ".flv",
+                  ".rmvb", ".rm", ".iso", ".mpg", ".mpeg", ".m4v", ".webm", ".vob", ".tp")
+    _EP_RE = re.compile(r"[sS](\d{1,2})[eE](\d{1,3})")
+
+    def _list_items(self, path: str) -> List[Dict[str, Any]]:
+        """列出目录下的条目（含是否文件夹），用于统计媒体文件。"""
+        cid = self.path_to_id(path, mkdir=False)
+        out: List[Dict[str, Any]] = []
+        offset = 0
+        for _page in range(100):
+            resp = self._call("fs_files", {"cid": cid, "limit": 400, "offset": offset,
+                                           "show_dir": 1, "o": "file_name", "asc": 1})
+            self._require_success(resp, "读取目录")
+            data = resp.get("data")
+            entries = data.get("list") if isinstance(data, dict) else data
+            if not isinstance(entries, list):
+                raise P115Error("目录列表返回格式错误")
+            total = self._total(resp, data)
+            if not entries:
+                break
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("n") or item.get("fn") or item.get("file_name") or "")
+                if not name:
+                    continue
+                # 115 目录列表里「文件夹」没有 fid、只有 cid
+                is_dir = bool(item.get("is_dir")) or (not item.get("fid") and bool(item.get("cid")))
+                out.append({"name": name, "is_dir": is_dir})
+            offset += len(entries)
+            if total is not None and offset >= total:
+                break
+        return out
+
+    def count_media_files(self, path: str, max_dirs: int = 80) -> Dict[str, Any]:
+        """递归统计目录下的**视频文件数**与**集号集合**。
+
+        用于搬运时记录"源侧预期规模"，之后拿 MP 整理记录里的入库集数对比，
+        判断这一整包（尤其整季剧集）是否**全部**整理入库。
+        """
+        files, episodes = 0, set()
+        queue = [posixpath.normpath(str(path).replace("\\", "/"))]
+        visited = 0
+        while queue and visited < max_dirs:
+            cur = queue.pop(0)
+            visited += 1
+            try:
+                items = self._list_items(cur)
+            except Exception:  # noqa: BLE001
+                break
+            for it in items:
+                if it["is_dir"]:
+                    queue.append(f"{cur.rstrip('/')}/{it['name']}")
+                elif it["name"].lower().endswith(self.VIDEO_EXTS):
+                    files += 1
+                    m = self._EP_RE.search(it["name"])
+                    if m:
+                        episodes.add((int(m.group(1)), int(m.group(2))))
+        return {"files": files, "episodes": sorted(episodes), "dirs": visited}
+
     def get_file_info(self, file_id: str) -> Optional[Dict[str, Any]]:
         """Read an exact file/folder ID; None means confirmed absence only."""
         fid = str(file_id or "")
