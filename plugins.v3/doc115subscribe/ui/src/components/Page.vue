@@ -256,7 +256,8 @@
           <v-alert v-if="!records.length" type="info" variant="tonal">
             还没有转存 / 离线下载记录。去「搜索」页转存一条试试。
           </v-alert>
-          <v-card v-for="(r, i) in records" :key="i" variant="tonal" class="mb-2">
+          <v-card v-for="(r, i) in records" :key="i" variant="tonal" class="mb-2 record-row">
+            <div :class="['record-row-bar', 'bg-' + statusColor(r.status)]" />
             <v-card-text class="py-2">
               <div class="d-flex align-center flex-wrap">
                 <span class="font-weight-bold text-body-1 text-primary">{{ r.title }}</span>
@@ -389,9 +390,9 @@ const cookieAlertType = computed(() => {
 // ---- 字段配色 ----
 // 链接类型：颜色 + 图标双重区分，一眼能看出是 115 分享还是磁力
 const LINK_STYLE = {
-  '115_share': { color: 'deep-purple', name: '115分享', icon: 'mdi-cloud-download' },
-  magnet: { color: 'blue-darken-3', name: '磁力', icon: 'mdi-magnet' },
-  ed2k: { color: 'teal-darken-3', name: 'ed2k', icon: 'mdi-link-variant' },
+  '115_share': { color: 'cyan-darken-2', name: '115分享', icon: 'mdi-cloud-download' },
+  magnet: { color: 'orange-darken-3', name: '磁力', icon: 'mdi-magnet' },
+  ed2k: { color: 'brown-darken-1', name: 'ed2k', icon: 'mdi-link-variant' },
   http: { color: 'grey-darken-2', name: '网页', icon: 'mdi-web' },
 }
 function linkColor(kind) { return (LINK_STYLE[kind] || {}).color || 'grey' }
@@ -442,9 +443,9 @@ function setMsg(text, type = 'info') {
 
 // ---- 转存记录 ----
 const KIND_STYLE = {
-  '115_share': { name: '115分享', color: 'deep-purple' },
-  magnet: { name: '磁力', color: 'blue-darken-3' },
-  ed2k: { name: 'ed2k', color: 'teal-darken-3' },
+  '115_share': { name: '115分享', color: 'cyan-darken-2' },
+  magnet: { name: '磁力', color: 'orange-darken-3' },
+  ed2k: { name: 'ed2k', color: 'brown-darken-1' },
 }
 const STATUS_STYLE = {
   submitting: { name: '提交中', color: 'blue-darken-2' },
@@ -845,5 +846,17 @@ onBeforeUnmount(() => {
 <style>
 .doc115-page {
   width: 100%;
+}
+/* 记录行左侧按状态着色，方便一眼分辨（已整理=绿、进行中=琥珀/蓝、失败=红） */
+.record-row {
+  position: relative;
+  overflow: hidden;
+}
+.record-row-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
 }
 </style>
