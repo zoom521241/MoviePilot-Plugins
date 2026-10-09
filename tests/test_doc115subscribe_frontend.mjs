@@ -15,7 +15,7 @@ function component(name, api) {
   const emitted = []
   const helpers = { ...vue, onMounted() {}, onBeforeUnmount() {} }
   const names = name === 'Page'
-    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,busy,resultVersion,close,startQr,checkQr,qrSessionId'
+    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterLink,busy,resultVersion,close,startQr,checkQr,qrSessionId,records,verifyRecords'
     : 'load,save,cfg,secrets,msg,msgType'
   const setup = new Function('helpers', 'suppliedProps', 'suppliedEmit', `
     const { computed, reactive, ref, watch, onMounted, onBeforeUnmount } = helpers;
@@ -58,11 +58,33 @@ test('server filters and page are sent before full total is displayed', async ()
   } })
   page.filterType.value = 'tv'
   page.filterQuality.value = '4k'
+  page.filterLink.value = 'share'
   await vue.nextTick()
   await page.searchPage('locked keyword', 3)
-  assert.deepEqual(calls[0], { keyword: 'locked keyword', media_type: 'tv', quality: '4k', page: 3, page_size: 10 })
+  assert.deepEqual(calls[0], { keyword: 'locked keyword', media_type: 'tv', quality: '4k', link_kind: 'share', page: 3, page_size: 10 })
   assert.equal(page.total.value, 125)
   assert.equal(page.results.value.length, 1)
+})
+
+test('organize verification hits the verify endpoint then reloads records', async () => {
+  const calls = []
+  const page = component('Page', {
+    post: async (path, payload) => {
+      calls.push([path, payload])
+      if (path.endsWith('/records_verify')) {
+        return { code: 0, data: { checked: 2, confirmed: 1, partial: 0, failed: 0 } }
+      }
+      return { code: 0, data: [] }
+    },
+    get: async (path) => {
+      calls.push([path, null])
+      return { code: 0, data: [{ id: 'r1', status: 'organized', title: 'demo' }] }
+    },
+  })
+  await page.verifyRecords()
+  assert.equal(calls[0][0].endsWith('/records_verify'), true)
+  assert.equal(calls.some(([p]) => String(p).endsWith('/records')), true)
+  assert.equal(page.records.value.length, 1)
 })
 
 test('late search response cannot replace a newer result or its index version', async () => {
