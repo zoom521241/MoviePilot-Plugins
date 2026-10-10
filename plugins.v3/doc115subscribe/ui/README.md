@@ -58,10 +58,13 @@ ui/
 ├── package.json
 └── src/
     ├── main.js                    开发态挂载（createVuetify）
-    ├── App.vue                    开发态壳子
+    ├── App.vue                    开发态壳子（合成桩数据，不进入生产 dist）
+    ├── build-entry.js             生产构建的空入口：dist 只含联邦 exposes
+    ├── version.js                 UI_BUILD 版本常量（Page / Config 共用，测试守护与 package.json 一致）
     ├── components/
     │   ├── Page.vue               搜索/电影订阅/任务；来源与保存目录确认
-    │   └── Config.vue             基础设置与折叠高级设置
+    │   ├── Config.vue             分组设置（腾讯文档 / 115 / 保存目录 / 电影订阅 / 高级），实时校验
+    │   └── ConfirmDialog.vue      统一确认弹窗（替代浏览器原生确认框，跟随插件深浅主题）
     ├── styles/doc115.css          插件命名空间语义颜色与响应式布局
     └── vuetify/
         ├── defaults.ts            组件默认值

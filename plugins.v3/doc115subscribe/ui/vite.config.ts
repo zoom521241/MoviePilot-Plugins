@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import federation from '@originjs/vite-plugin-federation'
 
-export default defineConfig({
+export default defineConfig(({ command, mode }) => ({
   plugins: [
     vue(),
     federation({
@@ -27,5 +27,7 @@ export default defineConfig({
     modulePreload: false,
     outDir: 'dist',
     emptyOutDir: true,
+    // 生产构建不以 index.html 为入口，build:preview（--mode development）仍用 index.html；避免把合成预览（App.vue 与桩数据）打进 dist
+    rollupOptions: command === 'build' && mode !== 'development' ? { input: 'src/build-entry.js' } : {},
   },
-})
+}))
