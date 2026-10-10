@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
-import _sfc_main$1 from './__federation_expose_Page-T29bRQ4Z.js';
+import _sfc_main$1 from './__federation_expose_Page-D3JpcIBU.js';
 
 const {createElementVNode:_createElementVNode,vModelCheckbox:_vModelCheckbox,withDirectives:_withDirectives,createTextVNode:_createTextVNode,vModelSelect:_vModelSelect,createVNode:_createVNode,normalizeStyle:_normalizeStyle,toDisplayString:_toDisplayString,resolveComponent:_resolveComponent,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock} = await importShared('vue');
 
@@ -30,7 +30,7 @@ const _sfc_main = {
       get: async (path, options) => {
         calls.push({ method: "GET", path, params: options?.params });
         if (path.endsWith("/status")) return { code: 0, data: SAMPLE_STATUS };
-        if (path.endsWith("/records")) return { code: 0, data: { records: SAMPLE_RECORDS, total: SAMPLE_RECORDS.length, page: 1 } };
+        if (path.endsWith("/records")) return { code: 0, data: { records: SAMPLE_RECORDS, total: SAMPLE_RECORDS.length, page: 1, stats: { movie: { total: 2, organized: 1 }, tv: { total: 2, organized: 0 }, total: 4, organized: 1 } } };
         if (path.endsWith("/get_config")) return { code: 0, data: { ...SAMPLE_STATUS, subscribe_enabled: false, tencent_cookie_ready: true, movie_path: SAMPLE_STATUS.movie_path, tv_path: SAMPLE_STATUS.tv_path } };
         if (path.endsWith("/subscriptions_preview")) return { code: 0, data: { subscriptions: [{ id: "movie", title: "合成订阅电影", matched: false, reason: "过滤组无法评估：文档缺少发布信息", qtext: "4K 中文字幕" }], message: "合成缓存，没有提交资源" } };
         if (path.endsWith("/diagnostics")) return { code: 0, data: { summary: "本地索引与任务快照可读取；监控未确认。" } };

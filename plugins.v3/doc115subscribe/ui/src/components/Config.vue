@@ -1,7 +1,7 @@
 <template>
   <v-card variant="outlined" class="doc115-config" :data-doc115-theme="darkTheme ? 'dark' : 'light'">
     <v-card-title class="text-subtitle-1 d-flex align-center">
-      <span>115文档订阅与查询 · 设置 <small class="doc115-muted">前端 v0.10.0</small></span>
+      <span>115文档订阅与查询 · 设置 <small class="doc115-muted">前端 v0.10.5</small></span>
       <v-spacer />
       <v-btn icon size="small" variant="text" title="关闭" @click="close">
         <v-icon>mdi-close</v-icon>

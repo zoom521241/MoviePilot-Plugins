@@ -564,10 +564,6 @@ class TaskRuntime:
         finally:
             self._offline_lock.release()
 
-    def api_check_offline(self):
-        # An explicit write action queues eligible work; it does not bypass limits.
-        return {"code": 0, "msg": "待搬运任务由后台按预算处理", "data": {"state": "queued"}}
-
     def records_view(self, refresh=False):
         return {"code": 0, "data": self._records().list()}
 
@@ -627,9 +623,27 @@ class TaskRuntime:
                 raise ValueError("无效的任务筛选")
             page, size = max(1, int(page)), max(1, min(100, int(page_size)))
             return {"code": 0, "data": {"records": [self._record_view(x) for x in rows[(page - 1)*size:page*size]],
-                "total": len(rows), "page": page, "page_size": size}}
+                "total": len(rows), "page": page, "page_size": size, "stats": self._record_stats(rows)}}
         except Exception as exc:
             return {"code": 1, "msg": self._error(exc)}
+
+    @staticmethod
+    def _record_stats(rows) -> Dict[str, Any]:
+        """按电影/电视剧统计任务数与已整理入库数（用于页面顶部展示）。"""
+        stats = {"movie": {"total": 0, "organized": 0}, "tv": {"total": 0, "organized": 0},
+                 "total": 0, "organized": 0}
+        for row in rows:
+            kind = str(row.get("type") or row.get("target_type") or "").strip().lower()
+            bucket = "tv" if kind in ("tv", "电视剧", "剧集") else "movie" if kind in ("movie", "电影") else ""
+            organized = bool(row.get("organization_confirmed")) or str(row.get("organization_status") or "") == "success"
+            stats["total"] += 1
+            if organized:
+                stats["organized"] += 1
+            if bucket:
+                stats[bucket]["total"] += 1
+                if organized:
+                    stats[bucket]["organized"] += 1
+        return stats
 
     def delete_record(self, rec_id=""):
         store = self._records()

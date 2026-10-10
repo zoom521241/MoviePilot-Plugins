@@ -13,6 +13,12 @@
     <v-alert v-if="status.version && status.version !== UI_BUILD" type="warning" variant="tonal" density="compact" class="doc115-feedback">前后端版本不同，请重新打开插件页面；若仍不同，请检查插件更新是否完成。</v-alert>
     <v-alert v-if="indexWarnings.length" type="warning" variant="tonal" density="compact" class="doc115-feedback">部分索引尚未更新：{{ indexWarnings.join('；') }}</v-alert>
 
+    <div v-if="!settingsOpen && stats.total" class="doc115-actions doc115-wrap doc115-statsbar" aria-label="任务统计">
+      <span class="doc115-chip doc115-purple">电影 {{ stats.movie.total }} 条 · 已入库 {{ stats.movie.organized }}</span>
+      <span class="doc115-chip doc115-cyan">电视剧 {{ stats.tv.total }} 条 · 已入库 {{ stats.tv.organized }}</span>
+      <span class="doc115-chip doc115-neutral">共 {{ stats.total }} 条 · 已入库 {{ stats.organized }}</span>
+    </div>
+
     <section v-if="settingsOpen" class="doc115-panel doc115-settings-panel" aria-label="设置与维护">
       <Config :api="api" :model="model" @action="loadStatus" @close="settingsOpen = false" />
       <details class="doc115-maintenance" open>
@@ -29,6 +35,7 @@
       </details>
     </section>
 
+    <template v-else>
     <nav class="doc115-tabs" aria-label="插件功能">
       <button v-for="item in tabs" :key="item.value" type="button" :class="{ 'doc115-tab-active': tab === item.value }" :aria-current="tab === item.value ? 'page' : undefined" @click="tab = item.value">{{ item.label }}</button>
     </nav>
@@ -54,9 +61,9 @@
           <div class="doc115-meta"><span class="doc115-chip" :class="r.media_type === 'movie' ? 'doc115-purple' : 'doc115-blue'">{{ mediaTypeName(r.media_type) }}</span><span v-if="r.bundle" class="doc115-chip doc115-orange">大包链接</span><span class="doc115-purple">来源：{{ r.sheet || '文档' }}</span><span v-if="r.tmdbid" class="doc115-muted">TMDB {{ r.tmdbid }}</span></div>
           <p class="doc115-spec"><span class="doc115-muted">规格：</span><span v-for="(token, i) in specTokens(r.qtext)" :key="i" :class="token.color || 'doc115-muted'">{{ token.text }}</span></p>
           <div class="doc115-links"><a v-for="(link, i) in r.links || []" :key="i" class="doc115-chip" :class="linkColor(link.kind)" :href="linkHref(link.url)" target="_blank" rel="noopener noreferrer"><v-icon size="small">{{ linkIcon(link.kind) }}</v-icon>{{ linkName(link.kind) }} · {{ shortUrl(link.url) }}</a></div>
-          <div class="doc115-card-footer"><p v-if="r.sheet_bundle || r.no_link || r.bundle" class="doc115-muted">{{ r.no_link ? '此条目仅提供文档，请打开上方链接查看。' : '此条目是大包，已关闭一键获取，请打开原链接确认范围。' }}</p><template v-else><p class="doc115-muted">默认保存到{{ mediaTypeName(r.media_type === 'tv' ? 'tv' : 'movie') }}目录，可手动修改。</p><v-btn size="small" color="primary" :disabled="busy.search || !r.record_id || !!transferring[r.record_id]" :loading="!!transferring[r.record_id]" @click="prepareTransfer(r)">选择来源与保存目录</v-btn></template></div>
+          <div class="doc115-card-footer"><p v-if="r.sheet_bundle || r.no_link || r.bundle" class="doc115-muted">{{ r.no_link ? '此条目仅提供文档，请打开上方链接查看。' : '此条目是大包，已关闭一键获取，请打开原链接确认范围。' }}</p><template v-else><p class="doc115-muted">默认保存到{{ mediaTypeName(r.media_type === 'tv' ? 'tv' : 'movie') }}目录，可手动修改。</p><v-btn size="small" variant="flat" class="doc115-cta" prepend-icon="mdi-download" :disabled="busy.search || !r.record_id || !!transferring[r.record_id]" :loading="!!transferring[r.record_id]" @click="prepareTransfer(r)">选择来源与保存目录</v-btn></template></div>
         </article>
-        <div class="doc115-pagination"><span class="doc115-muted">第 {{ page }} / {{ pageCount }} 页 · 每页 {{ pageSize }} 条</span><v-pagination :model-value="page" :length="pageCount" :disabled="busy.search" :total-visible="3" density="comfortable" size="small" @update:model-value="changePage" /></div>
+        <div class="doc115-pagination"><span class="doc115-muted">第 {{ page }} / {{ pageCount }} 页 · 每页 {{ pageSize }} 条</span><v-pagination :model-value="page" :length="pageCount" :disabled="busy.search" :total-visible="3" density="comfortable" size="small" @update:model-value="changePage" /><span class="doc115-jump-wrap">跳至<input class="doc115-jump" type="number" min="1" :max="pageCount" v-model="jump.search" @keyup.enter="jumpTo('search')" />页</span><v-btn size="x-small" variant="text" :disabled="busy.search" @click="jumpTo('search')">跳转</v-btn></div>
       </section>
     </section>
 
@@ -77,23 +84,25 @@
       <article v-for="r in records" :key="r.id" class="doc115-resource-card doc115-record-row" :style="{ '--doc115-status-color': statusCss(r) }">
         <div class="doc115-section-heading"><h3 class="doc115-title">{{ r.title }} <span v-if="r.year" class="doc115-blue doc115-year">（{{ r.year }}）</span></h3><span class="doc115-chip" :class="kindColor(r.kind)">{{ kindName(r.kind) }}</span></div>
         <div class="doc115-stage"><span class="doc115-chip" :class="statusColor(acquisitionState(r))">{{ statusName(acquisitionState(r)) }}</span><span aria-hidden="true">→</span><span class="doc115-chip" :class="statusColor(organizationState(r))">{{ organizationSummary(r) }}</span></div>
-        <p class="doc115-cyan doc115-path">目标：{{ r.final_path || '待确认' }}</p>
+        <p v-if="!isDone(r)" class="doc115-cyan doc115-path">目标：{{ r.final_path || '待确认' }}</p>
         <div v-if="acquisitionState(r) === 'downloading'" class="doc115-download"><label>115 下载进度：{{ progressValue(r) }}%<progress :value="progressValue(r)" max="100" /></label><p v-if="progressValue(r) === 100" class="doc115-amber">下载已显示 100%，文件落盘与搬运仍需确认。</p></div>
         <p v-if="r.message" class="doc115-small doc115-message">{{ r.message }}</p><p v-if="r.query_error || r.last_error" class="doc115-red doc115-small">{{ r.query_error ? '核对查询失败：' : '最近错误：' }}{{ r.query_error || r.last_error }}</p>
-        <div class="doc115-meta doc115-small doc115-muted"><span>{{ formatTime(r.updated_at || r.submitted_at) }}</span><span v-if="r.next_check_at">下次核对：{{ formatTime(r.next_check_at) }}</span><span v-if="r.pause_reason">暂停：{{ r.pause_reason }}</span></div>
+        <div class="doc115-meta doc115-small doc115-muted"><span>{{ formatTime(r.updated_at || r.submitted_at) }}</span><span v-if="r.next_check_at && !isDone(r)">下次核对：{{ formatTime(r.next_check_at) }}</span><span v-if="r.pause_reason">暂停：{{ r.pause_reason }}</span></div>
         <div class="doc115-actions doc115-wrap doc115-task-actions">
           <v-btn v-if="needsVerify(r)" size="small" variant="outlined" :loading="!!verifying[r.id]" :disabled="busy.records || !!verifying[r.id]" @click="verifyOne(r)">核对 MP 整理</v-btn>
-          <v-btn v-if="hasAction(r, 'check_download')" size="small" variant="text" :loading="!!retrying[r.id]" @click="taskAction(r, 'check_download')">重查下载状态</v-btn>
           <v-btn v-if="hasAction(r, 'retry_move')" size="small" variant="text" :loading="!!retrying[r.id]" @click="taskAction(r, 'retry_move')">重试搬运</v-btn>
-          <v-btn v-if="hasAction(r, 'retry_submit')" size="small" variant="text" :loading="!!retrying[r.id]" @click="retrySubmit(r)">重新获取（此前未获取成功）</v-btn>
           <a v-if="hasAction(r, 'mp_history') && safeMpUrl(r.mp_url)" class="doc115-native-link doc115-blue" :href="safeMpUrl(r.mp_url)">前往 MP 处理</a>
-          <v-btn v-if="hasAction(r, 'stop_tracking')" size="small" variant="text" @click="cancelTask(r)">停止自动跟踪</v-btn>
         </div>
-        <details class="doc115-details"><summary>查看详情</summary><p v-if="r.sheet" class="doc115-purple">文档来源：{{ r.sheet }}</p><p class="doc115-spec"><span v-for="(token, i) in specTokens(r.qtext || r.quality || '')" :key="i" :class="token.color || 'doc115-muted'">{{ token.text }}</span></p><p v-if="r.staging_path && r.staging_path !== r.final_path" class="doc115-cyan doc115-path">离线暂存：{{ r.staging_path }}</p><p class="doc115-muted">{{ manifestText(r) }}</p><ul v-if="fileDetails(r).length"><li v-for="(file, i) in fileDetails(r)" :key="file.id || file.file_id || i"><span :class="file.status === 'success' ? 'doc115-green' : file.status === 'failed' || file.status === 'missing' ? 'doc115-red' : 'doc115-neutral'">{{ file.name || file.path || '媒体文件' }} · {{ file.message || statusName(file.status) }}</span></li></ul><p v-if="r.ignored_files?.length" class="doc115-muted">附带小视频 {{ r.ignored_files.length }} 个，不计入必要整理数；删除这些文件不影响主要资源状态。</p><ul v-if="r.ignored_files?.length"><li v-for="(file, i) in r.ignored_files" :key="i" class="doc115-muted">{{ file.name }} · {{ file.reason }}</li></ul><v-btn size="small" variant="text" @click="deleteRecord(r)">删除展示记录</v-btn></details>
+        <details class="doc115-details"><summary>{{ isDone(r) ? '展开详细信息' : '查看详情' }}</summary><p v-if="isDone(r)" class="doc115-cyan doc115-path">目标：{{ r.final_path || '待确认' }}</p><p v-if="r.sheet" class="doc115-purple">文档来源：{{ r.sheet }}</p><p class="doc115-spec"><span v-for="(token, i) in specTokens(r.qtext || r.quality || '')" :key="i" :class="token.color || 'doc115-muted'">{{ token.text }}</span></p><p v-if="r.staging_path && r.staging_path !== r.final_path" class="doc115-cyan doc115-path">离线暂存：{{ r.staging_path }}</p><p class="doc115-muted">{{ manifestText(r) }}</p><ul v-if="fileDetails(r).length"><li v-for="(file, i) in fileDetails(r)" :key="file.id || file.file_id || i"><span :class="file.status === 'success' ? 'doc115-green' : file.status === 'failed' || file.status === 'missing' ? 'doc115-red' : 'doc115-neutral'">{{ file.name || file.path || '媒体文件' }} · {{ file.message || statusName(file.status) }}</span></li></ul><p v-if="r.ignored_files?.length" class="doc115-muted">附带小视频 {{ r.ignored_files.length }} 个，不计入必要整理数；删除这些文件不影响主要资源状态。</p><ul v-if="r.ignored_files?.length"><li v-for="(file, i) in r.ignored_files" :key="i" class="doc115-muted">{{ file.name }} · {{ file.reason }}</li></ul><div v-if="hasAction(r, 'check_download') || hasAction(r, 'retry_submit') || hasAction(r, 'stop_tracking')" class="doc115-actions doc115-wrap doc115-task-actions">
+          <v-btn v-if="hasAction(r, 'check_download')" size="small" variant="text" :loading="!!retrying[r.id]" @click="taskAction(r, 'check_download')">重查下载状态</v-btn>
+          <v-btn v-if="hasAction(r, 'retry_submit')" size="small" variant="text" :loading="!!retrying[r.id]" @click="retrySubmit(r)">重新获取（此前未获取成功）</v-btn>
+          <v-btn v-if="hasAction(r, 'stop_tracking')" size="small" variant="text" @click="cancelTask(r)">停止自动跟踪</v-btn>
+        </div><v-btn size="small" variant="text" @click="deleteRecord(r)">删除展示记录</v-btn></details>
       </article>
-      <div class="doc115-pagination"><span class="doc115-muted">第 {{ recordsPage }} / {{ recordsPageCount }} 页</span><v-pagination :model-value="recordsPage" :length="recordsPageCount" :disabled="busy.records" :total-visible="3" size="small" @update:model-value="changeRecordsPage" /></div>
-      <details class="doc115-maintenance"><summary>任务管理</summary><p class="doc115-muted">以下处理只针对本插件任务。处理待搬运任务会移动其已确认的云端文件，遵守后台预算和冷却。</p><div class="doc115-actions doc115-wrap"><v-btn size="small" variant="outlined" :loading="busy.offline" @click="checkOffline">处理待搬运任务（会移动文件）</v-btn><v-btn size="small" variant="text" :disabled="!recordsTotal" @click="clearRecords">清空展示记录</v-btn></div></details>
+      <div class="doc115-pagination"><span class="doc115-muted">第 {{ recordsPage }} / {{ recordsPageCount }} 页</span><v-pagination :model-value="recordsPage" :length="recordsPageCount" :disabled="busy.records" :total-visible="3" size="small" @update:model-value="changeRecordsPage" /><span class="doc115-jump-wrap">跳至<input class="doc115-jump" type="number" min="1" :max="recordsPageCount" v-model="jump.records" @keyup.enter="jumpTo('records')" />页</span><v-btn size="x-small" variant="text" :disabled="busy.records" @click="jumpTo('records')">跳转</v-btn></div>
+      <details class="doc115-maintenance"><summary>任务管理</summary><p class="doc115-muted">以下处理只针对本插件任务；云端搬运由后台按预算自动进行，无需手动触发。</p><div class="doc115-actions doc115-wrap"><v-btn size="small" variant="text" :disabled="!recordsTotal" @click="clearRecords">清空展示记录</v-btn></div></details>
     </section>
+    </template>
 
     <v-dialog v-model="transferOpen" max-width="560">
       <section class="doc115-page doc115-confirm" :data-doc115-theme="darkTheme ? 'dark' : 'light'">
@@ -102,7 +111,7 @@
         <p class="doc115-cyan doc115-path">{{ transferTarget === 'tv' ? status.tv_path : status.movie_path || '使用已配置的下载目录' }}</p>
         <label class="doc115-form-label">本次实际来源<select v-model="transferSource"><option v-for="option in sourceOptions(transferRecord)" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <p class="doc115-muted doc115-small">只提交所选链接，不自动切换其它来源。磁力 / ed2k 先由 115 下载，完成后借助 Plus 搬到所选目录；整理交由 MP 已配置的流程处理。</p>
-        <div class="doc115-actions doc115-wrap"><v-btn variant="text" @click="transferOpen = false">取消</v-btn><v-btn color="primary" :disabled="!transferSource || !transferRecord" :loading="!!transferring[transferRecord?.record_id]" @click="confirmTransfer">确认获取</v-btn></div>
+        <div class="doc115-actions doc115-wrap"><v-btn variant="text" @click="transferOpen = false">取消</v-btn><v-btn variant="flat" class="doc115-cta" :disabled="!transferSource || !transferRecord" :loading="!!transferring[transferRecord?.record_id]" @click="confirmTransfer">确认获取</v-btn></div>
       </section>
     </v-dialog>
   </section>
@@ -115,15 +124,18 @@ import '../styles/doc115.css'
 
 const props = defineProps({ model: { type: Object, default: () => ({}) }, api: { type: Object, default: () => ({ get: async () => ({}), post: async () => ({}) }) } })
 const emit = defineEmits(['action', 'close'])
-const UI_BUILD = '0.10.0'
+const UI_BUILD = '0.10.5'
 const hostTheme = inject(Symbol.for('vuetify:theme'), null)
 const darkTheme = computed(() => !!(props.model?.dark ?? hostTheme?.current?.value?.dark))
 const pageSize = 10
 const status = reactive({ version: '', enabled: null, subscribe_enabled: false, cookie_ready: false, p115_ready: false, cookie_days_left: null, record_count: 0, sheet_count: 0, built_at_text: '尚未建立', index_errors: [], stale_sheets: [], last_refresh: null, last_subscribe: null })
 const msg = ref(''), msgType = ref('info')
-const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, offline: false, records: false, preview: false, diagnostics: false })
+const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, records: false, preview: false, diagnostics: false })
 const qrImage = ref(''), qrTip = ref('等待扫码'), qrSessionId = ref('')
 const settingsOpen = ref(false), diagnostics = ref(null)
+const emptyStats = () => ({ movie: { total: 0, organized: 0 }, tv: { total: 0, organized: 0 }, total: 0, organized: 0 })
+const stats = ref(emptyStats())
+const jump = reactive({ search: '', records: '' })
 const keyword = ref(''), results = ref([]), searched = ref(false), searchedKeyword = ref(''), total = ref(0), resultVersion = ref('')
 const transferring = reactive({}), retrying = reactive({}), verifying = reactive({})
 const tabs = [{ value: 'search', label: '搜索' }, { value: 'subscriptions', label: '电影订阅' }, { value: 'records', label: '任务' }]
@@ -227,7 +239,7 @@ async function loadRecords() {
     if (res.code !== 0) throw new Error(res.msg || '读取任务失败')
     const data = res.data || []
     if (Array.isArray(data)) { records.value = data; recordsTotal.value = data.length }
-    else { records.value = Array.isArray(data.records) ? data.records : []; recordsTotal.value = Number(data.total) || 0; recordsPage.value = Number(data.page) || recordsPage.value }
+    else { records.value = Array.isArray(data.records) ? data.records : []; recordsTotal.value = Number(data.total) || 0; recordsPage.value = Number(data.page) || recordsPage.value; stats.value = { ...emptyStats(), ...(data.stats || {}) } }
     const snapshot = JSON.stringify(records.value.map(r => [r.id, r.status, r.acquisition_status, r.organization_status, r.progress, r.organization, r.query_error, r.last_error, r.updated_at, r.allowed_actions]))
     recUnchanged = snapshot === lastRecordsSnapshot ? recUnchanged + 1 : 0
     lastRecordsSnapshot = snapshot
@@ -256,13 +268,26 @@ async function taskAction(r, action) {
 }
 async function cancelTask(r) { if (!hasAction(r, 'stop_tracking') || !window.confirm(`停止「${r.title}」的自动跟踪？已有下载与文件会保留。`)) return; await taskAction(r, 'stop_tracking') }
 async function retrySubmit(r) { if (!hasAction(r, 'retry_submit') || !window.confirm(`重新获取「${r.title}」？此操作会再次提交115转存或离线下载，只适用于此前已明确获取失败的任务。`)) return; await taskAction(r, 'retry_submit') }
-function changeRecordsPage(value) { if (busy.records) return; recordsPage.value = value; loadRecords() }
+function changeRecordsPage(value) { if (busy.records) return; recordsPage.value = Math.min(Math.max(1, Number(value) || 1), recordsPageCount.value); loadRecords() }
+
+// 直接跳到指定页（搜索结果与任务列表各一个输入框）
+function jumpTo(which) {
+  const raw = parseInt(String(jump[which] || '').trim(), 10)
+  if (!Number.isFinite(raw) || raw < 1) { setMsg('请输入要跳转的页码（从 1 开始）', 'warning'); return }
+  const max = which === 'search' ? pageCount.value : recordsPageCount.value
+  const target = Math.min(raw, max)
+  jump[which] = ''
+  if (which === 'search') changePage(target)
+  else changeRecordsPage(target)
+}
+
+// 已整理完成的任务：正文只留关键信息，细节折叠到「展开详细信息」
+function isDone(r) { return ['success', 'confirmed', 'organized'].includes(String(organizationState(r))) }
 async function loadStatus() { try { const res = unwrap(await props.api.get('plugin/Doc115Subscribe/status')); if (!disposed && res.code === 0 && res.data) Object.assign(status, res.data) } catch (e) { setMsg(`读取插件状态失败：${describeError(e)}`, 'error') } }
 async function loadDiagnostics() { if (busy.diagnostics) return; busy.diagnostics = true; try { const res = unwrap(await props.api.get('plugin/Doc115Subscribe/diagnostics')); if (res.code !== 0) throw new Error(res.msg || '本地诊断不可用'); diagnostics.value = res.data || {} } catch (e) { setMsg(`本地诊断：${describeError(e)}`, 'warning') } finally { busy.diagnostics = false } }
 async function loadSubscriptions() { if (busy.preview || disposed) return; busy.preview = true; try { const res = unwrap(await props.api.get('plugin/Doc115Subscribe/subscriptions_preview')); if (res.code !== 0) throw new Error(res.msg || '匹配预演不可用'); const data = res.data || {}; subscriptions.value = Array.isArray(data) ? data : data.subscriptions || data.records || []; subscriptionNote.value = (data.message || data.note || data.msg || '已读取本地匹配快照') + (data.updated_at || data.cached_at ? `，更新于 ${formatTime(data.updated_at || data.cached_at)}。` : '，尚未建立 MP 订阅缓存。') } catch (e) { subscriptionNote.value = `匹配预演暂不可用：${describeError(e)}。没有提交资源。` } finally { busy.preview = false } }
 async function refreshIndex() { if (busy.refresh) return; busy.refresh = true; try { const res = unwrap(await props.api.post('plugin/Doc115Subscribe/refresh_index', {}, { timeout: 30000 })); showResult(res, '文档索引已更新。'); await loadStatus() } catch (e) { setMsg(`刷新索引失败：${describeError(e)}`, 'error') } finally { busy.refresh = false; emit('action') } }
 async function runSubscribe() { if (busy.subscribe || !window.confirm('现在同步电影订阅并获取匹配资源？此操作可能提交115转存或离线下载。')) return; busy.subscribe = true; try { const res = unwrap(await props.api.post('plugin/Doc115Subscribe/run_subscribe', {}, { timeout: 30000 })); showResult(res, '电影订阅同步已完成。') } catch (e) { setMsg(`订阅同步失败：${describeError(e)}`, 'error') } finally { busy.subscribe = false; await loadStatus(); emit('action') } }
-async function checkOffline() { if (busy.offline || !window.confirm('处理本插件待搬运任务？会通过Plus移动已确认的文件到所选下载目录。')) return; busy.offline = true; try { showResult(unwrap(await props.api.post('plugin/Doc115Subscribe/check_offline', {}, { timeout: 30000 })), '任务处理已完成。'); await loadRecords() } catch (e) { setMsg(`任务处理失败：${describeError(e)}`, 'error') } finally { busy.offline = false } }
 
 function stopQrTimer() { qrGeneration += 1; if (qrTimer) { clearTimeout(qrTimer); qrTimer = null } }
 function startQrTimer() { if (disposed || !componentActive || !pageVisible() || !settingsOpen.value || !qrSessionId.value || qrTimer) return; const generation = qrGeneration; qrTimer = setTimeout(async () => { qrTimer = null; await checkQr(true); if (generation === qrGeneration) startQrTimer() }, 3000) }
@@ -279,7 +304,7 @@ async function checkQr(silent = false) {
 }
 async function qrConfirmed() { stopQrTimer(); qrSessionId.value = ''; qrImage.value = ''; setMsg('文档登录成功，Cookie已保存。', 'success'); await loadStatus() }
 async function doSearch() { const kw = (keyword.value || '').trim(); if (!kw) { setMsg('请输入影视名称', 'warning'); return }; abortSearch(); await searchPage(kw, 1) }
-function changePage(value) { if (searchedKeyword.value && !busy.search) searchPage(searchedKeyword.value, value) }
+function changePage(value) { const target = Math.min(Math.max(1, Number(value) || 1), pageCount.value); if (searchedKeyword.value && !busy.search) searchPage(searchedKeyword.value, target) }
 async function searchPage(kw, requestedPage) {
   searchController?.abort(); const controller = typeof AbortController === 'function' ? new AbortController() : null; searchController = controller
   const serial = ++searchSerial; searchedKeyword.value = kw; busy.search = true; searched.value = true; results.value = []; total.value = 0; resultVersion.value = ''; page.value = requestedPage
@@ -307,7 +332,7 @@ watch([filterType, filterQuality, filterSubtitle, filterLink], () => { if (!sear
 watch(tab, value => { stopRecTimer(); if (value === 'records') loadRecords(); else if (value === 'subscriptions') loadSubscriptions() })
 watch(recordsFilter, () => { recordsPage.value = 1; if (busy.records) { recordsSerial += 1; recController?.abort(); busy.records = false }; loadRecords() })
 watch(settingsOpen, value => { stopQrTimer(); if (value && pageVisible()) startQrTimer() })
-onMounted(() => { loadStatus(); if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visibilityChanged) })
+onMounted(() => { loadStatus();  if (tab.value === 'records') loadRecords(); else if (tab.value === 'subscriptions') loadSubscriptions(); if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visibilityChanged) })
 onActivated(() => { componentActive = true; visibilityChanged() })
 onDeactivated(() => { componentActive = false; stopRecTimer(); stopQrTimer() })
 onBeforeUnmount(dispose)

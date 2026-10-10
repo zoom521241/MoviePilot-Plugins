@@ -143,3 +143,17 @@
   border: 1px solid var(--doc115-border); border-radius: 0.35rem;
   background: var(--doc115-card); color: var(--doc115-text);
 }
+
+.doc115-config-advanced[data-v-332f6bdf] { margin-top: 1rem; border-top: 1px solid var(--doc115-border); padding-top: 0.75rem;
+}
+.doc115-config-advanced summary[data-v-332f6bdf] { color: var(--doc115-blue); cursor: pointer; padding: 0.5rem 0;
+}
+.doc115-config .doc115-muted[data-v-332f6bdf] { font-size: 0.875rem; margin: 0.75rem 0; overflow-wrap: anywhere;
+}
+
+.doc115-preview-controls { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem;
+}
+.doc115-preview-controls select { border: 1px solid #7d8b9f; padding: 0.25rem;
+}
+.doc115-preview-log pre { white-space: pre-wrap; overflow-wrap: anywhere;
+}

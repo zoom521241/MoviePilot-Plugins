@@ -498,3 +498,13 @@ test('backend flattened organization counts preserve deleted episode and require
   assert.match(page.manifestText(record), /完整.*19\/20.*1 个暂无整理证据/)
   page.close()
 })
+
+test('UI version constants stay in step with the backend plugin version', () => {
+  const page = readFileSync(new URL('src/components/Page.vue', ui), 'utf8')
+  const config = readFileSync(new URL('src/components/Config.vue', ui), 'utf8')
+  const manifest = JSON.parse(readFileSync(new URL('../../../package.v3.json', ui), 'utf8'))
+  const version = String(manifest.Doc115Subscribe.version)
+  const escaped = version.split('.').join('\.')
+  assert.match(page, new RegExp("const UI_BUILD = '" + escaped + "'"))
+  assert.match(config, new RegExp('前端 v' + escaped))
+})

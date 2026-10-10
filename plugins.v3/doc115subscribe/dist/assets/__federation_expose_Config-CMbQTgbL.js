@@ -165,7 +165,7 @@ return (_ctx, _cache) => {
         default: _withCtx(() => [
           _cache[22] || (_cache[22] = _createElementVNode("span", null, [
             _createTextVNode("115文档订阅与查询 · 设置 "),
-            _createElementVNode("small", { class: "doc115-muted" }, "前端 v0.10.0")
+            _createElementVNode("small", { class: "doc115-muted" }, "前端 v0.10.5")
           ], -1)),
           _createVNode(_component_v_spacer),
           _createVNode(_component_v_btn, {
@@ -520,6 +520,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a02531ab"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-332f6bdf"]]);
 
 export { Config as default };
