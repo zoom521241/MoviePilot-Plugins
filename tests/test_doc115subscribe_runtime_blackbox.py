@@ -175,14 +175,15 @@ class RuntimeBlackBox(unittest.TestCase):
         self.assertEqual(result["move_status"], "success")
         self.assertEqual(len(self.cloud.writes), 2)
 
-    def test_deleted_before_first_magnet_snapshot_keeps_manifest_unknown(self):
+    def test_magnet_without_declared_episodes_completes_from_this_batch_manifest(self):
+        """方案 A：未声明集数时按「本批源清单完整 + 本批全部入库」判成功（旧逻辑会让整季包永远判不了成功）。"""
         self.cloud.episodes = 19
         batch = self.queue(links=[("magnet", "magnet:?xt=urn:btih:" + "a"*40)])
         self.tick(3)
         result = self.organize(batch, self.histories(batch, 19))
         self.assertEqual(result["organized_count"], 19)
-        self.assertFalse(result["manifest_complete"])
-        self.assertNotEqual(result["organization_status"], "success")
+        self.assertTrue(result["manifest_complete"])
+        self.assertEqual(result["organization_status"], "success")
         self.assertEqual(len(self.cloud.writes), 2)
 
     def test_deleted_during_first_magnet_scan_with_twenty_expected_remains_incomplete(self):

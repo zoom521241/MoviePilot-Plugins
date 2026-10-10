@@ -708,7 +708,7 @@ class BackendTests(unittest.TestCase):
         query.assert_not_called()
 
     def test_organize_check_backs_off_then_gives_up(self):
-        """空历史只退避；24小时后暂停核对并保留获取与防重事实。"""
+        """空历史先指数退避；连续 4 次仍无任何证据 → 判「未找到整理记录」并移出自动核对（不再等 24 小时）。"""
         store = self.plugin._records()
         record = store.add({"title": "synthetic never organised", "type": "movie", "kind": "magnet",
                             "status": "done", "final_path": "/115-影视/115-downloads/电影"})
@@ -720,30 +720,51 @@ class BackendTests(unittest.TestCase):
             self.plugin.verify_organization(force=True)
             first = current()
             self.assertEqual(first["org_attempts"], 1)
-            self.assertGreater(first["org_next_ts"], time.time())   # 进入退避期
-            self.assertEqual(first["status"], "done")               # 还没放弃
+            self.assertGreater(first["org_next_ts"], time.time())      # 进入退避期
+            self.assertEqual(first["status"], "done")                  # 还没放弃
+            self.assertEqual(first["organization_status"], "unknown")
 
-            # 后台任务在退避期内不会重复查同一条
+            # 退避期内不重复查同一条
             self.plugin.verify_organization(force=True)
             self.assertEqual(current()["org_attempts"], 1)
 
-            for _ in range(3):
-                store.update(record["id"], org_next_ts=0)           # 模拟退避时间已过
+            for _ in range(2):                                          # 累计到 3 次
+                store.update(record["id"], org_next_ts=0)
                 self.plugin.verify_organization(force=True)
-            final = current()
-            self.assertEqual(final["status"], "done")
-            self.assertFalse(final.get("org_giveup"))
-            future = record["created_ts"] + 86401
+            third = current()
+            self.assertEqual(third["org_attempts"], 3)
+            self.assertFalse(third.get("org_giveup"))
+            self.assertEqual(third["organization_status"], "unknown")
+
             store.update(record["id"], org_next_ts=0)
-            with patch("time.time", return_value=future):
-                self.plugin.verify_organization()
+            self.plugin.verify_organization(force=True)                 # 第 4 次
             final = current()
+            self.assertEqual(final["org_attempts"], 4)
             self.assertTrue(final["org_giveup"])
-            self.assertEqual(final["organization_status"], "paused")
-            self.assertEqual(final["acquisition_status"], "saved")
+            self.assertEqual(final["organization_status"], "unfound")
+            self.assertEqual(final["acquisition_status"], "saved")      # 获取与防重事实保留
+            self.assertIn("未找到", final["message"])
+
             query.reset_mock()
             self.assertEqual(self.plugin.check_organization()["data"]["checked"], 0)
-            query.assert_not_called()
+            query.assert_not_called()                                   # 已放弃 → 不再查 MP
+
+    def test_event_failure_does_not_kill_the_organize_tick(self):
+        """单条事件处理异常不得让整轮核对失败（0.10.0 线上故障的成因），并有限次后跳过该事件。"""
+        store = Mock()
+        store.drain_events.return_value = [{"event_id": "bad-event", "payload": {"fileitem": {"path": "/x"}}}]
+        store.ack_event = Mock()
+        summary = {"checked": 1, "confirmed": 1, "partial": 0, "failed": 0, "unfound": 0}
+        with patch.object(self.plugin, "_records", return_value=store), \
+                patch.object(self.plugin, "_apply_queued_event", side_effect=RuntimeError("synthetic bad event")), \
+                patch.object(self.plugin, "verify_organization", return_value=dict(summary)) as verify:
+            for _ in range(self.plugin.EVENT_GIVEUP_ATTEMPTS):
+                data = self.plugin.check_organization()
+                self.assertEqual(data["code"], 0)                       # 不再静默失败
+            verify.assert_called()                                      # 核对照常执行
+            store.ack_event.assert_called_once_with("bad-event")        # 连续失败后跳过该事件
+            self.assertEqual(getattr(self.plugin, "_last_org_tick", {}).get("state"), "ok")
+            self.assertEqual(getattr(self.plugin, "_last_event_stats", {}).get("errors"), 1)
 
 
 if __name__ == "__main__":

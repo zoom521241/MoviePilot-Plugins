@@ -6,9 +6,16 @@ import hashlib
 import json
 import re
 import time
+import traceback
 from urllib.parse import urlsplit
 from contextlib import nullcontext
 from pathlib import PurePosixPath
+
+try:                                    # MP 运行时的日志器（写入 config/logs/plugins/）
+    from app.log import logger
+except Exception:                       # 脱离 MP 运行时的降级（单测等）
+    import logging
+    logger = logging.getLogger("doc115subscribe")
 
 from . import doc_parser, subscribe_sync
 from .ledger import TaskLedger
@@ -19,9 +26,11 @@ from .p115_transfer import P115Error, extract_hash
 
 
 class TaskRuntime:
-    ORG_BACKOFF_BASE = 60
+    ORG_BACKOFF_BASE = 20          # 查不到整理证据时的退避：20 → 40 → 80 → 160 秒
     ORG_BACKOFF_MAX = 900
     ORG_MAX_PER_RUN = 5
+    ORG_GIVEUP_ATTEMPTS = 4        # 连续 4 次仍无任何整理证据 → 判「未找到整理记录」并移出自动核对（约 2 分钟）
+    EVENT_GIVEUP_ATTEMPTS = 3      # 同一条事件连续处理失败 3 次后跳过，避免毒事件拖死整轮核对
     ORG_PENDING_STATES = ("done", "unverified", "organized", "partial", "missing", "unfound")
 
     @property
@@ -470,8 +479,9 @@ class TaskRuntime:
                 mapped.append({**unit, "source_path": rec["final_path"].rstrip("/") + "/" + name + suffix,
                     "file_id": str(unit.get("id") or unit.get("file_id") or ""), "storage": "115网盘Plus",
                     "episodes": [int(x[1]) if isinstance(x, (list, tuple)) else int(x) for x in unit.get("episodes", [])]})
-            single = src.lower().endswith(tuple(doc_parser_ext for doc_parser_ext in (".mkv", ".mp4", ".avi", ".mov", ".ts")))
-            known = single or bool(rec.get("expected_episodes") or rec.get("expected_episode_count"))
+            # 方案 A：源清单枚举完整即视为「本批完整」，与 115 分享路径一致；
+            # 不再要求文档声明集数（expected_episodes 目前没有任何代码产出，旧逻辑会让整季包永远判不了成功）。
+            known = True
             mapped = classify_optional_media(mapped, rec.get("min_media_size_mb", 0))
             store.append_manifest(rec["id"], mapped, complete=result["complete"] and known,
                                   reason=result.get("error") or ("离线原始必要清单未获证实" if not known else ""))
@@ -733,13 +743,23 @@ class TaskRuntime:
                 counts["checked"] += 1
                 status = batch.get("organization_status")
                 counts[{"success": "confirmed", "partial": "partial", "failed": "failed"}.get(status, "unfound")] += 1
-                waits = int(rec.get("org_attempts") or 0)
-                paused = now - rec["created_ts"] >= 86400 and status != "success"
-                self._update_live(rec["id"], generation, org_page=1 if complete else key[1] + 1,
-                    org_next_ts=now + (2 if not complete else self._delay(waits, base=60, cap=900)),
-                    org_attempts=waits + 1 if complete else waits, org_last_check=now, org_error_count=0,
-                    query_error="", org_giveup=paused, org_requested=False if complete else rec.get("org_requested", False),
-                    organization_status="paused" if paused else status)
+                waits = int(rec.get("org_attempts") or 0) + (1 if complete else 0)
+                # 连续 ORG_GIVEUP_ATTEMPTS 次仍然「一点证据都没有」→ 判未找到并移出自动核对池
+                giveup = bool(complete and status == "unknown" and waits >= self.ORG_GIVEUP_ATTEMPTS)
+                fields = dict(org_page=1 if complete else key[1] + 1,
+                    org_next_ts=now + (2 if not complete else self._delay(waits, base=self.ORG_BACKOFF_BASE,
+                                                                        cap=self.ORG_BACKOFF_MAX)),
+                    org_attempts=waits, org_last_check=now, org_error_count=0, query_error="",
+                    org_giveup=giveup, org_requested=False if complete else rec.get("org_requested", False),
+                    organization_status="unfound" if giveup else status)
+                if giveup:
+                    fields["message"] = ("未找到本批次的整理证据（可能已手动删除或尚未整理），已停止自动核对；"
+                                         "可点该任务的「核对」重新检查")
+                    logger.info(f"115文档订阅与查询：连续 {waits} 次无整理证据，停止自动核对：{core_title(rec.get('title'))}")
+                elif status == "success":
+                    logger.info(f"115文档订阅与查询：整理成功：{core_title(rec.get('title'))}｜"
+                                f"已入库 {batch.get('organized_count')}/{batch.get('organized_total') or '?'} 个")
+                self._update_live(rec["id"], generation, **fields)
             except Exception as exc:
                 errors = int(rec.get("org_error_count") or 0)
                 self._update_live(rec["id"], generation, org_error_count=errors + 1,
@@ -750,20 +770,38 @@ class TaskRuntime:
         return counts
 
     def check_organization(self):
+        """每 20 秒的整理核对（后台任务）。
+
+        0.10.1 起：任何失败都会留痕（含堆栈，5 分钟最多记一次）并把最近一次执行结果写进 diagnostics，
+        不再像 0.10.0 那样静默 return——静默会让"任务其实没在跑"这件事完全无法被发现。
+        """
         self._ensure_runtime()
         if not self._enabled:
+            self._last_org_tick = {"at": time.time(), "state": "disabled"}
             return {"code": 1, "msg": "插件未启用"}
         if not self._org_lock.acquire(blocking=False):
+            self._last_org_tick = {"at": time.time(), "state": "busy"}
             return {"code": 0, "data": {"skipped": True}}
         generation = self._generation
         try:
-            self._drain_events()
+            events = self._drain_events()
             with self._mp().work_slice(cancelled=lambda: not self._live(generation)):
                 result = self.verify_organization()
                 if not result["checked"] and getattr(self, "_directories_requested", False):
                     self._refresh_directories_snapshot(generation)
+                self._last_org_tick = {"at": time.time(), "state": "ok", "checked": result.get("checked"),
+                                       "confirmed": result.get("confirmed"), "events": events}
+                if result.get("checked"):
+                    logger.info(f"115文档订阅与查询：整理核对完成：检查 {result.get('checked')} 条，"
+                                f"成功 {result.get('confirmed')}，部分 {result.get('partial')}，"
+                                f"失败 {result.get('failed')}，未找到 {result.get('unfound')}")
                 return {"code": 0, "data": result}
         except Exception as exc:
+            self._last_org_tick = {"at": time.time(), "state": "error", "error": self._error(exc)[:300]}
+            if time.time() - float(getattr(self, "_last_org_error_log", 0) or 0) > 300:
+                self._last_org_error_log = time.time()
+                logger.warning("115文档订阅与查询：整理核对执行失败：" + self._error(exc)
+                               + "\n" + traceback.format_exc())
             return {"code": 1, "msg": self._error(exc)}
         finally:
             self._org_lock.release()
@@ -960,6 +998,9 @@ class TaskRuntime:
             "cloud": tr.budget_state if tr and hasattr(tr, "budget_state") else {"state": "未验证"},
             "mp": mp.diagnostics() if mp else {"state": "未验证"},
             "active_tasks": sum(x.get("tracking_enabled", True) and x.get("acquisition_status") not in ("saved", "success", "failed") for x in rows),
+            "organization": {"last_tick": getattr(self, "_last_org_tick", None) or {"state": "尚未执行"},
+                             "last_event_stats": getattr(self, "_last_event_stats", None),
+                             "last_event_error": getattr(self, "_last_event_error", None)},
             "scope": "仅本插件；只读本地状态，未请求115或MP"}}
 
     def _refresh_event_paths(self):
@@ -1016,30 +1057,65 @@ class TaskRuntime:
         event_id = hashlib.sha256(json.dumps(clue, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         self._records().enqueue_event(event_id, clue)
 
+    def _apply_queued_event(self, store, queued):
+        """处理单条 115 生活事件（供 _drain_events 调用，异常由调用方隔离）。"""
+        clue = queued.get("payload") or queued.get("data") or {}
+        source = clue.get("fileitem") or clue.get("src_fileitem") or {}
+        media = clue.get("mediainfo") or {}
+        transfer = clue.get("transferinfo") or {}
+        entry = {**media, "src_fileitem": source, "src": source.get("path"), "src_storage": source.get("storage"),
+            "date": clue.get("date") or clue.get("timestamp") or transfer.get("date") or clue.get("_received_ts"),
+            "time_is_observed": not bool(clue.get("date") or clue.get("timestamp") or transfer.get("date")),
+            "evidence_source": "event", "title": media.get("title"), "type": media.get("type"),
+            "status": "fail" not in str(clue.get("_event_type", "")).lower(),
+            "id": clue.get("history_id"), "dest_fileitem": transfer.get("target_fileitem") or {},
+            "errmsg": clue.get("message") or transfer.get("message") or ""}
+        associated = False
+        for rid in clue.get("_batch_ids") or self._event_batches(source.get("path")):
+            rec = store.get(rid)
+            if not rec or not rec.get("tracking_enabled", True):
+                continue
+            if match_history(rec, [entry]):
+                batch = store.record_evidence(rec["id"], [entry])
+                self._confirm_move_from_evidence(batch, self._generation)
+                associated = True
+        # Candidate clues get finite local retries, so unrelated/obsolete
+        # inbox rows cannot pin the first page and starve newer events.
+        if associated or time.time() - float(clue.get("_received_ts") or 0) > 900:
+            store.ack_event(queued["event_id"])
+
     def _drain_events(self):
+        """排空 115 生活事件；**单条事件异常不再拖死整轮核对**。
+
+        0.10.0 的失效点：事件处理里任何异常都会冒泡到 check_organization 的 except，
+        被静默吞掉 → 每 20 秒都失败一次、既不更新记录也不留任何日志（本次线上故障即此）。
+        """
         store = self._records()
+        failures = getattr(self, "_event_failures", None)
+        if not isinstance(failures, dict):
+            failures = self._event_failures = {}
+        handled = errors = 0
         for queued in store.drain_events(limit=50):
-            clue = queued.get("payload") or queued.get("data") or {}
-            source = clue.get("fileitem") or clue.get("src_fileitem") or {}
-            media = clue.get("mediainfo") or {}
-            transfer = clue.get("transferinfo") or {}
-            entry = {**media, "src_fileitem": source, "src": source.get("path"), "src_storage": source.get("storage"),
-                "date": clue.get("date") or clue.get("timestamp") or transfer.get("date") or clue.get("_received_ts"),
-                "time_is_observed": not bool(clue.get("date") or clue.get("timestamp") or transfer.get("date")),
-                "evidence_source": "event", "title": media.get("title"), "type": media.get("type"),
-                "status": "fail" not in str(clue.get("_event_type", "")).lower(),
-                "id": clue.get("history_id"), "dest_fileitem": transfer.get("target_fileitem") or {},
-                "errmsg": clue.get("message") or transfer.get("message") or ""}
-            associated = False
-            for rid in clue.get("_batch_ids") or self._event_batches(source.get("path")):
-                rec = store.get(rid)
-                if not rec or not rec.get("tracking_enabled", True):
-                    continue
-                if match_history(rec, [entry]):
-                    batch = store.record_evidence(rec["id"], [entry])
-                    self._confirm_move_from_evidence(batch, self._generation)
-                    associated = True
-            # Candidate clues get finite local retries, so unrelated/obsolete
-            # inbox rows cannot pin the first page and starve newer events.
-            if associated or time.time() - float(clue.get("_received_ts") or 0) > 900:
-                store.ack_event(queued["event_id"])
+            event_id = str(queued.get("event_id") or "")
+            try:
+                self._apply_queued_event(store, queued)
+                handled += 1
+                failures.pop(event_id, None)
+            except Exception as exc:  # noqa: BLE001
+                errors += 1
+                count = int(failures.get(event_id) or 0) + 1
+                failures[event_id] = count
+                self._last_event_error = {"at": time.time(), "event_id": event_id, "error": self._error(exc)[:300]}
+                if count >= self.EVENT_GIVEUP_ATTEMPTS:
+                    try:
+                        store.ack_event(event_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    failures.pop(event_id, None)
+                    logger.warning(f"115文档订阅与查询：事件连续 {count} 次处理失败，已跳过该事件：{event_id}｜"
+                                   + self._error(exc) + "\n" + traceback.format_exc())
+                else:
+                    logger.warning(f"115文档订阅与查询：事件处理失败（第 {count} 次）：{event_id}｜" + self._error(exc))
+        self._last_event_stats = {"at": time.time(), "handled": handled, "errors": errors,
+                                  "pending": len(failures)}
+        return {"handled": handled, "errors": errors}
