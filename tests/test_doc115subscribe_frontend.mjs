@@ -513,7 +513,7 @@ test('UI version constant is shared by Page/Config and stays in step with packag
   assert.equal(uiPackage.version, UI_BUILD)
   // 后端由同事并行升版：package.v3.json 只允许等于 UI_BUILD，或仍是上一个版本（尚未合并后端）
   const backend = String(manifest.Doc115Subscribe.version)
-  assert.ok(backend === UI_BUILD || backend === '0.10.5', `package.v3.json ${backend} vs UI ${UI_BUILD}`)
+  assert.equal(backend, UI_BUILD, `package.v3.json ${backend} vs UI ${UI_BUILD}`)
 })
 
 // ---- 0.11.0 ----

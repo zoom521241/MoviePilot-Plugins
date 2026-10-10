@@ -428,7 +428,10 @@ class TaskRuntime:
             if getattr(exc, "state", None):
                 self._update_live(rec["id"], generation, offline_cursor=exc.state)
             raise
-        task = next((x for x in result["items"] if str(x.get("info_hash") or "").lower() == rec["hash"].lower()), None)
+        matcher = getattr(tr, "match_task", None)
+        task = next((x for x in result["items"]
+                     if (matcher(x, rec.get("url") or "", rec.get("hash") or "") if callable(matcher)
+                         else str(x.get("info_hash") or "").lower() == str(rec.get("hash") or "").lower())), None)
         if not task:
             self._update_live(rec["id"], generation, offline_cursor=result.get("cursor"))
             if not result["complete"]:
