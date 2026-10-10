@@ -114,6 +114,15 @@ class BudgetTests(unittest.TestCase):
         self.assertIs(a, b)
         self.assertTrue(all("synthetic" not in key for key in budget._ACCOUNTS))
 
+    def test_cookie_without_uid_uses_stable_field_not_whole_cookie(self):
+        a = budget.account_budget("USERSESSIONID=syntheticSession; CID=syntheticSecretA; SEID=x1")
+        b = budget.account_budget("CID=syntheticSecretB; USERSESSIONID=syntheticSession; SEID=x2")
+        self.assertIs(a, b)
+        c = budget.account_budget("CID=syntheticOnly; SEID=y")
+        self.assertIs(c, budget.account_budget("SEID=y; CID=syntheticOnly"))
+        self.assertTrue(budget.account_identity("CID=z").startswith("cookie:"))
+        self.assertTrue(all("synthetic" not in key for key in budget._ACCOUNTS))
+
     def test_manual_calls_and_new_submissions_obey_account_circuit(self):
         self.b.pause("risk_control", 900)
         for action in (self.b.claim_submission, lambda: self.b.request().__enter__()):

@@ -213,7 +213,8 @@ class TransferTests(unittest.TestCase):
     def test_duplicate_failed_or_completed_without_file_is_not_success(self):
         for task in (
             {"status": -1, "percentDone": 20},
-            {"status": 2, "percentDone": 20},
+            {"status": "failed", "percentDone": 20},
+            {"status": 2, "percentDone": 100, "name": "Synthetic.mkv", "file_id": 7},
             {"status": 0, "percentDone": 100, "name": "Synthetic.mkv", "file_id": 7},
         ):
             with self.subTest(task=task):

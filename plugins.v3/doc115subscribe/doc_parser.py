@@ -8,7 +8,9 @@
 """
 from __future__ import annotations
 
+import functools
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -101,12 +103,20 @@ def is_name_head(text: str) -> bool:
 
 
 # 「横幅行」：表头区/整表打包链接所在的行（尤其是单列「目录型」表）
-BANNER_HINTS = ("打包链接", "大包链接", "点我返回", "点我直达", "点击直达", "点击这里",
+# 只在「名称列为空或没识别到名称列」时生效，避免把链接文字恰好是「点击这里」之类的数据行丢掉。
+BANNER_HINTS = ("打包链接", "大包链接", "点我返回", "点我直达", "点击直达",
                 "点击进去", "复制资源", "资源列表", "目录", "快捷键")
 
 
-def is_banner_row(row: List[str]) -> bool:
-    txt = " ".join((c or "") for c in (row or []))
+def is_banner_row(row: List[str], name_col: Optional[int] = None) -> bool:
+    """横幅行判断；给出名称列且该列有片名时，一律不是横幅。"""
+    row = row or []
+    if name_col is not None and name_col < len(row) and (row[name_col] or "").strip():
+        title = row[name_col].strip()
+        # 名称列本身就是横幅文字（单列目录表）时仍按横幅处理
+        if not any(h in title for h in BANNER_HINTS):
+            return False
+    txt = " ".join((c or "") for c in row)
     return any(h in txt for h in BANNER_HINTS)
 
 
@@ -125,8 +135,8 @@ def _find_header(grid: List[List[str]], hrefs=None) -> Tuple[int, Optional[int]]
         if name_col is None:
             continue
         if any(extract_links(c or "") for c in row) or any(
-                href and is_resource_link(classify_link(href)) for href in
-                ((hrefs[r] if r < len(hrefs) else []) if hrefs else [])):
+                is_resource_link(classify_link(href)) for href in
+                _flat_hrefs((hrefs[r] if r < len(hrefs) else []) if hrefs else [])):
             continue
         score = non_empty + (10 if name_col is not None else 0)
         if score > best[2]:
@@ -143,6 +153,27 @@ def extract_year(title: str) -> str:
     m = re.search(r"(?:\s|[._-])((?:18|19|20|21)\d{2})(?=[\s._-]+[\[（(]?(?:4k|2160p?|1080p?|720p?|uhd|remux|bluray|web-dl|中字|中文字幕))",
                   title or "", re.I)
     return m.group(1) if m else ""
+
+
+def year_from_cell(value: Any) -> str:
+    """年份列 -> 年份：2019 / 2019.0 / 2019年 / 2019-05-01 / 2019/5/1 / 日期序列号 43586。"""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return ""
+    m = re.fullmatch(r"((?:18|19|20|21)\d{2})(?:\.0+)?\s*年?", text)
+    if m:
+        return m.group(1)
+    m = re.match(r"((?:18|19|20|21)\d{2})\s*[-/.年]\s*\d{1,2}(?:\s*[-/.月]\s*\d{1,2}\s*日?)?", text)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"\d{5}(?:\.\d+)?", text):
+        # 表格日期序列号（1899-12-30 起的天数；5 位数即 1927~2173 年）
+        number = float(text)
+        if number < 73051:
+            import datetime
+            year = (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(number))).year
+            return str(year) if 1900 <= year <= 2100 else ""
+    return ""
 
 
 def _tmdb_value(value: str, numeric: bool = False) -> Tuple[str, str]:
@@ -165,7 +196,7 @@ def _tmdb_value(value: str, numeric: bool = False) -> Tuple[str, str]:
 
 def _title_cell(text: str) -> bool:
     t = (text or "").strip()
-    if not t or t.isdecimal() or is_name_head(t) or is_banner_row([t]):
+    if not t or t.isdecimal() or is_name_head(t) or is_banner_row([t]) or t in ("点击这里", "点我", "点击"):
         return False
     if re.search(r"(?:https?://|magnet:|ed2k://)", t, re.I):
         return False
@@ -186,6 +217,19 @@ def _infer_name_column(grid: List[List[str]], start: int) -> int:
     return -max(scores)[1] if scores else 0
 
 
+def _flat_hrefs(href_row) -> List[str]:
+    """一行超链接 -> 扁平列表；单元格可能是 None / 字符串 / 多个链接的列表。"""
+    out: List[str] = []
+    for cell in (href_row or []):
+        if not cell:
+            continue
+        if isinstance(cell, (list, tuple)):
+            out.extend(str(u) for u in cell if u)
+        else:
+            out.append(str(cell))
+    return out
+
+
 def _collect_links(row: List[str], href_row: List[Optional[str]],
                    include_external: bool = False) -> List[Tuple[str, str]]:
     """收集一行里的资源链接：单元格文本 + 单元格超链接 -> [(kind, url)]。
@@ -195,9 +239,7 @@ def _collect_links(row: List[str], href_row: List[Optional[str]],
     raw: List[Tuple[str, str]] = []
     for c in (row or []):
         raw.extend(extract_links(c or "", include_other=include_external))
-    for href in (href_row or []):
-        if not href:
-            continue
+    for href in _flat_hrefs(href_row):
         u = normalize_url(href)
         k = classify_link(u)
         if k is None:
@@ -249,7 +291,9 @@ def parse_sheet(sheet_id: str, sheet_name: str,
     # 很多「合集/目录」表是**单列**结构、没有真正的表头行（如 老电影 / 动漫原盘），
     # 整表打包链接就挂在第 1~2 行的横幅里（"打包链接，点我直达"），必须把它们算作表头。
     top_end = min(8, len(grid))
-    banner_rows = {r for r in range(top_end) if is_banner_row(grid[r])}
+    # 有明确表头时，名称列有片名的行一定是数据行；无表头时名称列是推断的，横幅仍按整行判断。
+    banner_col = name_col if hdr_row >= 0 else None
+    banner_rows = {r for r in range(top_end) if is_banner_row(grid[r], banner_col)}
     header_area = set(range(0, start)) | banner_rows
 
     header_links: List[Tuple[str, str]] = []
@@ -260,25 +304,33 @@ def parse_sheet(sheet_id: str, sheet_name: str,
     # 表头/横幅里的普通网页链接（如外部 KDocs 文档），用于「纯列表表」的参考展示
     header_http: List[str] = []
     for r in sorted(header_area):
-        for href in href_row(r):
-            if href and classify_link(normalize_url(href)) == LINK_OTHER_HTTP:
+        for href in _flat_hrefs(href_row(r)):
+            if classify_link(normalize_url(href)) == LINK_OTHER_HTTP:
                 header_http.append(normalize_url(href).rstrip("#&"))
     header_http = list(dict.fromkeys(header_http))
 
     # 第一遍：收集「数据行」及其自带链接；判断整表是否存在资源链接
     any_resource = any(is_resource_link(k) for k, _ in header_links)
     candidates: List[Tuple[int, str, List[Tuple[str, str]]]] = []
+    inherited_rows = set()
+    prev_title, prev_row = "", -2
     for r in range(start, len(grid)):
         if r in header_area:
             continue
         row = grid[r]
         if not any((c or "").strip() for c in row):
+            prev_title = ""          # 空行打断合并单元格的继承
             continue
         title = (row[name_col] if name_col < len(row) else "").strip()
         own = _collect_links(row, href_row(r))
+        if not title and prev_title and prev_row == r - 1 and any(is_resource_link(k) for k, _ in own):
+            # 合并单元格：标题只写在首行，相邻下一行的链接继承上一行标题
+            title = prev_title
+            inherited_rows.add(r)
         if (not title or is_name_head(title) and not own
                 or re.match(r"^(?:https?://|magnet:|ed2k://)", title, re.I)):
             continue
+        prev_title, prev_row = title, r
         if any(is_resource_link(k) for k, _ in own):
             any_resource = True
         candidates.append((r, title, own))
@@ -298,14 +350,12 @@ def parse_sheet(sheet_id: str, sheet_name: str,
         row = grid[r]
         year = extract_year(title)
         if year_col is not None and year_col < len(row):
-            ym = re.fullmatch(r"(?:18|19|20|21)\d{2}", (row[year_col] or "").strip())
-            if ym:
-                year = ym.group(0)
+            year = year_from_cell(row[year_col]) or year
         tmdbid = ""
         tmdb_type = ""
         if tmdb_col is not None and tmdb_col < len(row):
             tmdbid, tmdb_type = _tmdb_value(row[tmdb_col], numeric=True)
-        for value in list(row) + list(href_row(r)):
+        for value in list(row) + _flat_hrefs(href_row(r)):
             tid, ttype = _tmdb_value(value or "")
             if tid and (not tmdbid or tid == tmdbid):
                 tmdbid, tmdb_type = tid, ttype
@@ -337,6 +387,8 @@ def parse_sheet(sheet_id: str, sheet_name: str,
             "links": links,
             "sheet_bundle": sheet_bundle,
         })
+        if r in inherited_rows:
+            records[-1]["title_inherited"] = True
 
     # 整表没有任何资源链接（如只在表头挂了外部文档链接的纯列表表）：仅搜索
     if records and not any_resource:
@@ -442,15 +494,197 @@ def matches_link_kind(rec: Dict[str, Any], want: str) -> bool:
     return True
 
 
-def search(records: List[Dict[str, Any]], keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """按关键词模糊匹配标题（去空格、忽略大小写）。"""
-    kw = re.sub(r"\s+", "", (keyword or "")).lower()
-    if not kw:
-        return []
-    hit = []
+# ---------------------------------------------------------------------------
+# 搜索归一化与打分
+# ---------------------------------------------------------------------------
+try:  # 可选繁简转换：环境里有 opencc 就用，没有就跳过（不新增依赖）
+    import opencc as _opencc  # type: ignore
+    try:
+        _T2S = _opencc.OpenCC("t2s")
+    except Exception:  # noqa: BLE001
+        _T2S = _opencc.OpenCC("t2s.json")
+except Exception:  # noqa: BLE001
+    _T2S = None
+
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_SERIES_RE = re.compile(
+    r"第\s*([0-9零〇一二两三四五六七八九十百]+)\s*(季|部|集|期|章|篇)"
+    r"|(?<![a-z0-9])(?:season\s*|s)0*(\d{1,2})(?![0-9])")
+_SPEC_WORDS = re.compile(
+    r"(?<![a-z0-9])(?:4k|2160p?|1080p?|720p?|uhd|hdr10?|hdr|remux|bluray|blu-ray|web-?dl|h\.?26[45]|x26[45]|hevc)"
+    r"(?![a-z0-9])|中文字幕|中字|国语|简中|繁中|简繁|蓝光原盘|原盘|杜比视界", re.I)
+
+
+def _cn_number(text: str) -> Optional[int]:
+    if text.isdigit():
+        return int(text)
+    if any(ch not in _CN_DIGITS and ch not in "十百" for ch in text):
+        return None
+    total, current = 0, 0
+    for ch in text:
+        if ch == "百":
+            total += (current or 1) * 100
+            current = 0
+        elif ch == "十":
+            total += (current or 1) * 10
+            current = 0
+        else:
+            current = current * 10 + _CN_DIGITS[ch] if current else _CN_DIGITS[ch]
+    return total + current
+
+
+def _drop_char(ch: str) -> bool:
+    cat = unicodedata.category(ch)
+    return cat[0] in ("P", "Z", "C") or ch.isspace() or ch in "·・‧—–~～|｜`^"
+
+
+def _normalize_map(text: str) -> Tuple[str, Tuple[Tuple[int, int], ...]]:
+    """归一化文本，并给出每个归一化字符对应的原文区间 (start, end)。"""
+    raw = text or ""
+    if _T2S is not None:
+        try:
+            converted = _T2S.convert(raw)
+            if len(converted) == len(raw):  # 只接受逐字转换，保证能映射回原文
+                raw = converted
+        except Exception:  # noqa: BLE001
+            pass
+    chars: List[str] = []
+    origin: List[int] = []
+    for i, ch in enumerate(raw):
+        for folded in unicodedata.normalize("NFKC", ch).lower():
+            chars.append(folded)
+            origin.append(i)
+    folded = "".join(chars)
+    out: List[str] = []
+    spans: List[Tuple[int, int]] = []
+    pos = 0
+    for m in _SERIES_RE.finditer(folded):
+        for j in range(pos, m.start()):
+            if not _drop_char(folded[j]):
+                out.append(folded[j])
+                spans.append((origin[j], origin[j] + 1))
+        if m.group(3) is not None:
+            replacement = f"s{int(m.group(3))}"
+        else:
+            number = _cn_number(m.group(1))
+            if number is None:
+                replacement = m.group(0)
+            else:
+                replacement = {"季": f"s{number}", "集": f"e{number}", "期": f"e{number}"}.get(m.group(2), str(number))
+        span = (origin[m.start()], origin[m.end() - 1] + 1)
+        for ch in replacement:
+            if not _drop_char(ch):
+                out.append(ch)
+                spans.append(span)
+        pos = m.end()
+    for j in range(pos, len(folded)):
+        if not _drop_char(folded[j]):
+            out.append(folded[j])
+            spans.append((origin[j], origin[j] + 1))
+    return "".join(out), tuple(spans)
+
+
+def normalize_title(text: str) -> str:
+    """搜索用归一化：全角转半角、小写、去空白与标点、「第二季」→s2「第2部」→2、可选繁转简。"""
+    return _normalize_map(text)[0]
+
+
+def core_title(title: str) -> str:
+    """去掉发行年份标注与画质/字幕规格，只留片名主体（用于相关度匹配）。"""
+    t = _YEAR_RE.sub(" ", title or "")
+    year = extract_year(t)
+    if year:
+        t = re.sub(r"(?:(?<=\s)|(?<=[._-]))" + year + r"(?=[\s._-])", " ", t, count=1)
+    t = _SPEC_WORDS.sub(" ", t)
+    return t.strip() or (title or "")
+
+
+@functools.lru_cache(maxsize=65536)
+def _title_key(title: str) -> Tuple[str, Tuple[Tuple[int, int], ...], str]:
+    core = core_title(title)
+    norm, spans = _normalize_map(core)
+    return norm, spans, core
+
+
+def _split_keyword(keyword: str) -> Tuple[str, str]:
+    """关键词 -> (去掉年份后的关键词, 年份)。只剩年份时保留原样（如《1917》）。"""
+    text = (keyword or "").strip()
+    m = re.search(r"(?:^|[\s(（\[])((?:18|19|20|21)\d{2})(?:[)）\]]|\s|$)", text)
+    if m:
+        rest = (text[:m.start(1)] + " " + text[m.end(1):]).strip(" ()（）[]")
+        if normalize_title(rest):
+            return rest, m.group(1)
+    return text, ""
+
+
+def _find_bounded(haystack: str, needle: str) -> int:
+    """包含匹配，但关键词以数字开头/结尾时不与相邻数字粘连（沙丘2 不命中 沙丘21）。"""
+    start = haystack.find(needle)
+    while start >= 0:
+        end = start + len(needle)
+        ok_left = not (needle[0].isdigit() and start > 0 and haystack[start - 1].isdigit())
+        ok_right = not (needle[-1].isdigit() and end < len(haystack) and haystack[end].isdigit())
+        if ok_left and ok_right:
+            return start
+        start = haystack.find(needle, start + 1)
+    return -1
+
+
+def score_title(rec: Dict[str, Any], keyword: str) -> Tuple[int, str]:
+    """相关度：完全相等 > 前缀 > 包含；年份匹配加分。返回 (分数, 命中的原标题片段)，0 表示不命中。"""
+    kw, kw_year = _split_keyword(keyword)
+    stripped = _SPEC_WORDS.sub(" ", kw)
+    if normalize_title(stripped):
+        kw = stripped          # 关键词里的画质/字幕词不参与片名匹配
+    needle = normalize_title(kw)
+    if not needle:
+        return 0, ""
+    title = str(rec.get("title") or "")
+    norm, spans, source = _title_key(title)
+    pos = _find_bounded(norm, needle)
+    penalty = 0
+    if pos < 0 and kw_year:
+        # 关键词里的年份也可能就是片名的一部分（如「银翼杀手 2049」）
+        full = normalize_title(keyword)
+        pos = _find_bounded(norm, full)
+        if pos >= 0:
+            needle, kw_year = full, ""
+    if pos < 0:
+        # 回退：在完整标题（含年份/规格）里找，相关度最低
+        norm, spans = _normalize_map(title)
+        source = title
+        full = normalize_title(keyword)
+        pos = _find_bounded(norm, full)
+        if pos < 0:
+            return 0, ""
+        needle, kw_year, penalty = full, "", 20
+    score = 100 if pos == 0 and len(needle) == len(norm) else 60 if pos == 0 else 30
+    score -= penalty
+    rec_year = str(rec.get("year") or extract_year(title) or "")
+    if kw_year:
+        if rec_year == kw_year:
+            score += 20
+        elif rec_year:
+            score -= 25
+    a, b = spans[pos][0], spans[pos + len(needle) - 1][1]
+    fragment = source[a:b].strip()
+    if fragment and fragment not in title:
+        fragment = ""
+    return max(score, 1), fragment
+
+
+def search_scored(records: List[Dict[str, Any]], keyword: str) -> List[Tuple[int, Dict[str, Any], str]]:
+    """[(分数, 记录, 命中片段)]，按相关度、画质、行号排序。"""
+    hits = []
     for rec in records:
-        t = re.sub(r"\s+", "", rec["title"]).lower()
-        if kw in t:
-            hit.append(rec)
-    hit.sort(key=lambda r: (-quality_score(r), r.get("row", 0)))
-    return hit[:limit]
+        score, fragment = score_title(rec, keyword)
+        if score:
+            hits.append((score, rec, fragment))
+    hits.sort(key=lambda h: (-h[0], -quality_score(h[1]), h[1].get("row", 0)))
+    return hits
+
+
+def search(records: List[Dict[str, Any]], keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """按归一化后的标题匹配并按相关度排序（画质为次级排序）。"""
+    return [rec for _, rec, _ in search_scored(records, keyword)[:limit]]

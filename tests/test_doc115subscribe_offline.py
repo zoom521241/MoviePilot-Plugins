@@ -150,12 +150,22 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(self.plugin._records().get(item["id"])["acquisition_status"], "saved")
         cloud.move_via_p115disk.assert_called_once_with("/Synthetic/Staging/Synthetic.mkv", "/Synthetic/Final", file_id="7")
 
-    def test_cookie_failure_status_two_is_terminal_without_move(self):
+    def test_failed_status_minus_one_is_terminal_without_move(self):
         item = self.register()
-        cloud = self.cloud(list_tasks_slice=Mock(return_value={"items": [self.finished_task(status=2, percentDone=20)], "complete": True, "cursor": None}))
+        cloud = self.cloud(list_tasks_slice=Mock(return_value={"items": [self.finished_task(status=-1, percentDone=20)], "complete": True, "cursor": None}))
         self.tick()
         self.assertEqual(self.plugin._records().get(item["id"])["acquisition_status"], "failed")
         cloud.move_via_p115disk.assert_not_called()
+
+    def test_real_shape_status_two_is_finished_and_moves(self):
+        # Shape observed from a real read-only clouddownload_task_list: status 2 = finished.
+        item = self.register()
+        cloud = self.cloud(list_tasks_slice=Mock(return_value={"items": [self.finished_task(
+            status=2, percentDone=100, move=1, display_status="已完成", left_time=0, peers=0)],
+            "complete": True, "cursor": None}))
+        self.tick(ticks=2)
+        self.assertNotEqual(self.plugin._records().get(item["id"])["acquisition_status"], "failed")
+        cloud.move_via_p115disk.assert_called_once()
 
     def test_missing_task_has_grace_and_never_erases_unconfirmed_submission(self):
         item = self.register(task_file_id="")
