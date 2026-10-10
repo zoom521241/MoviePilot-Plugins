@@ -14,7 +14,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .organization import match_history, prepare_manifest, summarize, timestamp
 
@@ -27,6 +27,8 @@ class TaskLedger:
     SCHEMA_VERSION = 1
     MAX_PENDING_EVENTS = 2000
     MAX_ACKNOWLEDGED_EVENTS = 1000
+    MAX_EVIDENCE_PER_BATCH = 500
+    ACK_RETENTION_SECONDS = 7 * 86400   # maintenance() 的兜底清理；_prune_events 仍按 1 天/条数上限更积极地清理
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -70,6 +72,50 @@ class TaskLedger:
             if version and int(version[0]) != self.SCHEMA_VERSION:
                 raise ValueError("不支持的插件账本版本；已暂停以保护既有提交证据")
             db.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version',?)", (str(self.SCHEMA_VERSION),))
+        self._migrate_index_columns()
+
+    # 0.11.0：把高频调度要用的字段冗余成列，2 秒/20 秒的 tick 只取到期/活跃的行，不再全表反序列化。
+    INDEX_COLUMNS = (("acquisition_status", "TEXT NOT NULL DEFAULT ''"), ("organization_status", "TEXT NOT NULL DEFAULT ''"),
+                     ("move_status", "TEXT NOT NULL DEFAULT ''"), ("next_check_at", "REAL NOT NULL DEFAULT 0"),
+                     ("org_next_ts", "REAL NOT NULL DEFAULT 0"), ("tracking_enabled", "INTEGER NOT NULL DEFAULT 1"),
+                     ("org_giveup", "INTEGER NOT NULL DEFAULT 0"), ("org_requested", "INTEGER NOT NULL DEFAULT 0"),
+                     ("media_type", "TEXT NOT NULL DEFAULT ''"))
+
+    @staticmethod
+    def _number(value: Any) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _index_values(cls, item: Dict[str, Any]) -> tuple:
+        kind = str(item.get("type") or item.get("target_type") or item.get("media_type") or "").strip().lower()
+        media = "tv" if kind in ("tv", "电视剧", "剧集") else "movie" if kind in ("movie", "电影") else ""
+        return (str(item.get("acquisition_status") or ""), str(item.get("organization_status") or ""),
+                str(item.get("move_status") or ""), cls._number(item.get("next_check_at")),
+                cls._number(item.get("org_next_ts")), int(bool(item.get("tracking_enabled", True))),
+                int(bool(item.get("org_giveup"))), int(bool(item.get("org_requested"))), media)
+
+    def _write_index(self, db, batch_id: str, item: Dict[str, Any]) -> None:
+        names = ",".join(f"{name}=?" for name, _ in self.INDEX_COLUMNS)
+        db.execute(f"UPDATE batches SET {names} WHERE batch_id=?", (*self._index_values(item), batch_id))
+
+    def _migrate_index_columns(self) -> None:
+        with self._connection(write=True) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(batches)")}
+            added = False
+            for name, kind in self.INDEX_COLUMNS:
+                if name not in columns:
+                    db.execute(f"ALTER TABLE batches ADD COLUMN {name} {kind}")
+                    added = True
+            done = db.execute("SELECT 1 FROM metadata WHERE key='index_columns_v1'").fetchone()
+            if added or not done:
+                for row in list(db.execute("SELECT batch_id,payload FROM batches")):
+                    self._write_index(db, row[0], json.loads(row[1]))
+                db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('index_columns_v1',?)", (str(time.time()),))
+            db.execute("CREATE INDEX IF NOT EXISTS batches_acquire_due ON batches(tracking_enabled,acquisition_status,next_check_at)")
+            db.execute("CREATE INDEX IF NOT EXISTS batches_org_due ON batches(tracking_enabled,org_giveup,org_next_ts)")
 
     @contextmanager
     def _connection(self, write: bool = False):
@@ -141,6 +187,7 @@ class TaskLedger:
         created = float(item.get("created_ts") or now)
         db.execute("INSERT INTO batches(batch_id,resource_key,created_ts,updated_ts,config_generation,payload) VALUES(?,?,?,?,?,?)",
                    (batch_id, item["resource_key"], created, now, generation, _encode(item)))
+        self._write_index(db, batch_id, item)
         return self._get(db, batch_id)
 
     def add(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -268,6 +315,7 @@ class TaskLedger:
         item["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
         db.execute("UPDATE batches SET payload=?,updated_ts=?,revision=revision+1,config_generation=?,hidden=? WHERE batch_id=?",
                    (_encode(item), now, generation, int(bool(item.get("hidden"))), batch_id))
+        self._write_index(db, batch_id, item)
         if item.get("resource_key") and item.get("acquisition_status") in ("saved", "success"):
             db.execute("UPDATE resource_holds SET state='acquired',updated_ts=? WHERE resource_key=?", (now, item["resource_key"]))
         return True
@@ -276,6 +324,59 @@ class TaskLedger:
         expected_revision = fields.pop("expected_revision", None)
         with self._connection(write=True) as db:
             return self._update(db, str(batch_id), fields, expected_revision)
+
+    def update_merged(self, batch_id: str, fields: Dict[str, Any],
+                      merge: Callable[[Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]) -> bool:
+        """在同一写事务内读最新记录再合并，避免后台用旧快照覆盖用户刚做的修改。
+
+        ``merge(current, fields)`` 返回实际要写入的字段；返回 None 表示放弃本次写入。
+        """
+        with self._connection(write=True) as db:
+            current = self._get(db, str(batch_id))
+            if current is None:
+                return False
+            merged = merge(current, copy.deepcopy(fields))
+            if merged is None:
+                return False
+            return self._update(db, str(batch_id), merged)
+
+    # ---- 按索引列取行（高频 tick 用，不做全表反序列化）--------------------
+    ACTIVE_ACQUISITION = ("queued", "submitting", "uncertain", "downloading", "awaiting_move", "moving")
+
+    def due_acquisitions(self, now: float, limit: int = 1) -> Dict[str, Any]:
+        """跟踪中、获取未终结且已到期的批次：按 (next_check_at, created_ts) 取最早的若干条，并给出到期总数。"""
+        marks = ",".join("?" * len(self.ACTIVE_ACQUISITION))
+        where = f"tracking_enabled=1 AND acquisition_status IN ({marks}) AND next_check_at<=?"
+        params = (*self.ACTIVE_ACQUISITION, float(now))
+        with self._connection() as db:
+            count = db.execute(f"SELECT COUNT(*) FROM batches WHERE {where}", params).fetchone()[0]
+            rows = [self._row(r) for r in db.execute(
+                f"SELECT * FROM batches WHERE {where} ORDER BY next_check_at,created_ts LIMIT ?", (*params, max(0, int(limit))))]
+            return {"rows": rows, "count": int(count)}
+
+    def due_organization(self, now: float, record_id: str = "", extra_acquisition: Iterable[str] = ()) -> List[Dict[str, Any]]:
+        """跟踪中、未放弃、到期且（未成功或被手动请求）的批次；其余细节条件由调用方再判断。"""
+        statuses = ("saved", "success", *tuple(extra_acquisition))
+        marks = ",".join("?" * len(statuses))
+        where = (f"tracking_enabled=1 AND org_giveup=0 AND org_next_ts<=? AND (acquisition_status IN ({marks}) "
+                 "OR move_status IN ('moving','uncertain')) AND (organization_status!='success' OR org_requested=1)")
+        params: List[Any] = [float(now), *statuses]
+        if record_id:
+            where += " AND batch_id=?"
+            params.append(str(record_id))
+        with self._connection() as db:
+            return [self._row(r) for r in db.execute(
+                f"SELECT * FROM batches WHERE {where} ORDER BY org_next_ts,created_ts", params)]
+
+    def tracked(self) -> List[Dict[str, Any]]:
+        with self._connection() as db:
+            return [self._row(r) for r in db.execute("SELECT * FROM batches WHERE tracking_enabled=1 ORDER BY created_ts DESC,batch_id DESC")]
+
+    def change_token(self) -> tuple:
+        """任意批次增删改都会改变该值（revision 单调递增），用于判断是否需要重建本地缓存。"""
+        with self._connection() as db:
+            row = db.execute("SELECT COUNT(*),COALESCE(SUM(revision),0),COALESCE(MAX(updated_ts),0) FROM batches").fetchone()
+            return (str(self.path), int(row[0]), int(row[1]), float(row[2]))
 
     def save_receipt(self, attempt_id: str, outcome: str, receipt: Dict[str, Any], generation: Optional[int] = None) -> Dict[str, Any]:
         if outcome not in ("success", "failure", "uncertain", "accepted"):
@@ -442,8 +543,53 @@ class TaskLedger:
             # evidence remains useful but cannot confirm an unknown package.
             evidence = match_history(batch, evidence)
             projection = summarize(batch.get("manifest") or [], evidence, batch.get("manifest_complete", False), pagination_complete)
+            self._trim_evidence(db, batch_id, projection.get("organization_evidence") or [])
             self._update(db, batch_id, projection)
             return self._get(db, batch_id)
+
+    def _trim_evidence(self, db, batch_id: str, keep: Iterable[Dict[str, Any]]) -> int:
+        """每个批次最多保留 MAX_EVIDENCE_PER_BATCH 条证据：逐文件最新证据必留，其余按证据时间保留最新的。"""
+        rows = [(row[0], json.loads(row[1])) for row in db.execute(
+            "SELECT evidence_key,payload FROM evidence WHERE batch_id=?", (batch_id,))]
+        if len(rows) <= self.MAX_EVIDENCE_PER_BATCH:
+            return 0
+        pinned = {str(e.get("evidence_key")) for e in keep if e.get("evidence_key") is not None}
+        rest = sorted((r for r in rows if r[0] not in pinned),
+                      key=lambda r: (timestamp(r[1].get("evidence_at")) or 0, r[0]), reverse=True)
+        room = max(0, self.MAX_EVIDENCE_PER_BATCH - len(pinned))
+        drop = [key for key, _ in rest[room:]]
+        for key in drop:
+            db.execute("DELETE FROM evidence WHERE batch_id=? AND evidence_key=?", (batch_id, key))
+        return len(drop)
+
+    def maintenance(self) -> Dict[str, int]:
+        """启动/定期本地清理（不删除 batches，不动 attempts）：
+
+        - 0.10.x 把 MediaInfo 的 repr 字符串写进了事件 payload，这些事件永远无法处理，直接 ack；
+        - 删除已 ack 且超过 ACK_RETENTION_SECONDS 的 inbox 行；
+        - 每个批次的 evidence 超出上限的旧条目裁掉。
+        """
+        result = {"legacy_events_acked": 0, "inbox_deleted": 0, "evidence_trimmed": 0}
+        with self._connection(write=True) as db:
+            for row in list(db.execute("SELECT event_id,payload FROM event_inbox WHERE acknowledged=0")):
+                try:
+                    payload = json.loads(row[1])
+                except ValueError:
+                    payload = None
+                broken = not isinstance(payload, dict) or isinstance(payload.get("mediainfo"), str) \
+                    or isinstance(payload.get("transferinfo"), str) or isinstance(payload.get("meta"), str)
+                if broken:
+                    db.execute("UPDATE event_inbox SET acknowledged=1 WHERE event_id=?", (row[0],))
+                    result["legacy_events_acked"] += 1
+            result["inbox_deleted"] = db.execute("DELETE FROM event_inbox WHERE acknowledged=1 AND created_ts<?",
+                                                 (time.time() - self.ACK_RETENTION_SECONDS,)).rowcount
+            crowded = [row[0] for row in db.execute(
+                "SELECT batch_id FROM evidence GROUP BY batch_id HAVING COUNT(*)>?", (self.MAX_EVIDENCE_PER_BATCH,))]
+            for batch_id in crowded:
+                batch = self._get(db, batch_id)
+                keep = (batch or {}).get("organization_evidence") or []
+                result["evidence_trimmed"] += self._trim_evidence(db, batch_id, keep)
+        return result
 
     def enqueue_event(self, event_id: str, payload: Dict[str, Any]) -> bool:
         if not event_id:

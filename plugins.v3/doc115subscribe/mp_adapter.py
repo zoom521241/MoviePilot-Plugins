@@ -37,7 +37,6 @@ class MPAdapter:
         self._slice_count = 0
         self._slice_deadline = 0
         self._cancelled = lambda: False
-        self._cache = {}
         self.last_error = ""
         self._subscribe_endpoint = "/api/v1/subscribe/"
 
@@ -116,15 +115,6 @@ class MPAdapter:
         self._cooldown = self.clock() + 900
         self.last_error = last
         raise MPDeferred(last, self._cooldown)
-
-    def cached(self, path, ttl=300):
-        now = self.clock()
-        old = self._cache.get(path)
-        if old and now - old[0] < ttl:
-            return old[1]
-        result = self.get(path)
-        self._cache[path] = (now, result)
-        return result
 
     @staticmethod
     def page(body):

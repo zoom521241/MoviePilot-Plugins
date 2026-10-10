@@ -188,14 +188,19 @@ class OfflineTests(unittest.TestCase):
     def test_deleting_display_history_keeps_task_and_subscription_completion(self):
         item = self.register(subscription_key="movie:synthetic")
         self.plugin._set_subscription("movie:synthetic", status="pending", required_resources=["offline-synthetic"])
-        self.plugin.delete_record(item["id"])
-        self.assertEqual(self.plugin._records().list(), [])
+        # 0.11.0：跟踪中的任务拒绝隐藏（避免用户看不到仍在后台运行的任务）
+        self.assertEqual(self.plugin.delete_record(item["id"])["code"], 1)
+        self.assertEqual(len(self.plugin._records().list()), 1)
         cloud = self.cloud()
         self.finish_cloud(cloud)
         self.tick(ticks=2)
         self.assertEqual(self.plugin._subscription_store().list()[0]["status"], "complete")
+        self.assertEqual(self.plugin._records().get(item["id"])["acquisition_status"], "saved")
+        # 获取完成后可以隐藏，获取证据与订阅完成状态保留
+        self.assertEqual(self.plugin.delete_record(item["id"])["code"], 0)
         self.assertEqual(self.plugin._records().list(), [])
         self.assertEqual(self.plugin._records().get(item["id"])["acquisition_status"], "saved")
+        self.assertEqual(self.plugin._subscription_store().list()[0]["status"], "complete")
 
     def test_all_links_partial_failure_stays_incomplete_after_successful_task_finishes(self):
         self.register(subscription_key="movie:synthetic")

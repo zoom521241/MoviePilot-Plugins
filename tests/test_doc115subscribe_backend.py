@@ -607,6 +607,11 @@ class BackendTests(unittest.TestCase):
     def test_history_delete_does_not_cancel_pending_tracking(self):
         history = self.plugin._records().add({"title": "Synthetic", "hash": "a" * 40, "status": "downloading"})
         self.plugin._pending().upsert({"hash": "a" * 40, "record_id": history["id"], "status": "downloading"})
+        # 0.11.0：仍在跟踪的任务不允许隐藏，需先停止自动跟踪
+        refused = self.plugin.api_records_delete({"id": history["id"]})
+        self.assertEqual(refused["code"], 1)
+        self.assertIn("停止自动跟踪", refused["msg"])
+        self.assertEqual(self.plugin.api_task_action({"id": history["id"], "action": "stop_tracking"})["code"], 0)
         self.assertEqual(self.plugin.api_records_delete({"id": history["id"]})["code"], 0)
         self.assertIsNotNone(self.plugin._pending().get("a" * 40))
 

@@ -44,15 +44,11 @@ def _transfer_event(name):
         return lambda callback: callback
 
 
-class OfflineTaskError(P115Error):
-    """Terminal task failure, as distinct from a temporary cloud lookup error."""
-
-
 class Doc115Subscribe(TaskRuntime, _PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.10.5"
+    plugin_version = "0.11.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -108,8 +104,6 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                 self._mt_cache = {}
                 self._qr_img = b""
                 self._qr_ts = 0.0
-                self._offline_next_ts = 0.0
-                self._org_check_ts = 0.0
                 self._last_refresh = {}
                 self._last_subscribe = {}
 
@@ -141,6 +135,11 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
             if any(ord(c) < 32 for c in path):
                 raise ValueError(f"{field} 含非法字符")
             conf[field] = path.rstrip("/")
+        staging = conf["magnet_staging_path"]
+        for field, label in (("movie_path", "电影下载目录"), ("tv_path", "电视剧下载目录")):
+            other = conf[field]
+            if staging == other or staging.startswith(other + "/") or other.startswith(staging + "/"):
+                raise ValueError(f"磁力暂存目录不能与{label}相同或互相嵌套（MP 会把暂存中的文件当成待整理文件）")
         if conf["link_mode"] not in ("first", "all"):
             raise ValueError("链接策略必须是 first 或 all")
         return conf
@@ -163,7 +162,9 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
             self._directories_error = ""
             self._index = None
             self._load_index()
-            self._refresh_event_paths()
+            self._refresh_event_paths(force=True)
+            # 启动迁移/清理：旧版本写坏的事件直接 ack、旧 inbox 行与超量证据清理（不删除任务批次）
+            self._maintain_ledger(force=True)
             if not self._enabled:
                 return
             scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
@@ -172,7 +173,8 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                 trigger=CronTrigger.from_crontab(self._index_cron, timezone="Asia/Shanghai"),
                 id="doc115-index", name="115文档刷新索引", **options)
             if self._subscribe_enabled:
-                scheduler.add_job(self.run_subscribe,
+                # cron 只排队，由离线 worker 执行（失败有退避重试，不会因 MP 读取锁冲突直接失败）
+                scheduler.add_job(self.queue_subscribe_job,
                     trigger=CronTrigger.from_crontab(self._subscribe_cron, timezone="Asia/Shanghai"),
                     id="doc115-subscribe", name="115文档电影订阅", **options)
             scheduler.add_job(self.check_offline_tasks, trigger=IntervalTrigger(seconds=2),
@@ -255,6 +257,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
         return self.get_data_path_local() / "history.json"
 
     def _pending(self):
+        """迁移前旧版待搬运 JSON（只读兼容/测试用）；业务逻辑一律查 SQLite 账本。"""
         return PendingStore(self.pending_path)
 
 
@@ -456,7 +459,8 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                         failures.append(msg)
                         if self._last_transfer_result.get("uncertain"):
                             break
-                        if self._link_mode == "all" and any(x.get("subscription_key") == key for x in self._pending().list()):
+                        if self._link_mode == "all" and any(x.get("subscription_key") == key and self._is_tracking(x)
+                                                            for x in self._records().tracked()):
                             break
                     if accepted:
                         data["transferred"] += 1
@@ -495,10 +499,8 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                    ("save_config", self.api_save_config, "POST"), ("refresh_index", self.api_refresh_index, "POST"),
                    ("search", self.api_search, "POST"), ("transfer", self.api_transfer, "POST"),
                    ("records", self.api_records, "GET"),
-                   ("records_delete", self.api_records_delete, "POST"), ("cancel_task", self.api_cancel_task, "POST"),
-                   ("records_verify", self.api_records_verify, "POST"),
-                   ("check_organization", self.api_records_verify, "POST"),
-                   ("retry_task", self.api_retry_task, "POST"), ("run_subscribe", self.api_run_subscribe, "POST"),
+                   ("records_delete", self.api_records_delete, "POST"), ("records_bulk", self.api_records_bulk, "POST"),
+                   ("records_verify", self.api_records_verify, "POST"), ("run_subscribe", self.api_run_subscribe, "POST"),
                    ("subscriptions_preview", self.api_subscriptions_preview, "GET"),
                    ("diagnostics", self.api_diagnostics, "GET"), ("directories", self.api_directories, "GET"),
                    ("task_action", self.api_task_action, "POST"),
@@ -560,7 +562,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
             "built_at_text": datetime.fromtimestamp(index.built_at).strftime("%Y-%m-%d %H:%M") if index and index.built_at else "尚未建立",
             "index_errors": summary.get("errors", []), "stale_sheets": summary.get("stale_sheets", []),
             "refreshing": self._refresh_lock.locked(), "last_refresh": self._last_refresh,
-            "last_subscribe": self._last_subscribe}}
+            "last_subscribe": self._last_subscribe, "stats": self.records_stats(), "jobs": self.jobs_view()}}
 
     def api_get_config(self):
         return {"code": 0, "data": self._public_config()}
@@ -605,9 +607,17 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
             kw = str(body.get("keyword") or "").strip()
             if not kw:
                 raise ValueError("请输入影视名称")
-            data = index.search_page(kw, media_type=body.get("media_type", "all"),
+            sort = str(body.get("sort") or "relevance")
+            if sort not in ("relevance", "year_desc", "year_asc", "quality"):
+                raise ValueError("排序方式无效")
+            options = dict(media_type=body.get("media_type", "all"),
                 quality=body.get("quality", "all"), subtitle=body.get("subtitle", "all"), link_kind=body.get("link_kind", "all"),
                 page=int(body.get("page", 1)), page_size=int(body.get("page_size", 10)))
+            try:
+                data = index.search_page(kw, sort=sort, **options)
+            except TypeError:
+                # 兼容尚未支持 sort 参数的 DocIndex.search_page
+                data = index.search_page(kw, **options)
             return {"code": 0, "data": data}
         except Exception as exc:
             return {"code": 1, "msg": self._error(exc)}

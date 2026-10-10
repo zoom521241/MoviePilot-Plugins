@@ -7,6 +7,7 @@ import json
 import re
 import time
 import traceback
+from typing import Any, Dict
 from urllib.parse import urlsplit
 from contextlib import nullcontext
 from pathlib import PurePosixPath
@@ -27,10 +28,10 @@ from .p115_transfer import P115Error, extract_hash
 
 
 class TaskRuntime:
-    ORG_BACKOFF_BASE = 20          # 查不到整理证据时的退避：20 → 40 → 80 → 160 秒
+    ORG_BACKOFF_BASE = 20          # 查不到整理证据时的退避：第 1/2/3 次后分别等 40 → 80 → 160 秒（_delay = base·2^次数）
     ORG_BACKOFF_MAX = 900
     ORG_MAX_PER_RUN = 5
-    ORG_GIVEUP_ATTEMPTS = 4        # 连续 4 次仍无任何整理证据 → 判「未找到整理记录」并移出自动核对（约 2 分钟）
+    ORG_GIVEUP_ATTEMPTS = 4        # 连续 4 次仍无任何整理证据 → 判「未找到整理记录」并移出自动核对（约 5 分钟，按 20 秒 tick 取整）
     EVENT_GIVEUP_ATTEMPTS = 3      # 同一条事件连续处理失败 3 次后跳过，避免毒事件拖死整轮核对
     ORG_PENDING_STATES = ("done", "unverified", "organized", "partial", "missing", "unfound")
 
@@ -64,10 +65,38 @@ class TaskRuntime:
             return bool(item and item.get("tracking_enabled", True))
         return True
 
-    def _update_live(self, batch_id, generation, **fields):
-        if self._live(generation, batch_id):
-            return self._records().update(batch_id, **fields)
-        return False
+    ORG_REQUEST_FIELDS = ("org_requested", "org_giveup", "org_next_ts", "org_page", "org_attempts", "org_stale_count")
+    IN_FLIGHT_STATES = ("queued", "submitting", "uncertain", "downloading", "awaiting_move", "moving", "unverified")
+
+    @classmethod
+    def _merge_latest(cls, current, fields, snapshot_ts=None):
+        """后台写回前与最新记录合并，避免旧快照覆盖用户刚做的操作（并发覆盖保护）。
+
+        - 用户在本轮核对开始之后又点了「核对」（org_request_ts 更新）：保留其排队请求，不覆盖调度字段；
+        - 记录已经是 saved/success（例如用户「确认已转存」或事件证实搬运）：不允许被降级回进行中状态。
+        """
+        if not current.get("tracking_enabled", True):
+            return None
+        fields = dict(fields)
+        if snapshot_ts is not None and float(current.get("org_request_ts") or 0) > float(snapshot_ts):
+            for key in cls.ORG_REQUEST_FIELDS:
+                fields.pop(key, None)
+        if current.get("acquisition_status") in ("saved", "success"):
+            if fields.get("acquisition_status") in cls.IN_FLIGHT_STATES:
+                fields.pop("acquisition_status", None)
+            if fields.get("status") in cls.IN_FLIGHT_STATES:
+                fields.pop("status", None)
+            if current.get("move_status") == "success" and fields.get("move_status") in ("moving", "uncertain"):
+                fields.pop("move_status", None)
+        return fields
+
+    def _update_live(self, batch_id, generation, _snapshot_ts=None, **fields):
+        if not self._live(generation, batch_id):
+            return False
+        store = self._records()
+        if not hasattr(store, "update_merged"):
+            return store.update(batch_id, **fields)
+        return store.update_merged(batch_id, fields, lambda current, f: self._merge_latest(current, f, _snapshot_ts))
 
     def do_transfer(self, rec, to="", force=False):
         """Reserve an asynchronous resource plan, never force a cloud resubmit."""
@@ -99,10 +128,10 @@ class TaskRuntime:
         explicit = bool(rec.get("_explicit_source"))
         plan = links if self._link_mode == "all" and not explicit else links[:1]
         store = self._records()
-        actual_items = []
-        for kind, url in plan:
+        account = self._account_key()
+
+        def lookup(kind, url):
             h = extract_hash(url) if kind != LINK_115_SHARE else ""
-            account = self._account_key()
             identity = "offline:" + h if h else kind + ":" + urlsplit(url).path.rstrip("/").split("/")[-1]
             key = hashlib.sha256(f"{account}|{identity}|{final}".encode()).hexdigest()
             # Old JSON keys did not include the account; retain their protective hold.
@@ -119,6 +148,14 @@ class TaskRuntime:
                 tracked = store.find_by_hash(h)
                 if tracked and tracked.get("acquisition_status") not in ("failed",) and tracked.get("account_key", account) == account:
                     old = old or tracked
+            return h, key, old
+
+        # 先整体检查：任一资源上次明确失败就整体拒绝，避免多链接循环中途 return 留下已排队的残余预约。
+        found = [(kind, url, *lookup(kind, url)) for kind, url in plan]
+        if any(old and old.get("acquisition_status") == "failed" for *_, old in found):
+            return False, "上次获取失败，请处理原因后使用该任务的获取重试"
+        actual_items = []
+        for kind, url, h, key, old in found:
             media_type = rec.get("media_type") or doc_parser.media_type_of(rec.get("sheet", ""), rec.get("title", ""))
             context = {"title": rec.get("title"), "year": rec.get("year"), "type": media_type,
                 "target_type": target,
@@ -133,8 +170,6 @@ class TaskRuntime:
                 "expected_episodes": rec.get("expected_episodes") or [],
                 "expected_episode_count": rec.get("expected_episode_count"), "automatic": bool(rec.get("_subscription_key"))}
             context["min_media_size_mb"] = self._min_media_size_mb
-            if old and old.get("acquisition_status") == "failed":
-                return False, "上次获取失败，请处理原因后使用该任务的获取重试"
             prepared = {"claimed": False, "batch": old} if old else store.prepare_resource(key, context, generation)
             item = prepared["batch"]
             actual_items.append(item)
@@ -515,24 +550,26 @@ class TaskRuntime:
             else:
                 self._update_live(rec["id"], generation, status="moving", next_check_at=time.time() + 30, message="搬运结果待核实")
 
+    def _note_offline_tick(self, state, **extra):
+        self._last_offline_tick = {"at": time.time(), "state": state, **extra}
+
     def check_offline_tasks(self, force=False):
         self._ensure_runtime()
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}
         if not self._offline_lock.acquire(blocking=False):
             return {"code": 0, "data": {"skipped": True}}
-        generation = self._generation
+        generation, rec = self._generation, None
         try:
             store, now = self._records(), time.time()
+            self._maintain_ledger(now)
             if self._run_requested_job(generation):
+                self._note_offline_tick("ok", background_job=True)
                 return {"code": 0, "data": {"background_job": True}}
-            active = [x for x in store.list(limit=None, include_hidden=True)
-                      if x.get("tracking_enabled", True) and x.get("acquisition_status") in
-                      ("queued", "submitting", "uncertain", "downloading", "awaiting_move", "moving")
-                      and float(x.get("next_check_at") or 0) <= now]
-            if not active:
+            due = store.due_acquisitions(now, limit=1)
+            if not due["rows"]:
                 return {"code": 0, "data": {"pending": 0, "skipped": True}}
-            rec = min(active, key=lambda x: (float(x.get("next_check_at") or 0), x["created_ts"]))
+            rec, pending = due["rows"][0], due["count"]
             if rec.get("account_key") and rec["account_key"] != self._account_key():
                 store.update(rec["id"], tracking_enabled=False, query_error="该任务属于其它115账号，未使用新账号处理",
                              message="账号变化，原任务已暂停", next_check_at=0)
@@ -544,28 +581,67 @@ class TaskRuntime:
                 # Restart after an unresolved intent must reconcile, never resend.
                 store.update(rec["id"], status="unverified", acquisition_status="uncertain")
                 rec = store.get(rec["id"])
-            if rec["kind"] == LINK_115_SHARE and rec.get("acquisition_status") == "uncertain":
+            reconcile = bool(rec.get("reconcile_requested"))
+            if rec["kind"] == LINK_115_SHARE and rec.get("acquisition_status") == "uncertain" and not reconcile:
                 self._update_live(rec["id"], generation, next_check_at=now + 900, message="分享提交结果待核实，自动重发已暂停")
-                return {"code": 0, "data": {"pending": len(active), "paused": 1}}
+                return {"code": 0, "data": {"pending": pending, "paused": 1}}
             tr = self._transfers()
             context = tr.work_slice(cancelled=lambda: not self._live(generation, rec["id"])) if hasattr(tr, "work_slice") else nullcontext()
             with context:
                 if not self._live(generation, rec["id"]):
                     return {"code": 0, "data": {"skipped": True}}
-                if rec.get("acquisition_status") == "queued":
+                if reconcile and rec["kind"] == LINK_115_SHARE:
+                    self._reconcile_step(rec, tr, generation)
+                elif rec.get("acquisition_status") == "queued":
                     self._submit_step(rec, tr, generation)
                 else:
+                    if reconcile:
+                        self._update_live(rec["id"], generation, reconcile_requested=False)
                     self._offline_step(rec, tr, generation)
-            return {"code": 0, "data": {"pending": len(active), "processed": 1}}
+            self._note_offline_tick("ok", processed=rec["id"], pending=pending)
+            return {"code": 0, "data": {"pending": pending, "processed": 1}}
         except Exception as exc:
-            if "rec" in locals():
-                self._defer_task(rec, generation, exc)
+            if rec:
+                try:
+                    self._defer_task(rec, generation, exc)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._note_offline_tick("error", error=self._error(exc)[:300], record_id=(rec or {}).get("id", ""))
+            # 每 2 秒一次的 worker：异常 5 分钟最多记一次 warning（含堆栈），其余降为 debug，避免刷屏也不再静默。
+            if time.time() - float(getattr(self, "_last_offline_error_log", 0) or 0) > 300:
+                self._last_offline_error_log = time.time()
+                logger.warning("115文档订阅与查询：离线/转存后台任务失败：" + self._error(exc)
+                               + "\n" + traceback.format_exc())
+            else:
+                logger.debug("115文档订阅与查询：离线/转存后台任务失败：" + self._error(exc))
             return {"code": 1, "msg": self._error(exc)}
         finally:
             self._offline_lock.release()
 
-    def records_view(self, refresh=False):
-        return {"code": 0, "data": self._records().list()}
+    LEDGER_MAINTENANCE_INTERVAL = 6 * 3600
+
+    def _maintain_ledger(self, now=None, force=False):
+        """启动时与每 6 小时一次的本地账本清理（坏事件 ack、旧 inbox、证据上限）；失败只记日志。"""
+        now = time.time() if now is None else now
+        if not force and now < float(getattr(self, "_ledger_maintenance_next", 0) or 0):
+            return None
+        self._ledger_maintenance_next = now + self.LEDGER_MAINTENANCE_INTERVAL
+        try:
+            result = self._records().maintenance()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("115文档订阅与查询：本地账本清理失败：" + self._error(exc))
+            return None
+        self._last_maintenance = {"at": now, **result}
+        if result.get("legacy_events_acked"):
+            logger.info(f"115文档订阅与查询：已清理 {result['legacy_events_acked']} 条旧版本写入的无效整理事件")
+        return result
+
+    TERMINAL_ACQUISITION = ("saved", "success", "failed")
+
+    @classmethod
+    def _is_tracking(cls, item):
+        """仍在后台处理：自动跟踪开启且获取未终结（saved/success/failed 以外）。"""
+        return bool(item.get("tracking_enabled", True)) and item.get("acquisition_status") not in cls.TERMINAL_ACQUISITION
 
     def _record_view(self, item):
         item = {k: v for k, v in item.items() if k not in ("url", "source_manifest", "share_state", "actual_candidate", "fallback_links", "account_key")}
@@ -579,7 +655,12 @@ class TaskRuntime:
             actions.append("retry_submit")
         if acquisition == "failed" and item.get("hash"):
             actions.append("check_download")
-        item["allowed_actions"] = actions
+        if acquisition == "uncertain" or item.get("status") == "unverified":
+            # 分享提交结果不明时自动重发已暂停；给出两条出路：只读核对 / 用户人工确认已转存
+            actions += ["reconcile", "confirm_saved"]
+        item["allowed_actions"] = list(dict.fromkeys(actions))
+        item["hidden"] = bool(item.get("hidden"))
+        item["tracking"] = self._is_tracking(item)
         if acquisition in ("saved", "success"):
             item["next_check_at"] = item.get("org_next_ts") or 0
         if not item.get("tracking_enabled", True):
@@ -606,60 +687,144 @@ class TaskRuntime:
                                  for u in item.get("manifest") or [] if u.get("ignored_reason") and not u.get("required")]
         return item
 
-    def api_records(self, limit: int = 200, page: int = 1, page_size: int = 20, filter: str = "all"):
+    @classmethod
+    def _needs_attention(cls, x):
+        return bool(x.get("query_error") or x.get("organization_status") in ("partial", "failed", "paused", "unfound")
+                    or x.get("acquisition_status") in ("uncertain", "failed")
+                    or (x.get("acquisition_status") in ("saved", "success") and x.get("org_giveup")
+                        and x.get("organization_status") != "success"))
+
+    @classmethod
+    def _is_active(cls, x):
+        return bool(x.get("tracking_enabled", True) and
+                    (x.get("acquisition_status") in ("queued", "submitting", "uncertain", "downloading", "awaiting_move", "moving")
+                     or x.get("acquisition_status") in ("saved", "success") and x.get("organization_status") not in ("success", "paused", "failed")
+                     and not x.get("org_giveup")))
+
+    @staticmethod
+    def _title_query(value):
+        return re.sub(r"\s+", "", str(value or "")).casefold()
+
+    def api_records(self, limit: int = 200, page: int = 1, page_size: int = 20, filter: str = "all",
+                    q: str = "", media: str = "all"):
+        # limit 仅为兼容旧前端签名保留，不再使用；分页由 page/page_size 决定。
         try:
-            rows = self._records().list(limit=None)
+            if filter not in ("all", "active", "needs_attention", "completed", "hidden"):
+                raise ValueError("无效的任务筛选")
+            if media not in ("all", "movie", "tv"):
+                raise ValueError("无效的类型筛选")
+            everything = self._records().list(limit=None, include_hidden=True)
+            visible = [x for x in everything if not x.get("hidden")]
+            rows = [x for x in everything if x.get("hidden")] if filter == "hidden" else visible
             if filter == "active":
-                rows = [x for x in rows if x.get("tracking_enabled", True) and
-                        (x.get("acquisition_status") in ("queued", "submitting", "uncertain", "downloading", "awaiting_move", "moving")
-                         or x.get("acquisition_status") in ("saved", "success") and x.get("organization_status") not in ("success", "paused", "failed") and not x.get("org_giveup"))]
+                rows = [x for x in rows if self._is_active(x)]
             elif filter == "needs_attention":
-                rows = [x for x in rows if x.get("query_error") or x.get("organization_status") in ("partial", "failed", "paused")
-                        or x.get("acquisition_status") in ("uncertain", "failed")
-                        or (x.get("acquisition_status") in ("saved", "success") and x.get("org_giveup"))]
+                rows = [x for x in rows if self._needs_attention(x)]
             elif filter == "completed":
                 rows = [x for x in rows if x.get("organization_status") == "success"]
-            elif filter != "all":
-                raise ValueError("无效的任务筛选")
-            page, size = max(1, int(page)), max(1, min(100, int(page_size)))
+            if media != "all":
+                rows = [x for x in rows if self._media_bucket(x) == media]
+            needle = self._title_query(q)
+            if needle:
+                rows = [x for x in rows if needle in self._title_query(x.get("title"))]
+            size = max(1, min(100, int(page_size)))
+            pages = max(1, (len(rows) + size - 1) // size)
+            page = min(max(1, int(page)), pages)
             return {"code": 0, "data": {"records": [self._record_view(x) for x in rows[(page - 1)*size:page*size]],
-                "total": len(rows), "page": page, "page_size": size, "stats": self._record_stats(rows)}}
+                "total": len(rows), "page": page, "page_size": size, "stats": self._record_stats(visible)}}
         except Exception as exc:
             return {"code": 1, "msg": self._error(exc)}
 
     @staticmethod
-    def _record_stats(rows) -> Dict[str, Any]:
-        """按电影/电视剧统计任务数与已整理入库数（用于页面顶部展示）。"""
+    def _media_bucket(row):
+        kind = str(row.get("type") or row.get("target_type") or row.get("media_type") or "").strip().lower()
+        return "tv" if kind in ("tv", "电视剧", "剧集") else "movie" if kind in ("movie", "电影") else ""
+
+    @classmethod
+    def _record_stats(cls, rows) -> Dict[str, Any]:
+        """全部未隐藏记录的统计（不受筛选影响）：电影/电视剧任务数与已整理入库数、进行中与需处理数。"""
         stats = {"movie": {"total": 0, "organized": 0}, "tv": {"total": 0, "organized": 0},
-                 "total": 0, "organized": 0}
+                 "total": 0, "organized": 0, "active": 0, "attention": 0}
         for row in rows:
-            kind = str(row.get("type") or row.get("target_type") or "").strip().lower()
-            bucket = "tv" if kind in ("tv", "电视剧", "剧集") else "movie" if kind in ("movie", "电影") else ""
-            organized = bool(row.get("organization_confirmed")) or str(row.get("organization_status") or "") == "success"
+            if row.get("hidden"):
+                continue
+            bucket = cls._media_bucket(row)
+            organized = str(row.get("organization_status") or "") == "success"
             stats["total"] += 1
-            if organized:
-                stats["organized"] += 1
+            stats["organized"] += organized
+            stats["active"] += cls._is_active(row)
+            stats["attention"] += cls._needs_attention(row)
             if bucket:
                 stats[bucket]["total"] += 1
-                if organized:
-                    stats[bucket]["organized"] += 1
+                stats[bucket]["organized"] += organized
         return stats
+
+    def records_stats(self):
+        return self._record_stats(self._records().list(limit=None))
+
+    TRACKING_DELETE_MSG = "任务仍在后台处理，请先停止自动跟踪再删除"
 
     def delete_record(self, rec_id=""):
         store = self._records()
-        return {"code": 0, "data": {"deleted": int(store.delete(rec_id))} if rec_id else {"cleared": store.clear()},
-                "msg": "已隐藏展示记录，获取证据与后台任务保留"}
+        if rec_id:
+            rec = store.get(rec_id)
+            if not rec:
+                return {"code": 1, "msg": "任务不存在"}
+            if self._is_tracking(rec):
+                return {"code": 1, "msg": self.TRACKING_DELETE_MSG}
+            return {"code": 0, "data": {"deleted": int(store.delete(rec_id))},
+                    "msg": "已隐藏展示记录，获取证据保留"}
+        hidden = skipped = 0
+        for rec in store.list(limit=None):
+            if self._is_tracking(rec):
+                skipped += 1
+            elif store.delete(rec["id"]):
+                hidden += 1
+        return {"code": 0, "data": {"hidden": hidden, "skipped": skipped},
+                "msg": f"已隐藏 {hidden} 条" + (f"，{skipped} 条仍在后台处理未隐藏" if skipped else "") + "；获取证据保留"}
 
     def api_records_delete(self, payload: dict = None):
         return self.delete_record(str((payload or {}).get("id") or ""))
+
+    def api_records_bulk(self, payload: dict = None):
+        body = payload or {}
+        ids, action = body.get("ids"), str(body.get("action") or "")
+        if not isinstance(ids, list) or not ids or len(ids) > 500:
+            return {"code": 1, "msg": "请选择 1 到 500 条记录"}
+        if action not in ("verify", "hide", "unhide", "stop_tracking"):
+            return {"code": 1, "msg": "不支持的批量操作"}
+        store, done, skipped = self._records(), 0, 0
+        for rid in dict.fromkeys(str(x) for x in ids if x):
+            rec = store.get(rid)
+            if not rec:
+                skipped += 1
+                continue
+            if action == "hide":
+                ok = not self._is_tracking(rec) and not rec.get("hidden") and store.delete(rid)
+            elif action == "unhide":
+                ok = bool(rec.get("hidden")) and store.update(rid, hidden=False)
+            elif action == "stop_tracking":
+                ok = bool(rec.get("tracking_enabled", True)) and self._stop_tracking(rec)
+            else:
+                ok = rec.get("acquisition_status") in ("saved", "success") and \
+                    self.api_records_verify({"id": rid})["data"]["queued"] > 0
+            done += bool(ok)
+            skipped += not ok
+        names = {"verify": "已排队核对", "hide": "已隐藏", "unhide": "已恢复显示", "stop_tracking": "已停止跟踪"}
+        return {"code": 0, "data": {"done": done, "skipped": skipped},
+                "msg": f"{names[action]} {done} 条" + (f"，跳过 {skipped} 条" if skipped else "")}
+
+    def _stop_tracking(self, rec):
+        ok = self._records().stop_tracking(rec["id"])
+        self._set_subscription(rec.get("subscription_key"), status="cancelled")
+        return ok
 
     def api_cancel_task(self, payload: dict = None):
         rid = str((payload or {}).get("id") or "")
         rec = self._records().get(rid)
         if not rec:
             return {"code": 1, "msg": "任务不存在"}
-        self._records().stop_tracking(rid)
-        self._set_subscription(rec.get("subscription_key"), status="cancelled")
+        self._stop_tracking(rec)
         return {"code": 0, "msg": "已停止跟踪，115下载与文件保留"}
 
     def api_retry_task(self, payload: dict = None):
@@ -698,7 +863,69 @@ class TaskRuntime:
             return self.api_cancel_task({"id": rec["id"]})
         if action in ("retry_move", "retry_submit", "check_download"):
             return self.api_retry_task({"id": rec["id"], "action": action})
+        if action == "reconcile":
+            return self._request_reconcile(rec)
+        if action == "confirm_saved":
+            return self._confirm_saved(rec)
         return {"code": 1, "msg": "不支持的任务操作"}
+
+    def _request_reconcile(self, rec):
+        """只读核对：排队一次后台检查（不重发提交）。后台由 _reconcile_step 执行。"""
+        self._records().update(rec["id"], tracking_enabled=True, config_generation=self._generation,
+                               reconcile_requested=True, next_check_at=time.time(), query_error="",
+                               message="已排队只读核对：检查目标目录中是否已有本批条目，不会重新转存")
+        return {"code": 0, "msg": "已排队只读核对，不会重新转存", "data": {"state": "queued"}}
+
+    def _confirm_saved(self, rec):
+        """用户在 115 原生界面确认已转存：置为 saved，进入整理核对；不发送任何云端请求。"""
+        now = time.time()
+        self._records().update(rec["id"], tracking_enabled=True, acquisition_status="saved", status="done",
+                               progress=100, moved_at=rec.get("moved_at") or now, next_check_at=0,
+                               reconcile_requested=False, manual_confirmed_at=now, query_error="", last_error="",
+                               org_next_ts=now, org_requested=True, org_request_ts=now, org_giveup=False, org_page=1,
+                               org_attempts=0, org_stale_count=0, message="已人工确认转存，等待MP整理核对")
+        self._mark_resource_complete(rec.get("subscription_key"), rec.get("resource_key"))
+        self._complete_subscription_if_ready(rec.get("subscription_key"))
+        self._refresh_event_paths(force=True)
+        return {"code": 0, "msg": "已标记为已转存，进入整理核对", "data": {"state": "saved"}}
+
+    def _reconcile_step(self, rec, tr, generation):
+        """只读核对 uncertain/unverified 分享批次：列 final_path 目录，看清单条目名是否都在。
+
+        只调用 p115_transfer 现成的只读接口 list_names（内部 path_to_id(mkdir=False) + 分页列目录），
+        从不提交/重发。找到全部顶层条目 → 判已转存（saved）；否则保持待核实并说明，交由用户人工处理。
+        若传输客户端没有 list_names（兼容旧版本），只标记 org_requested，交给整理核对用 MP 整理记录判定。
+        """
+        now = time.time()
+        expected = [x.get("name") for x in (rec.get("share_state") or {}).get("items", []) if x.get("name")]
+        if not expected:
+            expected = sorted({str(u.get("relative_path") or "").split("/")[0]
+                               for u in rec.get("source_manifest") or [] if u.get("relative_path")} - {""})
+        if not hasattr(tr, "list_names") or not expected:
+            self._update_live(rec["id"], generation, reconcile_requested=False, org_requested=True,
+                              org_request_ts=now, org_next_ts=now, next_check_at=now + 900,
+                              message="无法只读列目录，已交由整理核对按 MP 整理记录判定")
+            return
+        try:
+            names = set(tr.list_names(rec["final_path"]))
+        except Exception as exc:
+            from .p115_transfer import P115NotFound
+            if not isinstance(exc, P115NotFound):
+                raise
+            names = set()
+        missing = [n for n in expected if n not in names]
+        if not missing:
+            self._update_live(rec["id"], generation, acquisition_status="saved", status="done", progress=100,
+                              item_names=expected, moved_at=rec.get("moved_at") or now, next_check_at=0,
+                              reconcile_requested=False, query_error="", last_error="",
+                              org_next_ts=now + 60, message="只读核对：目标目录已有本批全部条目，MP整理待核实")
+            self._mark_resource_complete(rec.get("subscription_key"), rec["resource_key"])
+            self._complete_subscription_if_ready(rec.get("subscription_key"))
+            self._refresh_event_paths(force=True)
+        else:
+            self._update_live(rec["id"], generation, reconcile_requested=False, next_check_at=now + 900,
+                              message=f"只读核对：目标目录缺少 {len(missing)}/{len(expected)} 个条目，未重新转存；"
+                                      "请到 115 核实后选择「确认已转存」或停止跟踪")
 
     def _mp(self):
         if getattr(self, "_mp_instance", None) is None:
@@ -711,44 +938,58 @@ class TaskRuntime:
 
     @staticmethod
     def _org_search_key(title):
-        # A wildcard search is discovery only; match_history compares full identity.
-        return re.split(r"第[零一二三四五六七八九十两\d]+季|(?<![a-z0-9])s\d{1,2}(?!\d)|\bseason\s*\d+|[\[（(]", str(title or ""), maxsplit=1, flags=re.I)[0].strip(" .-·:：")[:24]
+        """MP 整理记录的模糊查询词：先去掉括号标签（[] 【】 （） ()），再截到季号/年份前。
 
-    def _mp_transfer_entries(self, title):
-        body = self._mp_api_json("/api/v1/history/transfer", {"title": "*" + self._org_search_key(title) + "*", "page": 1, "count": 100})
-        rows, _ = self._mp().page(body)
-        return rows
-
-    def _org_entries_for(self, rec, title):
-        return match_history(rec, self._mp_transfer_entries(title))
+        只用于发现候选，身份由 match_history 全量比较；为空时调用方跳过查询（绝不用 "**" 全量扫描）。
+        """
+        raw = re.sub(r"[\[【（(][^\]】）)]*[\]】）)]", " ", str(title or ""))
+        raw = re.split(r"第[零一二三四五六七八九十两\d]+季|(?<![a-z0-9])s\d{1,2}(?!\d)|\bseason\s*\d+|[\[【（(]",
+                       raw, maxsplit=1, flags=re.I)[0]
+        return re.sub(r"\s+", " ", raw).strip(" .-·:：_")[:24].strip()
 
     @staticmethod
     def _org_due(rec, now):
         return now >= float(rec.get("org_next_ts") or 0)
 
+    ORG_STALE_ATTEMPTS = 6         # partial / failed 连续 6 次完整核对结果都没变化 → 停止自动核对（保留手动核对）
+    ORG_FINAL_STATES = ("success", "partial", "failed")
+
+    def _log_org_change(self, before_rec, before_status, batch):
+        """仅在整理结论变化时打印「整理成功/部分/失败」，返回是否变化。"""
+        status = (batch or {}).get("organization_status")
+        if status == before_status or status not in self.ORG_FINAL_STATES:
+            return False
+        title = core_title((batch or {}).get("title") or before_rec.get("title"))
+        total = batch.get("organized_total") or batch.get("organized_count") or 0
+        if status == "success":
+            logger.info(f"115文档订阅与查询：整理成功：{title}｜已入库 {batch.get('organized_count')}/{total} 个")
+        elif status == "partial":
+            logger.info(f"115文档订阅与查询：整理部分成功：{title}｜已入库 {batch.get('organized_count')}"
+                        + (f"/{batch.get('organized_total')}" if batch.get("organized_total") else "") + " 个")
+        else:
+            logger.info(f"115文档订阅与查询：整理失败：{title}｜失败 {batch.get('organized_failed')} 个")
+        return True
+
     def verify_organization(self, force=False, record_id=""):
         store, now, generation = self._records(), time.time(), self._generation
-        rows = store.list(limit=None, include_hidden=True)
-        if record_id:
-            rows = [x for x in rows if x["id"] == record_id]
-        rows = [x for x in rows if x.get("tracking_enabled", True) and
-                (x.get("acquisition_status") in ("saved", "success") or x.get("move_status") in ("moving", "uncertain"))
-                and self._org_due(x, now) and not x.get("org_giveup")
-                and (x.get("organization_status") != "success" or x.get("org_requested"))]
-        rows.sort(key=lambda x: (float(x.get("org_next_ts") or 0), x["created_ts"]))
-        counts = {"checked": 0, "confirmed": 0, "partial": 0, "failed": 0, "unfound": 0}
+        rows = store.due_organization(now, record_id=record_id)
+        counts = {"checked": 0, "confirmed": 0, "partial": 0, "failed": 0, "unfound": 0, "changed": 0}
         cache = {}
         for rec in rows[:self.ORG_MAX_PER_RUN]:
             if not self._live(generation, rec["id"]):
                 break
             key = (self._org_search_key(rec.get("title")), int(rec.get("org_page") or 1))
+            before = rec.get("organization_status")
             try:
                 if key not in cache:
-                    try:
-                        body = self._mp_api_json("/api/v1/history/transfer", {"title": "*" + key[0] + "*", "page": key[1], "count": 100})
-                        cache[key] = self._mp().page(body)
-                    except Exception as exc:
-                        cache[key] = exc
+                    if not key[0]:
+                        cache[key] = ([], 0)          # 标题只剩标签：不查询，按「无证据」走退避/放弃
+                    else:
+                        try:
+                            body = self._mp_api_json("/api/v1/history/transfer", {"title": "*" + key[0] + "*", "page": key[1], "count": 100})
+                            cache[key] = self._mp().page(body)
+                        except Exception as exc:
+                            cache[key] = exc
                 if isinstance(cache[key], Exception):
                     raise cache[key]
                 entries, total = cache[key]
@@ -760,21 +1001,28 @@ class TaskRuntime:
                     legacy_ok = [e for e in entries if e.get("status") is True and legacy_identity(rec, e)]
                     if legacy_ok:
                         counts["confirmed"] += 1
-                        self._update_live(rec["id"], generation, org_attempts=0, org_last_check=now,
+                        if before != "success":
+                            counts["changed"] += 1
+                            logger.info(f"115文档订阅与查询：旧记录按标题匹配判成功：{core_title(rec.get('title'))}"
+                                        f"｜{len(legacy_ok)} 个文件")
+                        self._update_live(rec["id"], generation, _snapshot_ts=now, org_attempts=0, org_last_check=now,
                             org_error_count=0, query_error="", org_giveup=False, org_requested=False,
-                            org_next_ts=0, organization_status="success", organization_confirmed=True,
+                            org_next_ts=0, org_page=1, organization_status="success", organization_confirmed=True,
                             organized_count=len(legacy_ok), organized_failed=0,
                             message=f"整理成功：依据 MoviePilot 整理记录按标题/季号核对到 {len(legacy_ok)} 个已整理文件"
                                     f"（该记录由旧版本写入，没有本批文件清单）")
-                        logger.info(f"115文档订阅与查询：旧记录按标题匹配判成功：{core_title(rec.get('title'))}"
-                                    f"｜{len(legacy_ok)} 个文件")
+                    elif not complete:
+                        # 旧记录也逐页查完再下结论，翻页期间不计等待次数
+                        self._update_live(rec["id"], generation, _snapshot_ts=now, org_page=key[1] + 1,
+                                          org_next_ts=now + 2, org_last_check=now, org_error_count=0, query_error="")
                     else:
                         waits = int(rec.get("org_attempts") or 0) + 1
                         giveup = waits >= self.ORG_GIVEUP_ATTEMPTS
                         if giveup:
                             counts["unfound"] += 1
+                            counts["changed"] += 1
                         fields = dict(org_attempts=waits, org_last_check=now, org_error_count=0, query_error="",
-                                      org_giveup=giveup, org_requested=False,
+                                      org_giveup=giveup, org_requested=False, org_page=1,
                                       org_next_ts=0 if giveup else now + self._delay(waits,
                                           base=self.ORG_BACKOFF_BASE, cap=self.ORG_BACKOFF_MAX),
                                       organization_status="unfound" if giveup else "unknown")
@@ -783,35 +1031,57 @@ class TaskRuntime:
                                                  "已停止自动核对")
                             logger.info(f"115文档订阅与查询：旧记录未匹配到整理证据，停止自动核对："
                                         f"{core_title(rec.get('title'))}")
-                        self._update_live(rec["id"], generation, **fields)
+                        self._update_live(rec["id"], generation, _snapshot_ts=now, **fields)
                     continue
                 batch = store.record_evidence(rec["id"], entries, pagination_complete=complete)
                 self._confirm_move_from_evidence(batch, generation)
                 counts["checked"] += 1
                 status = batch.get("organization_status")
                 counts[{"success": "confirmed", "partial": "partial", "failed": "failed"}.get(status, "unfound")] += 1
-                waits = int(rec.get("org_attempts") or 0) + (1 if complete else 0)
+                if self._log_org_change(rec, before, batch):
+                    counts["changed"] += 1
+                if status == "success":
+                    # 已逐文件证实：不再翻后续分页，页码复位，结束本次（含手动）核对
+                    total = batch.get("organized_total") or batch.get("organized_count") or 0
+                    self._update_live(rec["id"], generation, _snapshot_ts=now, org_page=1, org_next_ts=0,
+                        org_attempts=0, org_stale_count=0, org_last_check=now, org_error_count=0, query_error="",
+                        org_giveup=False, org_requested=False, organization_status="success",
+                        message=f"整理成功：本批 {batch.get('organized_count')}/{total} 个文件已入库")
+                    continue
+                if not complete:
+                    # 翻页中：结论未定，不计等待/停滞次数
+                    self._update_live(rec["id"], generation, _snapshot_ts=now, org_page=key[1] + 1, org_next_ts=now + 2,
+                                      org_last_check=now, org_error_count=0, query_error="", organization_status=status)
+                    continue
+                waits = int(rec.get("org_attempts") or 0) + 1
+                signature = [status, batch.get("organized_count"), batch.get("organized_failed"), batch.get("organized_missing")]
+                stale = int(rec.get("org_stale_count") or 0) + 1 if signature == rec.get("org_signature") else 0
                 # 连续 ORG_GIVEUP_ATTEMPTS 次仍然「一点证据都没有」→ 判未找到并移出自动核对池
-                giveup = bool(complete and status == "unknown" and waits >= self.ORG_GIVEUP_ATTEMPTS)
-                fields = dict(org_page=1 if complete else key[1] + 1,
-                    org_next_ts=now + (2 if not complete else self._delay(waits, base=self.ORG_BACKOFF_BASE,
-                                                                        cap=self.ORG_BACKOFF_MAX)),
-                    org_attempts=waits, org_last_check=now, org_error_count=0, query_error="",
-                    org_giveup=giveup, org_requested=False if complete else rec.get("org_requested", False),
-                    organization_status="unfound" if giveup else status)
-                if giveup:
+                giveup_unknown = status == "unknown" and waits >= self.ORG_GIVEUP_ATTEMPTS
+                # partial / failed 长期无变化 → 停止自动核对，等用户手动核对
+                giveup_stale = status in ("partial", "failed") and stale + 1 >= self.ORG_STALE_ATTEMPTS
+                giveup = giveup_unknown or giveup_stale
+                fields = dict(org_page=1, org_next_ts=0 if giveup else now + self._delay(
+                                  waits, base=self.ORG_BACKOFF_BASE, cap=self.ORG_BACKOFF_MAX),
+                              org_attempts=waits, org_stale_count=stale, org_signature=signature,
+                              org_last_check=now, org_error_count=0, query_error="",
+                              org_giveup=giveup, org_requested=False,
+                              organization_status="unfound" if giveup_unknown else status)
+                if giveup_unknown:
+                    counts["changed"] += 1
                     fields["message"] = ("未找到本批次的整理证据（可能已手动删除或尚未整理），已停止自动核对；"
                                          "可点该任务的「核对」重新检查")
                     logger.info(f"115文档订阅与查询：连续 {waits} 次无整理证据，停止自动核对：{core_title(rec.get('title'))}")
-                elif status == "success":
-                    total = batch.get("organized_total") or batch.get("organized_count") or 0
-                    fields["message"] = f"整理成功：本批 {batch.get('organized_count')}/{total} 个文件已入库"
-                    logger.info(f"115文档订阅与查询：整理成功：{core_title(rec.get('title'))}｜"
-                                f"已入库 {batch.get('organized_count')}/{total} 个")
                 elif status == "partial":
                     fields["message"] = (f"部分成功：已入库 {batch.get('organized_count')} 个"
                                           + (f"（共 {batch.get('organized_total')} 个）" if batch.get("organized_total") else ""))
-                self._update_live(rec["id"], generation, **fields)
+                elif status == "failed":
+                    fields["message"] = f"整理失败：{batch.get('organized_failed')} 个文件 MP 整理失败"
+                if giveup_stale:
+                    fields["message"] += f"；连续 {stale + 1} 次核对无变化，已停止自动核对，可手动「核对」"
+                    logger.info(f"115文档订阅与查询：整理结果连续 {stale + 1} 次无变化，停止自动核对："
+                                f"{core_title(rec.get('title'))}")
+                self._update_live(rec["id"], generation, _snapshot_ts=now, **fields)
             except Exception as exc:
                 errors = int(rec.get("org_error_count") or 0)
                 self._update_live(rec["id"], generation, org_error_count=errors + 1,
@@ -836,17 +1106,23 @@ class TaskRuntime:
             return {"code": 0, "data": {"skipped": True}}
         generation = self._generation
         try:
+            try:                                # 账本变化时才真正重建；失败不影响本轮核对
+                self._refresh_event_paths()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("115文档订阅与查询：事件路径缓存刷新失败：" + self._error(exc))
             events = self._drain_events()
             with self._mp().work_slice(cancelled=lambda: not self._live(generation)):
                 result = self.verify_organization()
                 if not result["checked"] and getattr(self, "_directories_requested", False):
                     self._refresh_directories_snapshot(generation)
                 self._last_org_tick = {"at": time.time(), "state": "ok", "checked": result.get("checked"),
-                                       "confirmed": result.get("confirmed"), "events": events}
+                                       "confirmed": result.get("confirmed"), "changed": result.get("changed"), "events": events}
                 if result.get("checked"):
-                    logger.info(f"115文档订阅与查询：整理核对完成：检查 {result.get('checked')} 条，"
-                                f"成功 {result.get('confirmed')}，部分 {result.get('partial')}，"
-                                f"失败 {result.get('failed')}，未找到 {result.get('unfound')}")
+                    # 只有整理结论有变化时才 info；否则（例如翻页、无变化的复查）降为 debug，避免每页刷屏
+                    log = logger.info if result.get("changed") else logger.debug
+                    log(f"115文档订阅与查询：整理核对完成：检查 {result.get('checked')} 条，"
+                        f"成功 {result.get('confirmed')}，部分 {result.get('partial')}，"
+                        f"失败 {result.get('failed')}，未找到 {result.get('unfound')}")
                 return {"code": 0, "data": result}
         except Exception as exc:
             self._last_org_tick = {"at": time.time(), "state": "error", "error": self._error(exc)[:300]}
@@ -859,15 +1135,25 @@ class TaskRuntime:
             self._org_lock.release()
 
     def api_records_verify(self, payload: dict = None):
+        """手动核对整理证据（不重新获取）。
+
+        带 id：只重开这一条（含已成功/已放弃）；不带 id：只重开「未成功、需要处理」的记录，
+        已整理成功的不动，也不批量清空所有放弃标记以外的东西。
+        """
         rid = str((payload or {}).get("id") or "")
-        rows = [self._records().get(rid)] if rid else self._records().list(limit=None, include_hidden=True)
-        queued = 0
+        store = self._records()
+        rows = [store.get(rid)] if rid else store.list(limit=None)
+        queued, now = 0, time.time()
         for rec in rows:
             if not rec or rec.get("acquisition_status") not in ("saved", "success"):
                 continue
+            if not rid and rec.get("organization_status") == "success":
+                continue
             # Reopen a completed/giveup projection, but don't bypass error cooldown.
-            next_at = max(time.time(), float(rec.get("org_next_ts") or 0)) if rec.get("query_error") else time.time()
-            self._records().update(rec["id"], tracking_enabled=True, org_giveup=False, org_next_ts=next_at, org_requested=True)
+            next_at = max(now, float(rec.get("org_next_ts") or 0)) if rec.get("query_error") else now
+            store.update(rec["id"], tracking_enabled=True, org_giveup=False, org_next_ts=next_at, org_requested=True,
+                         org_request_ts=now, org_page=1)
+            # org_attempts / org_stale_count 不清零：已放弃的记录手动核对一次仍无变化会再次停止，不会重新进入长时间自动核对
             queued += 1
         return {"code": 0, "msg": "已排队核对整理证据，未重新获取", "data": {"state": "queued", "queued": queued}}
 
@@ -907,10 +1193,26 @@ class TaskRuntime:
                 continue
             sub = self._normalise_subscription(raw)
             plan = self._subscription_plan(matcher, sub, states, legacy)
-            preview.append({"id": raw.get("id"), "title": sub["title"], "matched": len(plan["eligible"]),
-                            "state": plan["status"], "reason": plan["reason"]})
+            best = (plan["eligible"] or plan["candidates"] or [{}])[0]
+            preview.append({"id": raw.get("id"), "title": sub["title"], "year": sub.get("year") or "",
+                            "matched": len(plan["eligible"]), "state": plan["status"], "reason": plan["reason"],
+                            "qtext": str(best.get("qtext") or best.get("spec") or ""),
+                            "next_check_at": self._subscribe_next_check_at()})
         return {"code": 0, "data": {"records": preview, "cached_at": cached[0] if cached else 0,
-                                    "msg": "本地预演，不提交资源"}}
+                                    "cache_empty": not bool(cached), "msg": "本地预演，不提交资源"}}
+
+    def _subscribe_next_check_at(self):
+        """下次订阅同步时间：已排队的后台任务优先，否则取调度器里订阅 cron 的下次触发时间。"""
+        job = self._job_store().get("subscribe") or {}
+        if job.get("state") in ("queued", "running"):
+            return float(job.get("next_check_at") or 0)
+        scheduler = getattr(self, "_scheduler", None)
+        try:
+            item = scheduler.get_job("doc115-subscribe") if scheduler and hasattr(scheduler, "get_job") else None
+            when = getattr(item, "next_run_time", None)
+            return when.timestamp() if when else 0
+        except Exception:  # noqa: BLE001
+            return 0
 
     @staticmethod
     def _normalise_subscription(raw):
@@ -981,9 +1283,35 @@ class TaskRuntime:
         old = jobs.get(name)
         if old and old.get("state") in ("queued", "running"):
             return {"code": 0, "msg": "任务已排队", "data": {"state": "queued"}}
-        jobs.upsert({"id": name, "state": "queued", "next_check_at": now})
-        jobs.update(name, state="queued", next_check_at=now, generation=self._generation)
+        fields = {"state": "queued", "next_check_at": now, "generation": self._generation, "queued_at": now,
+                  "failures": 0, "msg": ""}
+        if old:
+            jobs.update(name, **fields)
+        else:
+            jobs.upsert({"id": name, **fields})
         return {"code": 0, "msg": "已排队后台处理", "data": {"state": "queued"}}
+
+    def queue_subscribe_job(self):
+        """订阅 cron 回调：只排队，由离线 worker 执行（有失败重试，避免与 MP 读取锁冲突直接失败）。"""
+        if self._subscribe_enabled:
+            self._queue_job("subscribe")
+
+    def jobs_view(self):
+        """GET /status 的 jobs：index / subscribe 后台任务状态。"""
+        result = {}
+        rows = {x.get("id"): x for x in self._job_store().list()}
+        for name in ("index", "subscribe"):
+            job = rows.get(name) or {}
+            state = job.get("state") or "idle"
+            if state == "done":
+                state = "idle"
+            elif state == "queued" and int(job.get("failures") or 0) > 0:
+                state = "failed"
+            result[name] = {"state": state if state in ("idle", "queued", "running", "failed") else "idle",
+                            "msg": str(job.get("msg") or ""), "at": float(job.get("finished_at") or job.get("queued_at") or 0)}
+        if result["index"]["state"] == "idle" and getattr(self, "_refresh_lock", None) and self._refresh_lock.locked():
+            result["index"]["state"] = "running"
+        return result
 
     def api_run_subscribe(self):
         if not self._subscribe_enabled:
@@ -1001,14 +1329,24 @@ class TaskRuntime:
         job = min(due, key=lambda x: float(x.get("next_check_at") or 0))
         if not self._live(generation):
             return False
-        jobs.update(job["id"], state="running")
-        result = self.run_subscribe() if job["id"] == "subscribe" else self.refresh_index()
+        if job["id"] == "subscribe" and not getattr(self, "_subscribe_enabled", False):
+            jobs.update(job["id"], state="done", next_check_at=0, msg="电影订阅同步未启用", finished_at=now)
+            return True
+        jobs.update(job["id"], state="running", started_at=now)
+        try:
+            result = self.run_subscribe() if job["id"] == "subscribe" else self.refresh_index()
+        except Exception as exc:  # noqa: BLE001
+            result = {"code": 1, "msg": self._error(exc)}
         if self._live(generation):
+            done = time.time()
             if result.get("code") == 0:
-                jobs.update(job["id"], state="done", next_check_at=0)
+                jobs.update(job["id"], state="done", next_check_at=0, failures=0, msg=str(result.get("msg") or ""), finished_at=done)
             else:
                 failures = int(job.get("failures") or 0)
-                jobs.update(job["id"], state="queued", next_check_at=now + self._delay(failures, cap=900), failures=failures+1)
+                jobs.update(job["id"], state="queued", next_check_at=now + self._delay(failures, cap=900), failures=failures+1,
+                            msg=str(result.get("msg") or "执行失败"), finished_at=done)
+                if failures + 1 >= 5:
+                    logger.warning(f"115文档订阅与查询：后台任务 {job['id']} 连续 {failures + 1} 次失败：{result.get('msg')}")
         return True
 
     def api_directories(self):
@@ -1045,20 +1383,31 @@ class TaskRuntime:
 
     def api_diagnostics(self):
         tr, mp = getattr(self, "_tr", None), getattr(self, "_mp_instance", None)
-        rows = self._records().list(limit=None, include_hidden=True)
+        store = self._records()
         return {"code": 0, "data": {"version": self.plugin_version, "enabled": self._enabled,
             "cloud": tr.budget_state if tr and hasattr(tr, "budget_state") else {"state": "未验证"},
             "mp": mp.diagnostics() if mp else {"state": "未验证"},
-            "active_tasks": sum(x.get("tracking_enabled", True) and x.get("acquisition_status") not in ("saved", "success", "failed") for x in rows),
+            "active_tasks": sum(self._is_tracking(x) for x in store.tracked()),
+            "offline": {"last_tick": getattr(self, "_last_offline_tick", None) or {"state": "尚未执行"}},
             "organization": {"last_tick": getattr(self, "_last_org_tick", None) or {"state": "尚未执行"},
                              "last_event_stats": getattr(self, "_last_event_stats", None),
-                             "last_event_error": getattr(self, "_last_event_error", None)},
+                             "last_event_error": getattr(self, "_last_event_error", None),
+                             "events": store.event_counts()},
+            "maintenance": getattr(self, "_last_maintenance", None),
+            "jobs": self.jobs_view(),
             "scope": "仅本插件；只读本地状态，未请求115或MP"}}
 
-    def _refresh_event_paths(self):
-        """Build local membership outside MP's event callback; no common-dir root."""
+    def _refresh_event_paths(self, force=False):
+        """Build local membership outside MP's event callback; no common-dir root.
+
+        只在账本有变化（批次数/revision 合计/最近更新时间）时重建，避免每次 tick 全表反序列化。
+        """
+        store = self._records()
+        token = store.change_token() if hasattr(store, "change_token") else None
+        if not force and token is not None and token == getattr(self, "_event_paths_token", None):
+            return
         paths = {}
-        for rec in self._records().list(limit=None, include_hidden=True):
+        for rec in (store.tracked() if hasattr(store, "tracked") else store.list(limit=None, include_hidden=True)):
             if not rec.get("tracking_enabled", True):
                 continue
             names = set(rec.get("item_names") or [])
@@ -1071,6 +1420,7 @@ class TaskRuntime:
             for path in roots:
                 paths.setdefault(path, set()).add(rec["id"])
         self._event_paths = {path: tuple(ids) for path, ids in paths.items()}
+        self._event_paths_token = token
 
     def _event_batches(self, source_path):
         ids = set()
@@ -1079,6 +1429,99 @@ class TaskRuntime:
                 ids.update(batch_ids)
         return ids
 
+    # MediaInfo 只保留身份字段：整个对象（含海报/简介/演员等）既无用又可能不可序列化。
+    EVENT_MEDIA_FIELDS = ("title", "original_title", "en_title", "year", "type", "tmdb_id", "tmdbid", "tvdb_id",
+                          "douban_id", "imdb_id", "season", "seasons", "episode", "episodes", "category")
+    EVENT_FILE_FIELDS = ("storage", "path", "name", "type", "fileid", "file_id", "parent_fileid", "size")
+    EVENT_TRANSFER_FIELDS = ("success", "message", "transfer_type", "file_count", "target_item", "target_diritem",
+                             "target_fileitem", "fail_list", "date")
+    EVENT_PAYLOAD_KEYS = ("fileitem", "src_fileitem", "mediainfo", "meta", "transferinfo",
+                          "history_id", "message", "date", "timestamp")
+
+    @staticmethod
+    def _plain(value, depth=0, max_depth=6):
+        """把 MP 事件里的 pydantic / dataclass / 普通对象 / Enum 转成可 JSON 序列化的基础类型。"""
+        import dataclasses
+        import datetime
+        import enum
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, enum.Enum):
+            return TaskRuntime._plain(value.value, depth, max_depth)
+        if isinstance(value, (datetime.datetime, datetime.date)):
+            return value.isoformat()
+        if depth >= max_depth:
+            return None
+        nxt = depth + 1
+        if isinstance(value, dict):
+            return {str(k): TaskRuntime._plain(v, nxt, max_depth) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            items = sorted(value, key=str) if isinstance(value, (set, frozenset)) else value
+            return [TaskRuntime._plain(x, nxt, max_depth) for x in items]
+        if isinstance(value, (bytes, bytearray)):
+            return None
+        if hasattr(value, "model_dump"):
+            try:
+                return TaskRuntime._plain(value.model_dump(), depth, max_depth)
+            except Exception:  # noqa: BLE001
+                pass
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return {f.name: TaskRuntime._plain(getattr(value, f.name, None), nxt, max_depth)
+                    for f in dataclasses.fields(value)}
+        if hasattr(value, "__dict__") and not isinstance(value, type):
+            return {str(k): TaskRuntime._plain(v, nxt, max_depth)
+                    for k, v in vars(value).items() if not str(k).startswith("_") and not callable(v)}
+        return None
+
+    @classmethod
+    def _pick(cls, value, fields):
+        """只取需要的字段；对象/字典都适用，结果一定是 dict。"""
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raw = {}
+            for name in fields:
+                try:
+                    attr = getattr(value, name, None)
+                except Exception:  # noqa: BLE001
+                    attr = None
+                if attr is not None and not callable(attr):
+                    raw[name] = attr
+            if not raw:
+                dumped = cls._plain(value, max_depth=2)
+                raw = dumped if isinstance(dumped, dict) else {}
+            value = raw
+        return {k: cls._plain(value[k], 1) for k in fields if k in value and value[k] is not None}
+
+    def _event_clue(self, payload):
+        """事件 payload → 只含白名单字段的纯数据线索。"""
+        clue = {}
+        for key in self.EVENT_PAYLOAD_KEYS:
+            if key not in payload or payload[key] is None:
+                continue
+            value = payload[key]
+            if key in ("fileitem", "src_fileitem"):
+                clue[key] = self._pick(value, self.EVENT_FILE_FIELDS)
+            elif key == "mediainfo":
+                media = self._pick(value, self.EVENT_MEDIA_FIELDS)
+                if "tmdbid" not in media and media.get("tmdb_id") is not None:
+                    media["tmdbid"] = str(media["tmdb_id"])
+                clue[key] = media
+            elif key == "meta":
+                clue[key] = self._pick(value, ("name", "title", "year", "type", "begin_season", "season",
+                                              "begin_episode", "end_episode", "tmdbid"))
+            elif key == "transferinfo":
+                info = self._pick(value, self.EVENT_TRANSFER_FIELDS)
+                for item in ("target_item", "target_diritem", "target_fileitem"):
+                    if isinstance(info.get(item), dict):
+                        info[item] = {k: info[item][k] for k in self.EVENT_FILE_FIELDS if k in info[item]}
+                if isinstance(info.get("fail_list"), list):
+                    info["fail_list"] = info["fail_list"][:50]
+                clue[key] = info
+            else:
+                clue[key] = self._plain(value, 1)
+        return clue
+
     def _receive_event(self, event):
         """MP callbacks persist clues only; no cloud lookup or host mutation."""
         if not self._enabled:
@@ -1086,41 +1529,45 @@ class TaskRuntime:
         payload = getattr(event, "event_data", None) or {}
         if not isinstance(payload, dict):
             return
-        def plain(value):
-            if hasattr(value, "model_dump"):
-                return value.model_dump(mode="json")
-            if isinstance(value, dict):
-                return {str(k): plain(v) for k, v in value.items()}
-            if isinstance(value, (list, tuple)):
-                return [plain(x) for x in value]
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                return value
-            return str(getattr(value, "value", value))
-        clue = plain(payload)
+        clue = self._event_clue(payload)
         source = clue.get("fileitem") or clue.get("src_fileitem") or {}
         path = source.get("path") if isinstance(source, dict) else ""
         # Filter unrelated host events using cached batch paths, not cloud calls.
         batch_ids = self._event_batches(path)
         if not batch_ids:
             return
-        clue["_event_type"] = str(getattr(getattr(event, "event_type", ""), "value", getattr(event, "event_type", "")))
-        clue["_received_ts"] = time.time()
+        kind = getattr(event, "event_type", "")
+        clue["_event_type"] = str(getattr(kind, "value", kind) or "")
         clue["_batch_ids"] = sorted(batch_ids)
-        event_id = hashlib.sha256(json.dumps(clue, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        # 去重哈希不含接收时间：MP 重复投递同一事件只入库一次。
+        event_id = hashlib.sha256(json.dumps(clue, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+        clue["_received_ts"] = time.time()
         self._records().enqueue_event(event_id, clue)
 
     def _apply_queued_event(self, store, queued):
         """处理单条 115 生活事件（供 _drain_events 调用，异常由调用方隔离）。"""
         clue = queued.get("payload") or queued.get("data") or {}
-        source = clue.get("fileitem") or clue.get("src_fileitem") or {}
-        media = clue.get("mediainfo") or {}
-        transfer = clue.get("transferinfo") or {}
+        if not isinstance(clue, dict):
+            store.ack_event(queued["event_id"])
+            return
+
+        def mapping(value):
+            return value if isinstance(value, dict) else {}
+        source = mapping(clue.get("fileitem")) or mapping(clue.get("src_fileitem"))
+        media = mapping(clue.get("mediainfo"))
+        transfer = mapping(clue.get("transferinfo"))
+        dest = mapping(transfer.get("target_item")) or mapping(transfer.get("target_diritem")) or mapping(transfer.get("target_fileitem"))
+        received = float(clue.get("_received_ts") or queued.get("created_ts") or 0)
+        stated = clue.get("date") or clue.get("timestamp") or transfer.get("date")
+        if isinstance(transfer.get("success"), bool):
+            status = transfer["success"]
+        else:
+            status = "fail" not in str(clue.get("_event_type", "")).lower()
         entry = {**media, "src_fileitem": source, "src": source.get("path"), "src_storage": source.get("storage"),
-            "date": clue.get("date") or clue.get("timestamp") or transfer.get("date") or clue.get("_received_ts"),
-            "time_is_observed": not bool(clue.get("date") or clue.get("timestamp") or transfer.get("date")),
+            "date": stated or received or None,
+            "time_is_observed": not bool(stated),
             "evidence_source": "event", "title": media.get("title"), "type": media.get("type"),
-            "status": "fail" not in str(clue.get("_event_type", "")).lower(),
-            "id": clue.get("history_id"), "dest_fileitem": transfer.get("target_fileitem") or {},
+            "status": status, "id": clue.get("history_id"), "dest_fileitem": dest,
             "errmsg": clue.get("message") or transfer.get("message") or ""}
         associated = False
         for rid in clue.get("_batch_ids") or self._event_batches(source.get("path")):
@@ -1128,12 +1575,14 @@ class TaskRuntime:
             if not rec or not rec.get("tracking_enabled", True):
                 continue
             if match_history(rec, [entry]):
+                before = rec.get("organization_status")
                 batch = store.record_evidence(rec["id"], [entry])
                 self._confirm_move_from_evidence(batch, self._generation)
+                self._log_org_change(rec, before, batch)
                 associated = True
         # Candidate clues get finite local retries, so unrelated/obsolete
         # inbox rows cannot pin the first page and starve newer events.
-        if associated or time.time() - float(clue.get("_received_ts") or 0) > 900:
+        if associated or time.time() - received > 900:
             store.ack_event(queued["event_id"])
 
     def _drain_events(self):

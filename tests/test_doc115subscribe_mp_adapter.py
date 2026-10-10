@@ -145,16 +145,6 @@ class MPAdapterTests(unittest.TestCase):
                     self.fail("A second concurrent slice was admitted")
         self.opener.assert_not_called()
 
-    def test_directory_and_subscription_cache_ttl_avoids_duplicate_reads(self):
-        with self.mp.work_slice():
-            self.mp.cached("/api/v1/storage/directories")
-            self.mp.cached("/api/v1/storage/directories")
-        self.assertEqual(self.opener.call_count, 1)
-        self.clock.now += 300
-        with self.mp.work_slice():
-            self.mp.cached("/api/v1/storage/directories")
-        self.assertEqual(self.opener.call_count, 2)
-
     def test_no_redirect_handler_never_follows_location(self):
         handler = adapter._NoRedirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, "synthetic", {}, "https://synthetic.invalid/login"))
