@@ -429,9 +429,12 @@ class TaskRuntime:
                 self._update_live(rec["id"], generation, offline_cursor=exc.state)
             raise
         matcher = getattr(tr, "match_task", None)
+        claimed = {str(x.get("task_file_id")) for x in self._records().list(limit=None, include_hidden=True)
+                   if x.get("id") != rec["id"] and x.get("task_file_id")}
         task = next((x for x in result["items"]
-                     if (matcher(x, rec.get("url") or "", rec.get("hash") or "") if callable(matcher)
-                         else str(x.get("info_hash") or "").lower() == str(rec.get("hash") or "").lower())), None)
+                     if str(x.get("file_id") or x.get("fid") or "") not in claimed
+                     and (matcher(x, rec.get("url") or "", rec.get("hash") or "") if callable(matcher)
+                          else str(x.get("info_hash") or "").lower() == str(rec.get("hash") or "").lower())), None)
         if not task:
             self._update_live(rec["id"], generation, offline_cursor=result.get("cursor"))
             if not result["complete"]:
@@ -660,7 +663,10 @@ class TaskRuntime:
             actions.append("check_download")
         if acquisition == "uncertain" or item.get("status") == "unverified":
             # 分享提交结果不明时自动重发已暂停；给出两条出路：只读核对 / 用户人工确认已转存
-            actions += ["reconcile", "confirm_saved"]
+            actions.append("reconcile")
+            if item.get("kind") == LINK_115_SHARE:
+                # 磁力/ed2k 的文件可能仍在暂存目录，人工确认会跳过搬运，因此只对分享开放
+                actions.append("confirm_saved")
         item["allowed_actions"] = list(dict.fromkeys(actions))
         item["hidden"] = bool(item.get("hidden"))
         item["tracking"] = self._is_tracking(item)

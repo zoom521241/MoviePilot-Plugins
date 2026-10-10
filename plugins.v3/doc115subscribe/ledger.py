@@ -104,16 +104,13 @@ class TaskLedger:
     def _migrate_index_columns(self) -> None:
         with self._connection(write=True) as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(batches)")}
-            added = False
             for name, kind in self.INDEX_COLUMNS:
                 if name not in columns:
                     db.execute(f"ALTER TABLE batches ADD COLUMN {name} {kind}")
-                    added = True
-            done = db.execute("SELECT 1 FROM metadata WHERE key='index_columns_v1'").fetchone()
-            if added or not done:
-                for row in list(db.execute("SELECT batch_id,payload FROM batches")):
-                    self._write_index(db, row[0], json.loads(row[1]))
-                db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('index_columns_v1',?)", (str(time.time()),))
+            # 每次启动都回填：回滚到旧版本期间写入的批次索引列会是默认值，行数很少，开销可忽略
+            for row in list(db.execute("SELECT batch_id,payload FROM batches")):
+                self._write_index(db, row[0], json.loads(row[1]))
+            db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('index_columns_v1',?)", (str(time.time()),))
             db.execute("CREATE INDEX IF NOT EXISTS batches_acquire_due ON batches(tracking_enabled,acquisition_status,next_check_at)")
             db.execute("CREATE INDEX IF NOT EXISTS batches_org_due ON batches(tracking_enabled,org_giveup,org_next_ts)")
 

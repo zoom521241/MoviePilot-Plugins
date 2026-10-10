@@ -359,22 +359,22 @@ class ApiContractTests(V011Base):
         methods = {route["path"]: route["methods"] for route in self.plugin.get_api()}
         self.assertEqual(methods["/qr_start"], ["GET"])
 
-    def test_search_sort_passthrough_and_fallback(self):
+    def test_search_sort_passthrough_and_index_errors_surface(self):
         calls = []
         class NewIndex:
             def search_page(self, keyword, sort="relevance", **kwargs):
                 calls.append(sort)
                 return {"records": [], "total": 0}
-        class OldIndex:
-            def search_page(self, keyword, media_type="all", quality="all", link_kind="all", page=1, page_size=10, subtitle="all"):
-                calls.append("old")
-                return {"records": [], "total": 0}
+        class BrokenIndex:
+            def search_page(self, keyword, **kwargs):
+                raise TypeError("internal bug")
         self.plugin._index = NewIndex()
         self.assertEqual(self.plugin.api_search({"keyword": "x", "sort": "year_desc"})["code"], 0)
-        self.plugin._index = OldIndex()
-        self.assertEqual(self.plugin.api_search({"keyword": "x", "sort": "quality"})["code"], 0)
-        self.assertEqual(calls, ["year_desc", "old"])
+        self.assertEqual(calls, ["year_desc"])
         self.assertEqual(self.plugin.api_search({"keyword": "x", "sort": "random"})["code"], 1)
+        # 索引内部的 TypeError 不再被静默降级重搜，而是作为错误返回
+        self.plugin._index = BrokenIndex()
+        self.assertEqual(self.plugin.api_search({"keyword": "x"})["code"], 1)
 
     def test_subscriptions_preview_reports_cache_state_and_fields(self):
         empty = self.plugin.api_subscriptions_preview()["data"]
@@ -432,6 +432,11 @@ class WorkerAndConfigTests(V011Base):
         self.assertIn("磁力暂存目录", response["msg"])
         main.Doc115Subscribe._validate_config({**base, "magnet_staging_path": "/115-影视/115-downloads/电影磁力"})
 
+    def test_legacy_overlapping_config_disables_plugin_instead_of_failing_load(self):
+        self.plugin.init_plugin({"enabled": True, "p115_cookie": "SYNTHETIC", "tencent_cookie": "SYNTHETIC",
+                                 "magnet_staging_path": "/115-影视/115-downloads/电影/磁力"})
+        self.assertFalse(self.plugin._enabled)
+
     def test_all_mode_failure_leaves_no_partial_queued_reservation(self):
         store = self.plugin._records()
         self.plugin._link_mode = "all"
@@ -479,6 +484,12 @@ class ShareReconcileTests(V011Base):
         self.assertIn("reconcile", view["allowed_actions"])
         self.assertIn("confirm_saved", view["allowed_actions"])
         return batch
+
+    def test_confirm_saved_is_not_offered_for_magnet_tasks(self):
+        batch = self.plugin._records().get(self.uncertain()["id"])
+        view = self.plugin._record_view(dict(batch, kind="magnet"))
+        self.assertIn("reconcile", view["allowed_actions"])
+        self.assertNotIn("confirm_saved", view["allowed_actions"])
 
     def test_reconcile_finds_items_read_only_and_marks_saved(self):
         batch = self.uncertain()

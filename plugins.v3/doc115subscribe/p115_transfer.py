@@ -100,6 +100,14 @@ def _ed2k_name(url: str) -> str:
     return unquote(parts[2]).strip().lower() if len(parts) > 3 and parts[1].lower() == "file" else ""
 
 
+def _ed2k_size(url: str) -> int:
+    parts = str(url or "").split("|")
+    try:
+        return int(parts[3]) if len(parts) > 4 and parts[1].lower() == "file" else 0
+    except ValueError:
+        return 0
+
+
 def match_task(task: Dict[str, Any], link: str = "", info_hash: str = "") -> bool:
     """Whether a 115 offline task belongs to ``link`` (magnet/ed2k) or ``info_hash``.
 
@@ -123,7 +131,16 @@ def match_task(task: Dict[str, Any], link: str = "", info_hash: str = "") -> boo
     if task_url and wanted and extract_hash(_normalize_task_url(task_url)) == wanted:
         return True
     name = _ed2k_name(link)
-    return bool(name) and str(task.get("name") or "").strip().lower() == name
+    if not name or str(task.get("name") or "").strip().lower() != name:
+        return False
+    # 同名不等于同一资源（不同版本常同名）：名字回退必须再比对 ed2k 链接里的文件大小，
+    # 任务没有大小或大小不一致都不认，宁可等待也不误搬运别人的文件。
+    want_size = _ed2k_size(link)
+    try:
+        got_size = int(task.get("size") or task.get("file_size") or 0)
+    except (TypeError, ValueError):
+        got_size = 0
+    return bool(want_size) and want_size == got_size
 
 
 _115_SHARE_RE = re.compile(

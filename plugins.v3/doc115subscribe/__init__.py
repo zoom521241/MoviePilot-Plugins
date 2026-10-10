@@ -146,7 +146,14 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
 
     def init_plugin(self, config: dict = None):
         self._ensure_runtime()
-        conf = self._validate_config({**self.DEFAULTS, **(config or {})})
+        try:
+            conf = self._validate_config({**self.DEFAULTS, **(config or {})})
+        except ValueError as exc:
+            # 旧版本保存的配置可能不满足新校验：不让插件加载失败，停用并提示到设置中修正
+            logger.warning(f"115文档订阅与查询：配置无效，插件已停用，请在设置中修正：{exc}")
+            conf = self._validate_config({**self.DEFAULTS, **{k: v for k, v in (config or {}).items()
+                                                            if k not in ("movie_path", "tv_path", "magnet_staging_path")}})
+            conf["enabled"] = False
         with self._config_lock, self._qr_lock:
             self.stop_service()
             self._generation += 1
@@ -613,11 +620,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
             options = dict(media_type=body.get("media_type", "all"),
                 quality=body.get("quality", "all"), subtitle=body.get("subtitle", "all"), link_kind=body.get("link_kind", "all"),
                 page=int(body.get("page", 1)), page_size=int(body.get("page_size", 10)))
-            try:
-                data = index.search_page(kw, sort=sort, **options)
-            except TypeError:
-                # 兼容尚未支持 sort 参数的 DocIndex.search_page
-                data = index.search_page(kw, **options)
+            data = index.search_page(kw, sort=sort, **options)
             return {"code": 0, "data": data}
         except Exception as exc:
             return {"code": 1, "msg": self._error(exc)}

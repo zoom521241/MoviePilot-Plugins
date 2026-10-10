@@ -111,7 +111,7 @@ class MatchTaskTests(unittest.TestCase):
     def test_ed2k_with_115_40_char_hash_falls_back_to_url_then_name(self):
         task = {"info_hash": "a" * 40, "url": ED2K.lower().replace("|/", "|"), "name": "other"}
         self.assertTrue(transfer.match_task(task, ED2K))
-        task = {"info_hash": "a" * 40, "url": "", "name": "Synthetic Movie 2025.mkv"}
+        task = {"info_hash": "a" * 40, "url": "", "name": "Synthetic Movie 2025.mkv", "size": 1048576}
         self.assertTrue(transfer.match_task(task, ED2K))
         task = {"info_hash": "a" * 40, "url": "", "name": "Different.mkv"}
         self.assertFalse(transfer.match_task(task, ED2K))
@@ -174,3 +174,21 @@ class ThreadIsolationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class Ed2kNameFallbackSafety(unittest.TestCase):
+    """115 把 ed2k 换成 40 位内部哈希时，名字回退必须同时比对大小，避免误搬运同名的其它版本。"""
+    link = "ed2k://|file|S01E01.mkv|1234567|0123456789abcdef0123456789abcdef|/"
+
+    def task(self, size):
+        return {"info_hash": "a" * 40, "name": "S01E01.mkv", "size": size, "url": ""}
+
+    def test_same_name_and_size_matches(self):
+        self.assertTrue(transfer.match_task(self.task(1234567), self.link))
+
+    def test_same_name_different_size_is_not_the_same_task(self):
+        self.assertFalse(transfer.match_task(self.task(7654321), self.link))
+
+    def test_same_name_without_size_is_not_trusted(self):
+        self.assertFalse(transfer.match_task(self.task(None), self.link))
