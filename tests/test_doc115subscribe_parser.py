@@ -117,8 +117,9 @@ class ParserTests(unittest.TestCase):
         for href in ("magnet:?xt=urn:btih:" + "a" * 40,
                      "ed2k://|file|synthetic.mkv|123|" + "a" * 32 + "|/"):
             rich = pb(3, pb(3, pb(1, b"Download")) + pb(7, pb(11, pb(1, href.encode()))))
-            text, actual = client_module._extract_rich(rich)
-            self.assertEqual((text, actual), ("Download", href))
+            text, all_links = client_module._extract_rich(rich)
+            self.assertEqual((text, all_links), ("Download", [href]))
+            actual = all_links[0]
             rec = parser.parse_sheet("s", "电影", [["片名", "链接"], ["Synthetic", "Download"]],
                                      [[None, None], [None, actual]])[0]
             self.assertEqual(rec["links"][0][1], href)
@@ -151,7 +152,9 @@ class LinkAndSourceTests(unittest.TestCase):
 
     def test_normalized_native_and_html_links(self):
         self.assertEqual(links.normalize_url("https://magnet:?xt=urn:btih:a&amp;dn=test"), "magnet:?xt=urn:btih:a&dn=test")
-        self.assertEqual(links.extract_links("转存：https://115.com/s/SYNTHETIC，提取码 abcd")[0][1], "https://115.com/s/SYNTHETIC")
+        # 同格提取码补进 ?password=，全角逗号不进入链接
+        self.assertEqual(links.extract_links("转存：https://115.com/s/SYNTHETIC，提取码 abcd")[0][1],
+                         "https://115.com/s/SYNTHETIC?password=abcd")
 
 
 class SubscriptionTests(unittest.TestCase):

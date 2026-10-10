@@ -7,6 +7,14 @@
    等于秒出；
 3. **截图尺寸自校验**：真二维码约 18KB、占位图约 5.5KB，截到小图就继续等，避免拿到空白页。
 
+「刷新二维码」的语义
+--------------------
+* 轮询 ``check`` 时，距上次截图超过 ``QR_REFRESH_SECONDS`` 会重新截一次 iframe（微信页面
+  自身可能已换码），返回 ``refreshed=True`` 与新图；
+* 若二维码已过期（截图超过 ``QR_EXPIRE_SECONDS``，或页面出现「已失效/已过期」提示），
+  则在同一会话里**重新加载登录页**取一张全新的二维码，同样以 ``refreshed=True`` 返回；
+* 用户主动点「换一张」时，调用方应 ``force`` 新建会话（旧会话随之结束）。
+
 为什么必须用浏览器：`bind-wx-quick-login.html` 不发任何网络请求，只把 code 通过 postMessage
 交给父页面，真正的登录交换由文档页完成 —— 纯 HTTP 请求 redirect_uri 拿不到 Cookie。
 """
@@ -32,6 +40,9 @@ CHROME_CANDIDATES = [
     "/moviepilot/.cloakbrowser/chromium-1179/chrome-linux/chrome",
 ]
 QR_REFRESH_SECONDS = 100
+QR_EXPIRE_SECONDS = 240       # 微信网页扫码二维码有效期约 4~5 分钟，过期后重新加载登录页
+WORKER_START_TIMEOUT = 90
+_EXPIRED_HINTS = ("二维码已失效", "二维码已过期", "已失效", "已过期", "刷新二维码")
 SESSION_TIMEOUT = 15 * 60
 MIN_QR_BYTES = 10000          # 占位图约 5.5KB，真二维码约 18KB
 
@@ -74,6 +85,10 @@ def _tencent_cookie(cookie: Dict[str, Any]) -> bool:
 class _Worker:
     """唯一的浏览器工作线程：playwright + Chromium 常驻，按指令服务。"""
 
+    _qr_born = 0.0
+    _page = None
+    _doc_url = ""
+
     def __init__(self):
         self.q: "queue.Queue" = queue.Queue()
         self.ready = threading.Event()
@@ -81,10 +96,18 @@ class _Worker:
         self._ctx = None
         self._page = None
         self._last_shot = 0.0
+        self._qr_born = 0.0
         self._session_id = None
+        self._doc_url = ""
         self._thread = threading.Thread(target=self._run, daemon=True, name="doc115-browser")
         self._thread.start()
-        self.ready.wait(timeout=90)
+        if not self.ready.wait(timeout=WORKER_START_TIMEOUT):
+            # 不返回一个不可用的 worker：标记错误，并让线程在启动完成后自行退出。
+            self.error = "浏览器启动超时，请稍后重试"
+            self.q.put(("quit", None, queue.Queue()))
+            raise QrLoginError(self.error)
+        if self.error:
+            raise QrLoginError(self.error)
 
     def submit(self, cmd: str, payload: Any = None, timeout: float = 180) -> Any:
         if self.error:
@@ -160,16 +183,22 @@ class _Worker:
         self._ctx = None
         self._page = None
         self._session_id = None
+        self._doc_url = ""
 
     def _start(self, doc_url: str, session_id: str) -> Tuple[bytes, bool]:
         doc_url = _validate_doc_url(doc_url)
         self._end_session()
         self._session_id = session_id
+        self._doc_url = doc_url
         self._ctx = self._browser.new_context(
             user_agent=UA, viewport={"width": 1280, "height": 900}, locale="zh-CN")
-        page = self._ctx.new_page()
-        self._page = page
-        page.goto(doc_url, wait_until="domcontentloaded", timeout=45000)
+        self._page = self._ctx.new_page()
+        return self._open_login()
+
+    def _open_login(self) -> Tuple[bytes, bool]:
+        """（重新）加载文档页并打开微信扫码弹窗，返回 (二维码PNG, 是否已登录)。"""
+        page = self._page
+        page.goto(self._doc_url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2500)          # 页面初始化（太短会导致弹窗不完整、二维码不渲染）
         if self._has_uid(self._ctx):
             return b"", True
@@ -187,7 +216,21 @@ class _Worker:
         except Exception:  # noqa: BLE001
             pass
         page.wait_for_timeout(2000)
-        return self._shoot_qr(), False
+        shot = self._shoot_qr()
+        self._qr_born = time.time()
+        return shot, False
+
+    def _qr_expired(self) -> bool:
+        if self._qr_born and time.time() - self._qr_born > QR_EXPIRE_SECONDS:
+            return True
+        try:
+            for frame in self._page.frames:
+                if urlparse(frame.url).hostname in ("open.weixin.qq.com", "open.wechat.com"):
+                    text = frame.locator("body").first.inner_text(timeout=1000)
+                    return any(hint in text for hint in _EXPIRED_HINTS)
+        except Exception:  # noqa: BLE001
+            return False
+        return False
 
     def _shoot_qr(self) -> bytes:
         page = self._page
@@ -232,6 +275,15 @@ class _Worker:
         if "uid" in names:
             parts = [f"{c['name']}={c['value']}" for c in cookies]
             return {"state": "confirmed", "session_id": session_id, "cookie": "; ".join(parts), "count": len(parts)}
+        if self._qr_expired():
+            # 过期：同一会话内重新加载登录页拿新码
+            try:
+                shot, already = self._open_login()
+            except Exception:  # noqa: BLE001
+                return {"state": "wait"}
+            if already:
+                return self._check(session_id)
+            return {"state": "wait", "qr_base64": png_data_url(shot), "refreshed": True, "reloaded": True}
         if time.time() - self._last_shot > QR_REFRESH_SECONDS:
             try:
                 shot = self._shoot_qr()

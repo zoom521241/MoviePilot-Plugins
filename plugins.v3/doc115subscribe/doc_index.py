@@ -18,6 +18,21 @@ except ImportError:
     from doc_client import DocError, TencentDocsClient
 
 INDEX_VERSION = 3
+# 刷新失败、沿用旧数据的工作表超过该天数视为过期
+STALE_MAX_DAYS = 14
+SORTS = ("relevance", "year_desc", "year_asc", "quality")
+
+
+def _legitimately_empty(data: Dict[str, Any]) -> bool:
+    """接口成功返回、表头仍在但没有任何数据行：合法变空，应清空旧数据。
+
+    整张网格都为空（可能是接口异常/数据块缺失）不算，仍保留旧数据并标记 stale。
+    """
+    grid = data.get("grid") or []
+    rows = [row for row in grid if any(str(c or "").strip() for c in row)]
+    hrefs = [cell for row in (data.get("hrefs") or []) for cell in (row or []) if cell]
+    return (len(rows) == 1 and not hrefs
+            and any(doc_parser.is_name_head(str(c or "")) for c in rows[0]))
 
 
 class DocIndex:
@@ -78,7 +93,8 @@ class DocIndex:
             try:
                 data = self.client.fetch_sheet(sid)
                 recs = doc_parser.parse_sheet(sid, name, data["grid"], data.get("hrefs") or [])
-                if not recs and old_records.get(sid):
+                if not recs and old_records.get(sid) and not _legitimately_empty(data):
+                    # 表里还有内容却一条都没解析出来：更可能是解析/接口问题，保留旧数据
                     raise DocError("本次解析结果为空，已保留上次有效数据")
                 succeeded += bool(recs)
                 records.extend(recs)
@@ -89,8 +105,10 @@ class DocIndex:
                 errors.append(message)
                 if sid in old_sheets:
                     cached = dict(old_sheets[sid])
-                    cached.update({"stale": True, "error": message,
-                                   "last_success_at": cached.get("last_success_at") or previous.built_at})
+                    last_ok = float(cached.get("last_success_at") or previous.built_at or 0)
+                    cached.update({"stale": True, "error": message, "last_success_at": last_ok,
+                                   "stale_days": round(max(0.0, now - last_ok) / 86400, 1) if last_ok else None,
+                                   "expired": not last_ok or now - last_ok > STALE_MAX_DAYS * 86400})
                     sheets.append(cached)
                     records.extend(dict(rec) for rec in old_records.get(sid, []))
             finally:
@@ -110,7 +128,10 @@ class DocIndex:
                 "source_doc_id": self.source_doc_id, "doc_id": self.source_doc_id,
                 "index_version": self.index_version,
                 "stale_sheets": [dict(sh) for sh in self.sheets if sh.get("stale")],
-                "stale_sheet_count": sum(bool(sh.get("stale")) for sh in self.sheets)}
+                "stale_sheet_count": sum(bool(sh.get("stale")) for sh in self.sheets),
+                "expired_sheets": [dict(sh) for sh in self.sheets if sh.get("stale") and sh.get("expired")],
+                "expired_sheet_count": sum(bool(sh.get("stale") and sh.get("expired")) for sh in self.sheets),
+                "stale_max_days": STALE_MAX_DAYS}
 
     def get_record(self, record_id: str) -> Optional[Dict[str, Any]]:
         return self._by_id.get(record_id)
@@ -128,17 +149,26 @@ class DocIndex:
         return result
 
     def search_page(self, keyword: str, media_type: str = "all", quality: str = "all",
-                    link_kind: str = "all", page: int = 1, page_size: int = 10, subtitle: str = "all") -> Dict[str, Any]:
+                    link_kind: str = "all", page: int = 1, page_size: int = 10, subtitle: str = "all",
+                    sort: str = "relevance") -> Dict[str, Any]:
+        """归一化标题匹配 + 筛选 + 排序 + 分页。
+
+        sort: relevance（相关度>画质>行号，默认）| year_desc | year_asc | quality。
+        每条记录带 ``match``（命中的原标题片段，供高亮；可能为空）与 ``score``。
+        page 收敛到 [1, total_pages]。
+        """
         if subtitle not in ("all", "cn"):
             raise ValueError("字幕筛选条件无效")
         if media_type not in ("all", "movie", "tv", "unknown") or quality not in ("all", "4k", "cn", "4k_cn", "1080p"):
             raise ValueError("搜索筛选条件无效")
         if link_kind not in ("all", "share", "magnet", "ed2k", "doc"):
             raise ValueError("链接类型筛选条件无效")
-        page, page_size = max(1, int(page)), max(1, min(100, int(page_size)))
-        matches = doc_parser.search(self.records, keyword, limit=len(self.records))
+        sort = sort or "relevance"
+        if sort not in SORTS:
+            raise ValueError("排序方式无效")
+        page_size = max(1, min(100, int(page_size)))
         filtered = []
-        for rec in matches:
+        for score, rec, fragment in doc_parser.search_scored(self.records, keyword):
             mtype = rec.get("media_type") or doc_parser.media_type_of(rec.get("sheet", ""), rec.get("title", ""))
             if media_type != "all" and media_type != mtype:
                 continue
@@ -153,10 +183,33 @@ class DocIndex:
                     or quality == "4k_cn" and not (is4k and cn)
                     or quality == "1080p" and not doc_parser._QUALITY_1080.search(text)):
                 continue
-            filtered.append(rec)
+            filtered.append((score, rec, fragment))
+        if sort != "relevance":
+            def year(rec):
+                value = str(rec.get("year") or doc_parser.extract_year(rec.get("title", "")) or "")
+                return int(value) if value.isdigit() else None
+            if sort == "quality":
+                filtered.sort(key=lambda h: (-doc_parser.quality_score(h[1]), -h[0], h[1].get("row", 0)))
+            else:
+                sign = -1 if sort == "year_desc" else 1
+                # 无年份的排在最后；同年按相关度
+                filtered.sort(key=lambda h: (year(h[1]) is None, sign * (year(h[1]) or 0), -h[0],
+                                             -doc_parser.quality_score(h[1]), h[1].get("row", 0)))
+        total = len(filtered)
+        total_pages = max(1, -(-total // page_size))
+        try:
+            page = int(page)
+        except (TypeError, ValueError):
+            page = 1
+        page = max(1, min(total_pages, page))
         start = (page - 1) * page_size
-        return {"records": [self._public_record(rec) for rec in filtered[start:start + page_size]],
-                "total": len(filtered), "page": page, "page_size": page_size,
+        out = []
+        for score, rec, fragment in filtered[start:start + page_size]:
+            public = self._public_record(rec)
+            public.update({"match": fragment, "score": score})
+            out.append(public)
+        return {"records": out, "total": total, "page": page, "page_size": page_size,
+                "total_pages": total_pages, "sort": sort,
                 "index_version": self.index_version, "source_doc_id": self.source_doc_id}
 
     def search(self, keyword: str, limit: int = 50) -> List[Dict[str, Any]]:

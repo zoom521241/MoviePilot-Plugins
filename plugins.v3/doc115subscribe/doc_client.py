@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import base64
 import re
+import socket
 import struct
+import time
 import urllib.parse
 import urllib.request
 import zlib
@@ -28,10 +30,21 @@ UA = (
 CHUNK_ROWS = 512
 # 数据块里“主数据段”的最小长度，用于在一堆 f5 里挑出真正的主段
 POOL_MIN_LEN = 10000
+# 拿不到 max_col 时的列数上限（block_end_col 的接口默认值）
+FALLBACK_MAX_COL = 63
+# 大文档分页拉取之间的间隔（秒），以及超时的有限重试
+CHUNK_INTERVAL = 0.3
+TIMEOUT_RETRIES = 2
+RETRY_BACKOFF = 1.0
+LOGIN_EXPIRED = "腾讯文档登录已失效，请重新扫码登录"
 
 
 class DocError(RuntimeError):
     """文档读取失败，附带可读原因。"""
+
+
+class DocLoginError(DocError):
+    """Cookie 失效 / 未登录。"""
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +122,8 @@ def _pool_text(inner: bytes) -> str:
     return ""
 
 
-def _extract_rich(inner: bytes) -> Tuple[str, Optional[str]]:
-    """富文本池条目 -> (显示文本, 超链接 URL)。
+def _extract_rich(inner: bytes) -> Tuple[str, List[str]]:
+    """富文本池条目 -> (显示文本, 单元格内全部超链接 URL 列表，按出现顺序去重)。
 
     文本在 ``f3 -> f2 -> f3 -> f1``；
     超链接在 ``f3 -> f7 -> f11 -> f1``（剧集表里显示为「点击转存」的单元格就是这个）。
@@ -134,12 +147,12 @@ def _extract_rich(inner: bytes) -> Tuple[str, Optional[str]]:
                                 s = _utf8(v4).strip()
                                 if s.lower().startswith(("http://", "https://", "magnet:?", "ed2k://")):
                                     hrefs.append(s)
-    return "".join(texts), (hrefs[0] if hrefs else None)
+    return "".join(texts), list(dict.fromkeys(hrefs))
 
 
 def _decode_block(related_b64: str) -> Tuple[List[Tuple[int, int, int, int]], List[str],
-                                             List[Tuple[str, Optional[str]]], List[Any]]:
-    """解开一个数据块 -> (cells[(row,col,tp,idx)], texts, rich[(text,href)], nums)"""
+                                             List[Tuple[str, List[str]]], List[Any]]:
+    """解开一个数据块 -> (cells[(row,col,tp,idx)], texts, rich[(text,[href...])], nums)"""
     raw = zlib.decompress(base64.b64decode(related_b64))
     top = pb_msg(raw, 1)
     if top is None:
@@ -165,7 +178,7 @@ def _decode_block(related_b64: str) -> Tuple[List[Tuple[int, int, int, int]], Li
         raise DocError("数据块里找不到值池（接口可能已变更）")
 
     texts: List[str] = []
-    rich: List[Tuple[str, Optional[str]]] = []
+    rich: List[Tuple[str, List[str]]] = []
     nums: List[Any] = []
     i = 0
     while i < len(pool):
@@ -216,7 +229,7 @@ def _decode_block(related_b64: str) -> Tuple[List[Tuple[int, int, int, int]], Li
 
 
 def _cell_value(tp: Optional[int], idx: Optional[int], texts: List[str],
-                rich: List[Tuple[str, Optional[str]]], nums: List[Any]) -> Optional[str]:
+                rich: List[Tuple[str, List[str]]], nums: List[Any]) -> Optional[str]:
     """按值类型还原单元格文本；None 表示该格无内容。"""
     if idx is None:
         return None
@@ -232,19 +245,48 @@ def _cell_value(tp: Optional[int], idx: Optional[int], texts: List[str],
             if pos >= len(nums) or nums[pos] is None:
                 return None
             value = nums[pos]
-        if isinstance(value, float) and value == int(value):
-            return str(int(value))
-        return str(value)
+        return _format_number(value)
     if tp == 5:
         return str(idx + 1)
     return None
 
 
-def _cell_href(tp: Optional[int], idx: Optional[int],
-               rich: List[Tuple[str, Optional[str]]]) -> Optional[str]:
+def _format_number(value: Any) -> str:
+    """数字/日期序列号 -> 文本。浮点误差（2019.0000001）收敛为整数，避免年份变成 2019.0。"""
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return ""
+        if abs(value - round(value)) < 1e-6:
+            return str(int(round(value)))
+        return f"{value:.10g}"
+    return str(value)
+
+
+def _cell_hrefs(tp: Optional[int], idx: Optional[int],
+                rich: List[Tuple[str, List[str]]]) -> List[str]:
+    """单元格内全部超链接。"""
     if tp == 6 and idx is not None and 0 <= idx < len(rich):
-        return rich[idx][1]
-    return None
+        value = rich[idx][1]
+        if isinstance(value, str):
+            return [value] if value else []
+        return list(value or [])
+    return []
+
+
+def _cell_href(tp: Optional[int], idx: Optional[int],
+               rich: List[Tuple[str, List[str]]]) -> Optional[str]:
+    """兼容旧调用：第一个超链接。"""
+    hrefs = _cell_hrefs(tp, idx, rich)
+    return hrefs[0] if hrefs else None
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return True
+    reason = getattr(exc, "reason", None)
+    return isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in str(exc).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +299,7 @@ class TencentDocsClient:
         self.doc_id = doc_id
         self.cookie = (cookie or "").strip()
         self.timeout = timeout
+        self.sleep = time.sleep          # 测试可替换
 
     # -- 工具 -----------------------------------------------------------------
     @staticmethod
@@ -293,10 +336,16 @@ class TencentDocsClient:
                 "Cookie": self.cookie,
             },
         )
-        try:
-            body = urllib.request.urlopen(req, timeout=self.timeout).read()
-        except Exception as exc:  # noqa: BLE001
-            raise DocError(f"请求文档失败：{exc}") from exc
+        body = None
+        for attempt in range(TIMEOUT_RETRIES + 1):
+            try:
+                body = urllib.request.urlopen(req, timeout=self.timeout).read()
+                break
+            except Exception as exc:  # noqa: BLE001
+                if attempt < TIMEOUT_RETRIES and _is_timeout(exc):
+                    self.sleep(RETRY_BACKOFF * (2 ** attempt))   # 指数退避，仅对超时重试
+                    continue
+                raise DocError(f"请求文档失败：{exc}") from exc
         raw = body.decode("utf-8", "replace")
         m = re.match(r"^[^(]*\((.*)\)\s*$", raw, re.S)
         if not m:
@@ -306,12 +355,15 @@ class TencentDocsClient:
             payload = json.loads(m.group(1))
         except ValueError as exc:
             raise DocError(f"JSONP 解析失败：{exc}") from exc
-        cv = payload.get("clientVars", {})
-        if not cv.get("isLogin", False) and not cv.get("collab_client_vars", {}).get(
-            "initialAttributedText"
-        ):
-            # 未登录时接口会返回 isLogin=false 且无内容
-            pass
+        if not isinstance(payload, dict):
+            raise DocError("文档接口返回格式错误")
+        cv = payload.get("clientVars") or {}
+        ccv = cv.get("collab_client_vars") or {}
+        if self.cookie and cv.get("isLogin") is False and not ccv.get("initialAttributedText"):
+            # 带了 Cookie 却显示未登录且没有内容：Cookie 已失效
+            raise DocLoginError(LOGIN_EXPIRED)
+        if cv.get("isLogin") is False and not ccv.get("initialAttributedText") and not ccv.get("header"):
+            raise DocLoginError(LOGIN_EXPIRED if self.cookie else "腾讯文档未登录，请先扫码登录")
         return payload
 
     def _opendoc_raw(self, tab: Optional[str], start_row: int = 0, end_row: int = 0,
@@ -365,7 +417,7 @@ class TencentDocsClient:
         ccv = self._ccv(None)
         header = ccv.get("header") or []
         if not header:
-            raise DocError("返回里没有 header，无法枚举工作表（Cookie 可能已失效）")
+            raise DocError("返回里没有 header，无法枚举工作表（" + LOGIN_EXPIRED + "，或文档不可访问）")
         sheets: List[Dict[str, Any]] = []
         for item in header[0].get("d", []) or []:
             sid = item.get("id")
@@ -380,14 +432,19 @@ class TencentDocsClient:
         max_col = probe.get("max_col")
         if not isinstance(max_row, int) or max_row <= 0:
             raise DocError("没拿到有效行数（表可能为空，或接口已变更）")
+        col_fallback = not isinstance(max_col, int) or isinstance(max_col, bool) or max_col <= 0
+        # 拿不到列数时不能只读前 2 列：回退到接口默认上限
+        end_col = FALLBACK_MAX_COL if col_fallback else max_col + 1
 
         grid: Dict[Tuple[int, int], str] = {}
-        hrefs: Dict[Tuple[int, int], str] = {}
+        hrefs: Dict[Tuple[int, int], List[str]] = {}
         done = set()
         start = 0
         while start < max_row:
+            if start:
+                self.sleep(CHUNK_INTERVAL)       # 大文档分页之间稍作间隔
             end = min(start + CHUNK_ROWS - 1, max_row - 1)
-            _, info = self._opendoc_raw(tab_id, start, end, (max_col or 0) + 1)
+            _, info = self._opendoc_raw(tab_id, start, end, end_col)
             blocks = info.get("block_datas") or []
             for block in blocks:
                 rel = block.get("related_sheet")
@@ -402,13 +459,14 @@ class TencentDocsClient:
                     value = _cell_value(tp, idx, texts, rich, nums)
                     if value is not None:
                         grid[key] = value
-                    href = _cell_href(tp, idx, rich)
-                    if href:
-                        hrefs[key] = href
+                    links = _cell_hrefs(tp, idx, rich)
+                    if links:
+                        hrefs[key] = links
             start = end + 1
 
+        meta = {"max_row": max_row, "max_col": max_col, "col_fallback": col_fallback}
         if not grid and not hrefs:
-            return {"grid": [], "hrefs": [], "meta": {"max_row": max_row, "max_col": max_col}}
+            return {"grid": [], "hrefs": [], "meta": meta}
 
         nrow = max(r for r, _ in list(grid) + list(hrefs)) + 1
         ncol = max(c for _, c in list(grid) + list(hrefs)) + 1
@@ -417,6 +475,7 @@ class TencentDocsClient:
         for (row, col), value in grid.items():
             g[row][col] = value
         for (row, col), value in hrefs.items():
-            h[row][col] = value
-        return {"grid": g, "hrefs": h,
-                "meta": {"max_row": max_row, "max_col": max_col, "cells": len(grid)}}
+            # 单个链接保持字符串（兼容旧格式），多个链接给列表；解析器两种都接受
+            h[row][col] = value[0] if len(value) == 1 else list(value)
+        meta["cells"] = len(grid)
+        return {"grid": g, "hrefs": h, "meta": meta}

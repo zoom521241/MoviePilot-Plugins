@@ -124,6 +124,31 @@ class FrameworkTests(unittest.TestCase):
             self.assertTrue(SyntheticQr.instance.closed)
             self.assertIsNone(self.plugin._qr)
 
+    def test_qr_start_does_not_hold_config_lock_while_browser_starts(self):
+        plugin = self.plugin
+        observed = {}
+        class SyntheticQr:
+            def __init__(self, _):
+                self.session_id = "synthetic-lock"
+            def start(self):
+                import threading
+                result = {}
+                def probe():
+                    result["config"] = plugin._config_lock.acquire(timeout=1)
+                    if result["config"]:
+                        plugin._config_lock.release()
+                thread = threading.Thread(target=probe)
+                thread.start()
+                thread.join()
+                observed.update(result)
+                return b"synthetic-image", False, 0.01
+            def close(self):
+                pass
+        with patch.object(self.main, "BrowserQrLogin", SyntheticQr):
+            self.assertEqual(self.client.get("/qr_start").json()["code"], 0)
+        self.assertTrue(observed["config"])
+        self.assertEqual(plugin._qr.session_id, "synthetic-lock")
+
     def test_real_scheduler_reloads_and_stops_without_cloud_calls(self):
         # All schedules are far in the future; nothing is allowed to contact a server.
         config = {"enabled": True, "subscribe_enabled": True, "index_cron": "0 0 1 1 *", "subscribe_cron": "0 0 1 1 *"}

@@ -9,7 +9,6 @@ import json
 import math
 import os
 from pathlib import Path
-import re
 import threading
 import time
 import uuid
@@ -230,9 +229,33 @@ _ACCOUNTS = {}
 _ACCOUNTS_LOCK = threading.Lock()
 
 
+# Cookie fields that identify one 115 account across cookie refreshes, in
+# order of preference. UID's "_A1_..." suffix differs per login and is dropped.
+_IDENTITY_FIELDS = ("UID", "USERID", "USER_ID", "USERSESSIONID")
+
+
+def account_identity(cookie: str) -> str:
+    """Stable, credential-free key for one account.
+
+    Uses UID (account part) or another stable account field. Without one we can
+    only hash the sorted cookie pairs; that key changes whenever the cookie is
+    refreshed, so such a budget is not preserved across refreshes.
+    """
+    pairs = {}
+    for part in str(cookie or "").split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and name and value.strip():
+            pairs.setdefault(name.strip().upper(), value.strip())
+    for name in _IDENTITY_FIELDS:
+        value = pairs.get(name)
+        if value:
+            account = value.split("_")[0] if name == "UID" else value
+            return hashlib.sha256(f"{name}:{account}".encode()).hexdigest()
+    canonical = ";".join(f"{k}={v}" for k, v in sorted(pairs.items())) or str(cookie or "")
+    return "cookie:" + hashlib.sha256(canonical.encode()).hexdigest()[:32]
+
+
 def account_budget(cookie: str) -> AccountBudget:
-    uid = re.search(r"(?:^|;)\s*UID=([^;]+)", cookie, re.I)
-    identity = uid.group(1).split("_")[0] if uid else cookie
-    key = hashlib.sha256(identity.encode()).hexdigest()
+    key = account_identity(cookie)
     with _ACCOUNTS_LOCK:
         return _ACCOUNTS.setdefault(key, AccountBudget())

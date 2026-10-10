@@ -74,7 +74,8 @@ class SyntheticCloud:
                 if self.task_present else [], "complete": True, "cursor": None}
 
     def task_failed(self, task):
-        return task.get("status") == 2
+        # 115: -1 failed, 2 finished.
+        return task.get("status") == -1
 
     def manifest_slice(self, path, cursor=None, file_id=""):
         return {"items": [{"id": str(100+i), "path": f"{path}/Show.S01E{i:02}.mkv", "required": True,

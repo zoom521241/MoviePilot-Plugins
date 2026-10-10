@@ -632,25 +632,30 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
             if not force and self._qr and self._qr_img and time.time() - self._qr_ts < self.QR_FRESH_SECONDS:
                 return {"code": 0, "data": {"qr_base64": "data:image/png;base64," + base64.b64encode(self._qr_img).decode(),
                                                "session_id": self._qr.session_id, "cached": True}}
-            qr = None
-            try:
-                if self._qr:
-                    self._qr.close()
-                self._qr, self._qr_img = None, b""
-                qr = BrowserQrLogin(self._doc_url)
-                shot, already, cost = qr.start()
+            old, self._qr, self._qr_img = self._qr, None, b""
+            doc_url, generation = self._doc_url, self._generation
+            attempt = self._qr_attempt = getattr(self, "_qr_attempt", 0) + 1
+        # 浏览器启动/出码最长约 180 秒：等待期间不持有任何插件锁，避免阻塞配置与其它接口。
+        if old:
+            old.close()
+        qr = None
+        try:
+            qr = BrowserQrLogin(doc_url)
+            shot, already, cost = qr.start()
+        except Exception as exc:
+            if qr:
+                qr.close()
+            return {"code": 1, "msg": self._error(exc)}
+        with self._config_lock, self._qr_lock:
+            if attempt == self._qr_attempt and generation == self._generation:
                 self._qr = qr
                 if already:
                     return self._finish_qr(qr.check())
                 self._qr_img, self._qr_ts = shot, time.time()
                 return {"code": 0, "data": {"qr_base64": "data:image/png;base64," + base64.b64encode(shot).decode(),
                                                "session_id": qr.session_id, "cost": round(cost, 1)}}
-            except Exception as exc:
-                failed_qr = self._qr or qr
-                if failed_qr:
-                    failed_qr.close()
-                self._qr, self._qr_img = None, b""
-                return {"code": 1, "msg": self._error(exc)}
+        qr.close()
+        return {"code": 1, "msg": "扫码会话已被新的请求或配置更新替换，请重新获取二维码"}
 
     def _finish_qr(self, state):
         cookie = state.get("cookie") or ""

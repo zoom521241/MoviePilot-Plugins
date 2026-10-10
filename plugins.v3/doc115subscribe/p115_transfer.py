@@ -43,16 +43,23 @@ except ImportError:  # 直接作为顶层模块加载（脚本/单测）
 
 
 _HEX_BT = re.compile(r"[0-9a-fA-F]{40}\Z")
+_HEX_ED2K = re.compile(r"[0-9a-fA-F]{32}\Z")
 _BASE32_BT = re.compile(r"[A-Za-z2-7]{32}\Z")
+# ed2k://|file|<名称，可含空格>|<字节数>|<32位MD4>|[h=...|]...
 _ED2K_HASH = re.compile(r"ed2k://\|file\|[^|]+\|\d+\|([0-9a-fA-F]{32})\|(?:[^\s]*)\Z", re.I)
 _NOT_FOUND_CODES = {10014, 20009, 20013, 20018, 31001, 31003, 50015, 70005, 70008, 90008, 430004, 800001}
-_RETRY_CODES = {990005, 990009, 990019, 590075, 40110000}
+# 115「操作过于频繁 / 风控」类错误码：统一进入限流冷却，不在本进程内立即重试。
+_RATE_LIMIT_CODES = {429, 590075, 990005, 990009, 990019, 40110000}
+# 离线任务「已存在 / 重复提交」错误码（真实接口 errcode=10008：任务已存在）。
+_DUPLICATE_CODES = {10008}
+# 115 离线任务 status 约定：-1 失败，0 等待，1 下载中，2 已完成。
+_TASK_FAILED_STATUS = ("-1", "-2", "failed", "error", "cancelled", "canceled")
 
 
 def normalize_info_hash(value: str) -> str:
-    """Canonical BTIH hex; a 32-character hexadecimal value may be ED2K."""
+    """Canonical lowercase hex: 40-char BTIH, base32 BTIH or 32-char ED2K MD4."""
     value = str(value or "").strip()
-    if _HEX_BT.fullmatch(value) or re.fullmatch(r"[0-9a-fA-F]{32}", value):
+    if _HEX_BT.fullmatch(value) or _HEX_ED2K.fullmatch(value):
         return value.lower()
     if _BASE32_BT.fullmatch(value):
         return base64.b32decode(value.upper()).hex()
@@ -76,14 +83,68 @@ def extract_hash(url: str) -> str:
     return match.group(1).lower() if match else ""
 
 
+def _normalize_task_url(url: str) -> str:
+    """Comparable link text: unquote, strip wrapper prefixes/trailing slash, lowercase."""
+    from urllib.parse import unquote
+    u = unquote(str(url or "")).strip()
+    low = u.lower()
+    for prefix in ("https://", "http://"):
+        if low.startswith(prefix) and low[len(prefix):].startswith(("ed2k://", "magnet:")):
+            u, low = u[len(prefix):], low[len(prefix):]
+    return u.rstrip("/").lower()
+
+
+def _ed2k_name(url: str) -> str:
+    from urllib.parse import unquote
+    parts = str(url or "").split("|")
+    return unquote(parts[2]).strip().lower() if len(parts) > 3 and parts[1].lower() == "file" else ""
+
+
+def match_task(task: Dict[str, Any], link: str = "", info_hash: str = "") -> bool:
+    """Whether a 115 offline task belongs to ``link`` (magnet/ed2k) or ``info_hash``.
+
+    BTIH 直接比较哈希。ed2k 的 32 位 MD4 在 115 列表里可能被换成 40 位内部哈希，
+    此时回退比较规范化后的 url，最后比较 ed2k 文件名与任务 name。
+    """
+    if not isinstance(task, dict):
+        return False
+    wanted = normalize_info_hash(info_hash) or extract_hash(link)
+    got = normalize_info_hash(task.get("info_hash") or task.get("hash") or "")
+    if wanted and got and wanted == got:
+        return True
+    if not link:
+        return False
+    if got and wanted and len(got) == len(wanted):
+        # Same hash family but different value: a different resource.
+        return False
+    task_url = task.get("url") or ""
+    if task_url and _normalize_task_url(task_url) == _normalize_task_url(link):
+        return True
+    if task_url and wanted and extract_hash(_normalize_task_url(task_url)) == wanted:
+        return True
+    name = _ed2k_name(link)
+    return bool(name) and str(task.get("name") or "").strip().lower() == name
+
+
+_115_SHARE_RE = re.compile(
+    r"https?://(?:[A-Za-z0-9-]+\.)*(?:115|115cdn|anxia)\.com(?::(?:80|443))?/s/([A-Za-z0-9]+)/?"
+    r"(?:\?(?:[^#]*&)?(?:password|pwd)=([A-Za-z0-9]{4})[^#]*)?(?:#.*)?\Z", re.I)
+
+
 def normalize_115_share(url: str) -> str:
-    """把 115cdn.com 的分享链接规范成 115.com，便于解析分享码。"""
+    """115.com / 115cdn.com / anxia.com（含子域）分享统一成 https://115.com/s/<code>?password=xxxx。
+
+    与 link_router.normalize_115_share 的规范化目标一致，p115client 可直接解析分享码。
+    """
     u = (url or "").strip()
-    return u.replace("115cdn.com/s/", "115.com/s/").replace("//115cdn.com", "//115.com")
+    m = _115_SHARE_RE.fullmatch(u)
+    if not m:
+        return u.replace("115cdn.com/s/", "115.com/s/").replace("//115cdn.com", "//115.com")
+    return f"https://115.com/s/{m.group(1)}" + (f"?password={m.group(2)}" if m.group(2) else "")
 
 
 try:
-    from .request_budget import P115Error, P115Deferred, account_budget
+    from .request_budget import P115Error, P115Deferred, account_budget, account_identity
 except ImportError:  # standalone inspection/test import without changing sys.path
     import importlib.util
     import sys
@@ -97,24 +158,35 @@ except ImportError:  # standalone inspection/test import without changing sys.pa
     _budget_module = sys.modules[_budget_name]
     P115Error, P115Deferred = _budget_module.P115Error, _budget_module.P115Deferred
     account_budget = _budget_module.account_budget
+    account_identity = _budget_module.account_identity
 
 
 class P115NotFound(P115Error):
     """Confirmed absent path, distinct from an unavailable listing."""
 
 
+def _response_codes(resp: Dict[str, Any]) -> List[int]:
+    codes = []
+    for name in ("errno", "errcode", "code", "error_code"):
+        try:
+            value = int(resp.get(name) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value:
+            codes.append(value)
+    return codes
+
+
 def _account_failure(resp: Dict[str, Any]) -> str:
-    try:
-        code = int(resp.get("errno", resp.get("errcode", resp.get("code", 0))) or 0)
-    except (TypeError, ValueError):
-        code = 0
-    message = str(resp.get("error") or resp.get("message") or resp.get("msg") or "").lower()
-    if code in (99, 401, 403, 990001, 40140125) or any(
+    codes = set(_response_codes(resp))
+    message = str(resp.get("error_msg") or resp.get("error") or resp.get("message") or resp.get("msg") or "").lower()
+    if codes & {99, 401, 403, 990001, 40140125} or any(
         text in message for text in ("请重新登录", "登陆超时", "登录超时", "not logged", "authentication")):
         return "authentication"
-    if code in (429, 590075) or any(text in message for text in ("操作太频繁", "请求太频繁", "rate limit", "too many requests")):
+    if codes & _RATE_LIMIT_CODES or any(text in message for text in (
+            "操作太频繁", "请求太频繁", "操作过于频繁", "访问过于频繁", "请求过于频繁", "rate limit", "too many requests")):
         return "rate_limit"
-    if code == 911 or any(text in message for text in ("请验证账号", "风控", "验证码", "账号异常")):
+    if 911 in codes or any(text in message for text in ("请验证账号", "风控", "验证码", "账号异常")):
         return "risk_control"
     return ""
 
@@ -167,6 +239,10 @@ class _BudgetTransport:
         writing = method.upper() not in ("GET", "HEAD") and (
             operation in {"share_receive", "clouddownload_task_add_urls", "fs_makedirs_app"} or any(
                 term in path for term in ("/move", "/rename", "/add_task", "/receive", "/mkdir", "/add_path", "/add_urls")))
+        # Creating a directory is re-entrant: a lost reply is reconciled by a
+        # read (fs_dir_getid) before any retry, so it is not an uncertain write.
+        idempotent = writing and (operation == "fs_makedirs_app" or (
+            not operation and any(term in path for term in ("/mkdir", "/add_path"))))
         with self.budget.request():
             if writing:
                 callback = getattr(self.local, "before_submit", None)
@@ -216,6 +292,9 @@ class _BudgetTransport:
                     self.budget.pause(reason, max(300, delay) if reason == "rate_limit" else 900)
                     raise P115Deferred("115账号鉴权或限流，已暂停后续请求", reason=reason,
                                        retry_at=self.budget.snapshot()["retry_at"], not_sent=not writing) from exc
+                if idempotent:
+                    raise P115Deferred("115建目录响应未确认，将先核对目录再重试", reason="reconcile",
+                                       retry_at=time.time() + 2, uncertain=False, not_sent=True) from exc
                 if writing:
                     self._pause_uncertain()
                     raise P115Deferred("115写操作响应未确认，等待对账，未重试", reason="uncertain",
@@ -224,6 +303,9 @@ class _BudgetTransport:
             except P115Error:
                 raise
             except Exception as exc:
+                if idempotent:
+                    raise P115Deferred("115建目录响应丢失，将先核对目录再重试", reason="reconcile",
+                                       retry_at=time.time() + 2, uncertain=False, not_sent=True) from exc
                 if writing:
                     self._pause_uncertain()
                     raise P115Deferred("115写操作响应丢失，等待对账，未重试", reason="uncertain",
@@ -275,6 +357,7 @@ class OfflineSubmission:
     accepted: bool = False
     duplicate: bool = False
     info_hash: str = ""
+    link: str = ""
     task: Dict[str, Any] = field(default_factory=dict)
     file_id: str = ""
     requested_cid: str = ""
@@ -317,15 +400,53 @@ _LIMITERS_LOCK = threading.Lock()
 def _shared_limiter(cookie: str) -> _RateLimiter:
     # Different cookie strings for one account (e.g. refresh) still share a
     # limiter when UID is available; never retain credentials as dictionary keys.
-    account = re.search(r"(?:^|;)\s*UID=([^;]+)", cookie, re.I)
-    identity = (account.group(1).split("_")[0] if account else cookie)
-    key = hashlib.sha256(identity.encode()).hexdigest()
+    key = account_identity(cookie)
     with _LIMITERS_LOCK:
         return _LIMITERS.setdefault(key, _RateLimiter())
 
 
+class _ThreadLocalAttr:
+    """Per-thread instance attribute: one worker never reads another's last_* result."""
+
+    def __init__(self, default=lambda: None):
+        self.default = default
+        self.name = ""
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    @staticmethod
+    def _local(instance):
+        # dict.setdefault is atomic, so concurrent first use shares one local.
+        return instance.__dict__.setdefault("_doc115_thread_state", threading.local())
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        local = self._local(instance)
+        if not hasattr(local, self.name):
+            setattr(local, self.name, self.default())
+        return getattr(local, self.name)
+
+    def __set__(self, instance, value):
+        setattr(self._local(instance), self.name, value)
+
+
 class P115Transfer:
-    """115 网盘操作封装。"""
+    """115 网盘操作封装。
+
+    ``last_*`` 回执与离线分页游标按线程隔离；目录缓存与分享续作状态在实例内共享并加锁。
+    """
+
+    last_offline_result = _ThreadLocalAttr()
+    last_share_names = _ThreadLocalAttr(list)
+    last_share_result = _ThreadLocalAttr(dict)
+    last_tasks_skipped = _ThreadLocalAttr(int)
+    _task_cursor = _ThreadLocalAttr()
+
+    @property
+    def _state_lock(self):
+        return self.__dict__.setdefault("_doc115_state_lock", threading.RLock())
 
     def __init__(self, cookie: str, timeout: int = 30):
         if not P115_AVAILABLE:
@@ -339,11 +460,8 @@ class P115Transfer:
         self._limiter = _shared_limiter(cookie)
         self._dir_cache: Dict[str, int] = {}
         self._dir_cache_times: Dict[str, float] = {}
-        self.last_offline_result: Optional[OfflineSubmission] = None
-        self.last_share_names: List[str] = []
-        self.last_share_result: Dict[str, Any] = {}
         self._p115_api = None
-        self._share_states = {}
+        self._share_states: Dict[str, Dict[str, Any]] = {}
 
     @contextmanager
     def work_slice(self, *, cancelled=None, max_requests=5, max_seconds=15):
@@ -407,7 +525,12 @@ class P115Transfer:
 
     @staticmethod
     def _error(resp: Dict[str, Any]) -> str:
-        return str(resp.get("error") or resp.get("message") or resp.get("msg") or resp.get("errno") or "未知错误")
+        text = str(resp.get("error_msg") or resp.get("error") or resp.get("message") or resp.get("msg") or "")
+        codes = _response_codes(resp)
+        if set(codes) & _DUPLICATE_CODES:
+            # Recognised by _DUP_WORDS even when 115 sends only the code.
+            return f"任务已存在（{text}）" if text and "已存在" not in text else (text or "任务已存在")
+        return text or (str(codes[0]) if codes else "未知错误")
 
     @classmethod
     def _require_success(cls, resp: Dict[str, Any], operation: str) -> None:
@@ -445,9 +568,24 @@ class P115Transfer:
             return False
 
     def _remember_directory(self, path: str, cid: int):
-        self._dir_cache[path] = int(cid)
-        if hasattr(self, "_dir_cache_times"):
-            self._dir_cache_times[path] = time.time()
+        with self._state_lock:
+            self._dir_cache[path] = int(cid)
+            if hasattr(self, "_dir_cache_times"):
+                self._dir_cache_times[path] = time.time()
+
+    def _cached_directory(self, path: str, refresh: bool = False) -> Optional[int]:
+        if refresh:
+            return None
+        with self._state_lock:
+            fresh = not hasattr(self, "_dir_cache_times") or time.time() - self._dir_cache_times.get(path, 0) < 300
+            return self._dir_cache.get(path) if fresh else None
+
+    def _forget_directory_tree(self, src: str):
+        with self._state_lock:
+            for cached in list(self._dir_cache):
+                if cached == src or cached.startswith(src + "/"):
+                    self._dir_cache.pop(cached, None)
+                    getattr(self, "_dir_cache_times", {}).pop(cached, None)
 
     def path_to_id(self, path: str, mkdir: bool = True, refresh: bool = False) -> int:
         """115 目录路径 -> 目录 ID（必要时逐级创建）。根目录为 0。"""
@@ -457,9 +595,9 @@ class P115Transfer:
         p = p.rstrip("/")
         if p in ("", "/"):
             return 0
-        fresh = not hasattr(self, "_dir_cache_times") or time.time() - self._dir_cache_times.get(p, 0) < 300
-        if p in self._dir_cache and fresh and not refresh:
-            return self._dir_cache[p]
+        cached = self._cached_directory(p, refresh)
+        if cached is not None:
+            return cached
         resp = self._call("fs_dir_getid", p)
         try:
             self._require_success(resp, "目录查询")
@@ -480,9 +618,9 @@ class P115Transfer:
         built = ""
         for part in [x for x in p.split("/") if x]:
             built = f"{built}/{part}"
-            fresh = not hasattr(self, "_dir_cache_times") or time.time() - self._dir_cache_times.get(built, 0) < 300
-            if built in self._dir_cache and fresh and not refresh:
-                cur = self._dir_cache[built]
+            cached = self._cached_directory(built, refresh)
+            if cached is not None:
+                cur = cached
                 continue
             r = self._call("fs_dir_getid", built)
             try:
@@ -495,7 +633,19 @@ class P115Transfer:
                 continue
             if "id" not in r:
                 raise P115Error("目录查询返回缺少 id")
-            r2 = self._call("fs_makedirs_app", built)
+            try:
+                r2 = self._call("fs_makedirs_app", built)
+            except P115Deferred as exc:
+                if exc.reason != "reconcile":
+                    raise
+                cur = self._reconcile_directory(built, exc)
+                continue
+            except P115NotFound:
+                raise
+            except P115Error as exc:
+                # Transport failure of a re-entrant mkdir: read before retrying.
+                cur = self._reconcile_directory(built, exc)
+                continue
             self._require_success(r2, "创建目录")
             data = r2.get("data") if isinstance(r2.get("data"), dict) else r2
             cid = data.get("cid") or data.get("id")
@@ -505,6 +655,22 @@ class P115Transfer:
             self._remember_directory(built, cur)
         self._remember_directory(p, cur)
         return cur
+
+    def _reconcile_directory(self, path: str, error: Exception) -> int:
+        """After a lost mkdir reply: existing directory is success; absent means retry later."""
+        resp = self._call("fs_dir_getid", path)
+        try:
+            self._require_success(resp, "目录对账")
+        except P115NotFound:
+            resp = {"id": 0}
+        if str(resp.get("id") or "0") != "0":
+            cid = int(resp["id"])
+            self._remember_directory(path, cid)
+            return cid
+        if "id" not in resp:
+            raise P115Error("目录对账返回缺少 id") from error
+        raise P115Deferred(f"创建目录未确认且目录不存在，稍后重试：{path}", reason="reconcile",
+                           retry_at=time.time() + 30, uncertain=False, not_sent=True) from error
 
     # -- 转存 ---------------------------------------------------------------
     def check_share(self, share_url: str) -> Tuple[bool, str]:
@@ -730,20 +896,24 @@ class P115Transfer:
         """把 115 分享链接整体转存到目标目录。"""
         if hasattr(self, "_budget"):
             key = hashlib.sha256((share_url + "\0" + save_path).encode()).hexdigest()
-            state = self._share_states.get(key)
+            with self._state_lock:
+                state = self._share_states.get(key)
             try:
                 state = self.prepare_share(share_url, save_path, state)
-                self._share_states[key] = state
+                with self._state_lock:
+                    self._share_states[key] = state
                 if not state["complete"]:
                     raise P115Deferred("分享分页未读完，等待续作", reason="pagination", state=state)
                 state = self.receive_prepared(share_url, save_path, state)
                 if not state["done"]:
                     raise P115Deferred("已收到部分转存回执，等待下一批", reason="slice", state=state)
-                self._share_states.pop(key, None)
+                with self._state_lock:
+                    self._share_states.pop(key, None)
                 return True
             except P115Deferred as exc:
                 if exc.state is not None:
-                    self._share_states[key] = exc.state
+                    with self._state_lock:
+                        self._share_states[key] = exc.state
                 raise
         self.last_share_names = []
         self.last_share_result = {}
@@ -768,30 +938,26 @@ class P115Transfer:
         for start in range(0, len(items), 200):
             batch = items[start:start + 200]
             last_err = ""
-            for attempt in range(3):
-                try:
-                    self.last_share_result["uncertain"] = True
-                    resp = self._call("share_receive", {
-                        "share_code": share_code, "receive_code": receive_code,
-                        "file_id": ",".join(it["id"] for it in batch),
-                        "cid": cid, "is_check": 0,
-                    })
-                except P115Error as exc:
-                    # A transport error has an unknown server-side outcome.
-                    # Do not claim success or blindly resend the entire share.
-                    last_err = str(exc)
-                    break
+            try:
+                self.last_share_result["uncertain"] = True
+                resp = self._call("share_receive", {
+                    "share_code": share_code, "receive_code": receive_code,
+                    "file_id": ",".join(it["id"] for it in batch),
+                    "cid": cid, "is_check": 0,
+                })
+            except P115Error as exc:
+                # A transport error has an unknown server-side outcome.
+                # Do not claim success or blindly resend the entire share.
+                last_err = str(exc)
+            else:
                 if resp.get("state") in (True, 1, "1", False, 0, "0"):
                     self.last_share_result["uncertain"] = False
                 if resp.get("state") in (True, 1, "1"):
                     completed += len(batch)
                     self.last_share_names.extend(it["name"] for it in batch if it["name"])
                     self.last_share_result["received"] = completed
-                    break
-                last_err = self._error(resp)
-                break
-            else:
-                last_err = last_err or "重试次数耗尽"
+                else:
+                    last_err = self._error(resp)
             if completed != min(start + len(batch), len(items)):
                 self.last_share_result["failed"] = len(items) - completed
                 self.last_share_result["error"] = last_err
@@ -800,26 +966,42 @@ class P115Transfer:
         return True
 
     # -- 离线下载 -----------------------------------------------------------
-    _DUP_WORDS = ("已推送", "已经推送", "推送过", "重复", "已存在", "已添加")
+    _DUP_WORDS = ("已推送", "已经推送", "推送过", "重复", "已存在", "已添加", "任务已存在")
 
     @staticmethod
     def task_failed(task: Dict[str, Any]) -> bool:
-        """Cookie API status 2 is failed (not finished); preserve source fields."""
-        status = str(task.get("status", "")).lower()
-        return status in ("-1", "-2", "2", "failed", "error", "cancelled", "canceled") or task.get("failed") is True
+        """115 status: -1 failed, 0 waiting, 1 downloading, 2 finished (NOT failed)."""
+        status = str(task.get("status", "")).strip().lower()
+        return status in _TASK_FAILED_STATUS or task.get("failed") is True
 
-    def find_task(self, info_hash: str) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def task_done(task: Dict[str, Any]) -> bool:
+        """Finished on 115's side: status 2 or percentDone >= 100 (file evidence still required)."""
+        if P115Transfer.task_failed(task):
+            return False
+        if str(task.get("status", "")).strip() == "2":
+            return True
+        try:
+            return float(task.get("percentDone") or task.get("percent_done") or 0) >= 100
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def match_task(task: Dict[str, Any], link: str = "", info_hash: str = "") -> bool:
+        return match_task(task, link, info_hash)
+
+    def find_task(self, info_hash: str, link: str = "") -> Optional[Dict[str, Any]]:
         wanted = normalize_info_hash(info_hash)
         return next((task for task in self.list_tasks()
-                     if task.get("info_hash") == wanted), None) if wanted else None
+                     if match_task(task, link, wanted)), None) if wanted else None
 
     def _recover_offline(self, result: OfflineSubmission) -> OfflineSubmission:
         if hasattr(self, "_budget"):
             try:
                 page = self.list_tasks_slice(cursor=result.recovery_cursor)
                 result.recovery_cursor = page["cursor"]
-                wanted = normalize_info_hash(result.info_hash)
-                task = next((item for item in page["items"] if item.get("info_hash") == wanted), None)
+                task = next((item for item in page["items"]
+                             if match_task(item, result.link, result.info_hash)), None)
                 if not task and not page["complete"]:
                     raise P115Deferred("已有离线任务仍在分页恢复，未再次提交", reason="pagination",
                                        state=result.recovery_cursor)
@@ -844,7 +1026,7 @@ class P115Transfer:
                 deferred.reconcile_only = True
                 raise deferred from exc
         else:
-            task = self.find_task(result.info_hash)
+            task = self.find_task(result.info_hash, result.link)
         if not task:
             result.message = "115 提示重复，但未找到可跟踪的离线任务；请确认原文件位置后重试"
             return result
@@ -865,7 +1047,8 @@ class P115Transfer:
             result.message = "重复离线任务位于其他目录，未自动搬运；请确认原任务和文件位置"
             return result
         name = str(task.get("name") or "")
-        if pct >= 100:
+        if pct >= 100 or self.task_done(task):
+            pct = max(pct, 100)
             if not name or not result.file_id or not self.file_in_directory(result.file_id, result.save_path):
                 result.message = "重复离线任务已完成，但未确认原文件ID位于当前暂存目录，未视为提交成功"
                 return result
@@ -910,79 +1093,77 @@ class P115Transfer:
         if not info_hash:
             raise P115Error("磁力或 ed2k 哈希无效，未提交无法自动跟踪的离线任务")
         cid = self.path_to_id(save_path, mkdir=True)
-        result = OfflineSubmission(info_hash=info_hash, requested_cid=str(cid),
+        result = OfflineSubmission(info_hash=info_hash, link=url.strip(), requested_cid=str(cid),
                                    actual_cid=str(cid), save_path=save_path)
         self.last_offline_result = result
         if hasattr(self, "_budget"):
             self._budget.claim_submission()
         last_err = ""
-        for attempt in range(3):
-            try:
-                def before(intent):
-                    if before_submit:
-                        before_submit(intent)
-                    result.uncertain = True
-                resp = self._call("clouddownload_task_add_urls", {
-                    "url[0]": url.strip(), "wp_path_id": cid,
-                }, before_submit=before, intent={"kind": "offline_add", "info_hash": info_hash,
-                                                 "requested_cid": str(cid)})
-                if resp.get("state") in (True, 1, "1", False, 0, "0"):
-                    result.uncertain = False
-                if resp.get("state") in (True, 1, "1"):
-                    data = resp.get("data")
-                    # Some endpoint versions return outer success but report
-                    # per-link failure in result/data. Validate that inner row.
-                    candidates = (resp.get("result"), data)
-                    for inner in candidates:
-                        row = inner[0] if isinstance(inner, list) and inner else inner
-                        if isinstance(row, dict) and row.get("state") in (False, 0, "0"):
-                            resp = row
-                            break
-                    else:
-                        self._require_success(resp, "离线提交")
-                        result.accepted = True
-                        result.message = "已提交离线下载"
-                        if isinstance(data, dict):
-                            result.file_id = str(data.get("file_id") or data.get("fid") or "")
-                            result.task = data if data.get("info_hash") else {}
-                        return result
-                last_err = self._error(resp)
-                if any(word in last_err for word in self._DUP_WORDS):
-                    result.duplicate = True
-                    self.recover_offline(result)
-                    if result:
-                        return result
-                    raise P115Error(result.message)
-                break
-            except P115Deferred as exc:
-                result.uncertain = exc.uncertain
-                result.message = str(exc)
-                if result.duplicate:
-                    # File evidence can also exhaust the slice after finding
-                    # the duplicate task; preserve that identity for recovery.
-                    result.recovery_pending = True
-                    exc.not_sent, exc.uncertain, exc.reconcile_only = False, False, True
-                exc.state = result.as_dict()
-                raise
-            except P115Error as exc:
-                last_err = str(exc)
-                if result.duplicate:
-                    raise
-                if not result.uncertain:
-                    raise
-                if hasattr(self, "_budget") and result.uncertain:
-                    raise P115Deferred("离线提交结果未确认，等待对账，未重复提交", reason="uncertain",
-                                       uncertain=True, state=result.as_dict()) from exc
-                # The request may have reached 115 before its response timed
-                # out. Recover a matching task, but never report blind success.
-                try:
-                    self._recover_offline(result)
-                except P115Error as recovery_error:
-                    raise P115Error(f"离线提交结果未确认：{last_err}；任务对账失败：{recovery_error}") from exc
-                if result:
-                    result.message = "提交响应异常，已恢复实际离线任务跟踪"
+        try:
+            def before(intent):
+                if before_submit:
+                    before_submit(intent)
+                result.uncertain = True
+            resp = self._call("clouddownload_task_add_urls", {
+                "url[0]": url.strip(), "wp_path_id": cid,
+            }, before_submit=before, intent={"kind": "offline_add", "info_hash": info_hash,
+                                             "requested_cid": str(cid)})
+            if resp.get("state") in (True, 1, "1", False, 0, "0"):
+                result.uncertain = False
+            if resp.get("state") in (True, 1, "1"):
+                data = resp.get("data")
+                # Some endpoint versions return outer success but report
+                # per-link failure in result/data. Validate that inner row.
+                candidates = (resp.get("result"), data)
+                for inner in candidates:
+                    row = inner[0] if isinstance(inner, list) and inner else inner
+                    if isinstance(row, dict) and row.get("state") in (False, 0, "0"):
+                        resp = row
+                        break
+                else:
+                    self._require_success(resp, "离线提交")
+                    result.accepted = True
+                    result.message = "已提交离线下载"
+                    if isinstance(data, dict):
+                        result.file_id = str(data.get("file_id") or data.get("fid") or "")
+                        result.task = data if data.get("info_hash") else {}
                     return result
-                raise P115Error(f"离线提交结果未确认：{last_err}；未找到安全可恢复的任务") from exc
+            last_err = self._error(resp)
+            if any(word in last_err for word in self._DUP_WORDS):
+                result.duplicate = True
+                self.recover_offline(result)
+                if result:
+                    return result
+                raise P115Error(result.message)
+        except P115Deferred as exc:
+            result.uncertain = exc.uncertain
+            result.message = str(exc)
+            if result.duplicate:
+                # File evidence can also exhaust the slice after finding
+                # the duplicate task; preserve that identity for recovery.
+                result.recovery_pending = True
+                exc.not_sent, exc.uncertain, exc.reconcile_only = False, False, True
+            exc.state = result.as_dict()
+            raise
+        except P115Error as exc:
+            last_err = str(exc)
+            if result.duplicate:
+                raise
+            if not result.uncertain:
+                raise
+            if hasattr(self, "_budget") and result.uncertain:
+                raise P115Deferred("离线提交结果未确认，等待对账，未重复提交", reason="uncertain",
+                                   uncertain=True, state=result.as_dict()) from exc
+            # The request may have reached 115 before its response timed
+            # out. Recover a matching task, but never report blind success.
+            try:
+                self._recover_offline(result)
+            except P115Error as recovery_error:
+                raise P115Error(f"离线提交结果未确认：{last_err}；任务对账失败：{recovery_error}") from exc
+            if result:
+                result.message = "提交响应异常，已恢复实际离线任务跟踪"
+                return result
+            raise P115Error(f"离线提交结果未确认：{last_err}；未找到安全可恢复的任务") from exc
         result.message = f"离线下载提交失败：{last_err}"
         raise P115Error(result.message)
 
@@ -990,6 +1171,10 @@ class P115Transfer:
         """At most three pages. Only complete=True proves a task is absent."""
         state = dict(cursor or {"page": 1, "items": [], "complete": False})
         state["items"] = list(state.get("items") or [])
+        # Entries without a usable hash (e.g. plain http tasks) are skipped but
+        # still counted, so that pagination totals stay comparable.
+        state.setdefault("skipped", 0)
+        state.setdefault("scanned", len(state["items"]) + state["skipped"])
         seen = {item["info_hash"] for item in state["items"]}
         try:
             for _ in range(min(3, max_pages)):
@@ -1007,13 +1192,14 @@ class P115Transfer:
                 if "total" in state and total != state["total"]:
                     raise P115Error("离线列表分页总数变化，不能判断任务缺失")
                 state["total"] = total
-                normalized = []
+                normalized, skipped = [], 0
                 for task in tasks:
                     if not isinstance(task, dict):
                         raise P115Error("离线任务条目格式错误")
                     h = normalize_info_hash(task.get("info_hash") or task.get("hash") or "")
                     if not h:
-                        raise P115Error("离线任务缺少有效哈希")
+                        skipped += 1
+                        continue
                     normalized.append({**task, "info_hash": h})
                 identity = [t["info_hash"] for t in normalized]
                 if verify:
@@ -1024,22 +1210,26 @@ class P115Transfer:
                     break
                 if page == 1:
                     state["first_page"] = identity
-                if not tasks and total is not None and len(state["items"]) < total:
+                if not tasks and total is not None and state["scanned"] < total:
                     raise P115Error("离线列表分页不完整，不能判断任务缺失")
                 for task in normalized:
+                    # Only hashed entries take part in the overlap check.
                     if task["info_hash"] in seen:
                         raise P115Error("离线列表分页重叠，不能判断任务缺失")
                     seen.add(task["info_hash"])
                     state["items"].append(task)
+                state["skipped"] += skipped
+                state["scanned"] += len(tasks)
                 state["page"] += 1
-                ended = not tasks or (total is not None and len(state["items"]) >= total)
+                ended = not tasks or (total is not None and state["scanned"] >= total)
                 if ended:
                     if page == 1:
                         state["complete"] = True
                     else:
                         state["verify"] = True
             return {"items": state["items"], "complete": bool(state.get("complete")),
-                    "cursor": None if state.get("complete") else state}
+                    "cursor": None if state.get("complete") else state,
+                    "skipped": state["skipped"]}
         except P115Deferred as exc:
             exc.state = state
             raise
@@ -1048,7 +1238,7 @@ class P115Transfer:
         """列出 115 离线下载任务（含 info_hash / percentDone / file_id）。"""
         if hasattr(self, "_budget"):
             try:
-                page = self.list_tasks_slice(getattr(self, "_task_cursor", None), page_size)
+                page = self.list_tasks_slice(self._task_cursor, page_size)
                 self._task_cursor = page["cursor"]
                 if not page["complete"]:
                     raise P115Deferred("离线任务列表尚未完整读取，等待续作", reason="pagination",
@@ -1060,6 +1250,8 @@ class P115Transfer:
                 raise
         out: list = []
         seen = set()
+        scanned = 0
+        self.last_tasks_skipped = 0
         for page in range(1, 10001):
             resp = self._call("clouddownload_task_list", {"page": page, "page_size": page_size})
             self._require_success(resp, "查询离线任务")
@@ -1069,26 +1261,29 @@ class P115Transfer:
                 raise P115Error("离线任务列表返回格式错误")
             total = self._total(resp, data)
             if not tasks:
-                if total is not None and len(out) < total:
-                    raise P115Error(f"离线任务分页不完整：{len(out)}/{total}")
+                if total is not None and scanned < total:
+                    raise P115Error(f"离线任务分页不完整：{scanned}/{total}")
                 return out
-            added = 0
+            added = hashed = 0
             for task in tasks:
                 if not isinstance(task, dict):
                     raise P115Error("离线任务条目格式错误")
                 normalized = dict(task)
                 h = normalize_info_hash(task.get("info_hash") or task.get("hash") or "")
                 if not h:
-                    raise P115Error("离线任务缺少有效哈希，无法确认任务状态")
+                    self.last_tasks_skipped += 1
+                    continue
+                hashed += 1
                 if h in seen:
                     continue
                 seen.add(h)
                 normalized["info_hash"] = h
                 out.append(normalized)
                 added += 1
-            if not added:
+            scanned += len(tasks)
+            if hashed and not added:
                 raise P115Error("离线任务分页重复，未返回不完整的任务列表")
-            if total is not None and len(out) >= total:
+            if total is not None and scanned >= total:
                 return out
         raise P115Error("离线任务超过分页保护上限")
 
@@ -1538,10 +1733,7 @@ class P115Transfer:
                 self.invalidate_file_info(file_id or str(getattr(item, "fileid", "")))
                 src = posixpath.normpath(src_path.replace("\\", "/"))
                 if getattr(item, "type", "") == "dir":
-                    for cached in list(self._dir_cache):
-                        if cached == src or cached.startswith(src + "/"):
-                            self._dir_cache.pop(cached, None)
-                            getattr(self, "_dir_cache_times", {}).pop(cached, None)
+                    self._forget_directory_tree(src)
                     self._remember_directory(posixpath.join(dest_dir, name), int(file_id))
                 return True, ""
             if transport and transport.local.last_deferred:
