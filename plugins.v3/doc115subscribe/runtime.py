@@ -21,7 +21,7 @@ from . import doc_parser, subscribe_sync
 from .ledger import TaskLedger
 from .link_router import LINK_115_SHARE, LINK_MAGNET, LINK_ED2K, classify_link
 from .mp_adapter import MPAdapter, MPDeferred
-from .organization import (classify_optional_media, core_title, identity_matches, match_history,
+from .organization import (classify_optional_media, core_title, legacy_identity, match_history,
                            path_is_within)
 from .p115_transfer import P115Error, extract_hash
 
@@ -743,7 +743,7 @@ class TaskRuntime:
                     # 旧版本（0.9.x）记录没有"本批文件清单"，无法做逐文件映射：
                     # 退回「标题/类型/季号」身份匹配，只认成功证据，且明确告知依据（不虚报整批完整）。
                     counts["checked"] += 1
-                    legacy_ok = [e for e in entries if e.get("status") is True and identity_matches(rec, e)]
+                    legacy_ok = [e for e in entries if e.get("status") is True and legacy_identity(rec, e)]
                     if legacy_ok:
                         counts["confirmed"] += 1
                         self._update_live(rec["id"], generation, org_attempts=0, org_last_check=now,

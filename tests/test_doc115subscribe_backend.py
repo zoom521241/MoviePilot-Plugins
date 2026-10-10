@@ -782,6 +782,23 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(final["organized_count"], 1)
         self.assertIn("标题", final["message"])
 
+    def test_legacy_record_matches_tagged_title_but_not_the_sequel(self):
+        """旧记录回退用去标签片名：带发布标签的标题能对上，续集不会被误配。"""
+        store = self.plugin._records()
+        tagged = store.add({"title": "飞驰人生[60帧率版本][高码版][国语配音+中文字幕].Pegasus.2019.2160p.WEB-DL.H265.HQ.60fps.DDP5.1.Atmos-BATWEB",
+                            "type": "movie", "year": "2019", "kind": "magnet", "status": "done",
+                            "final_path": "/115-影视/115-downloads/电影"})
+        sequel = store.add({"title": "飞驰人生3[高码版].Pegasus.3.2026.2160p.WEB-DL",
+                            "type": "movie", "year": "2026", "kind": "magnet", "status": "done",
+                            "final_path": "/115-影视/115-downloads/电影"})
+        body = {"data": {"list": [{"title": "飞驰人生", "status": True, "type": "movie",
+                                   "dest": "/115-影视/115-links/电影/华语电影/飞驰人生 (2019)/x.mkv"}], "total": 1}}
+        with patch.object(self.plugin, "_mp_api_json", return_value=body):
+            self.plugin.verify_organization(force=True)
+        rows = {r["id"]: r for r in store.list()}
+        self.assertEqual(rows[tagged["id"]]["organization_status"], "success")
+        self.assertNotEqual(rows[sequel["id"]]["organization_status"], "success")
+
 
 if __name__ == "__main__":
     unittest.main()

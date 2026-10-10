@@ -52,7 +52,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.10.2"
+    plugin_version = "0.10.3"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"

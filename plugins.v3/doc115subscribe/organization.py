@@ -122,6 +122,36 @@ def _year(value: Dict[str, Any]) -> str:
     return next((group for group in match.groups() if group), "") if match else ""
 
 
+def legacy_title_key(value: Any) -> str:
+    """旧记录回退用片名键：去掉所有括号标签、季号、年份与发布标签后再比较。
+
+    文档标题常带「[60帧率版本][高码版][国语配音+中文字幕].Pegasus.2019.2160p…」这类标签，
+    直接比较会与 MP 整理记录里的简短片名对不上；而"飞驰人生"与"飞驰人生3"去掉标签后仍不等，避免误配。
+    """
+    raw = unicodedata.normalize("NFKC", str(value or ""))
+    raw = re.sub(r"[\[(（【][^\])）】]*[\])）】]", " ", raw)                      # 括号标签
+    raw = re.sub(r"(?<![a-z0-9])s\d{1,2}(?!\d)|\bseason\s*\d+|第[零一二三四五六七八九十两\d]+季", " ", raw, flags=re.I)
+    raw = re.split(r"(?:18|19|20|21)\d{2}", raw, maxsplit=1)[0]                    # 年份及其后
+    raw = re.split(r"[.\-_]", raw, maxsplit=1)[0]                                  # 点/横线后的发布信息
+    return re.sub(r"[\s\-_.·:：!！?？,，/\\|]", "", raw).casefold()
+
+
+def legacy_identity(batch: Dict[str, Any], entry: Dict[str, Any]) -> bool:
+    """旧版本（无本批清单）记录的回退身份匹配：类型/季号不冲突，且去标签片名相等。"""
+    a_id, b_id = str(batch.get("tmdbid") or batch.get("tmdb_id") or ""), str(entry.get("tmdbid") or entry.get("tmdb_id") or "")
+    if a_id and b_id and a_id != b_id:
+        return False
+    a_type = _media_type(batch.get("type") or batch.get("media_type"))
+    b_type = _media_type(entry.get("type") or entry.get("media_type"))
+    if a_type and b_type and a_type != b_type:
+        return False
+    a_season, b_season = _season(batch), _season(entry)
+    if a_season is not None and b_season is not None and a_season != b_season:
+        return False
+    a, b = legacy_title_key(batch.get("title")), legacy_title_key(entry.get("title"))
+    return bool(a and b and a == b)
+
+
 def identity_matches(batch: Dict[str, Any], entry: Dict[str, Any]) -> bool:
     """Reject known conflicts and require a complete title or media ID identity."""
     a_id, b_id = str(batch.get("tmdbid") or batch.get("tmdb_id") or ""), str(entry.get("tmdbid") or entry.get("tmdb_id") or "")
