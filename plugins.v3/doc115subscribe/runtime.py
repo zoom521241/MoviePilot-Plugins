@@ -790,8 +790,13 @@ class TaskRuntime:
                                          "可点该任务的「核对」重新检查")
                     logger.info(f"115文档订阅与查询：连续 {waits} 次无整理证据，停止自动核对：{core_title(rec.get('title'))}")
                 elif status == "success":
+                    total = batch.get("organized_total") or batch.get("organized_count") or 0
+                    fields["message"] = f"整理成功：本批 {batch.get('organized_count')}/{total} 个文件已入库"
                     logger.info(f"115文档订阅与查询：整理成功：{core_title(rec.get('title'))}｜"
-                                f"已入库 {batch.get('organized_count')}/{batch.get('organized_total') or '?'} 个")
+                                f"已入库 {batch.get('organized_count')}/{total} 个")
+                elif status == "partial":
+                    fields["message"] = (f"部分成功：已入库 {batch.get('organized_count')} 个"
+                                          + (f"（共 {batch.get('organized_total')} 个）" if batch.get("organized_total") else ""))
                 self._update_live(rec["id"], generation, **fields)
             except Exception as exc:
                 errors = int(rec.get("org_error_count") or 0)
