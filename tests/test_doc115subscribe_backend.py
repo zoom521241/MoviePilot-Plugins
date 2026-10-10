@@ -766,6 +766,22 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(getattr(self.plugin, "_last_org_tick", {}).get("state"), "ok")
             self.assertEqual(getattr(self.plugin, "_last_event_stats", {}).get("errors"), 1)
 
+    def test_legacy_record_without_manifest_matches_by_title(self):
+        """旧版本（没有本批清单）记录按标题/季号回退核对，不再误判为未找到。"""
+        store = self.plugin._records()
+        record = store.add({"title": "洛基 第二季", "type": "tv", "kind": "115_share",
+                            "status": "done", "final_path": "/115-影视/115-downloads/电视剧"})
+        body = {"data": {"list": [{"title": "洛基", "seasons": "S02", "episodes": "E06", "status": True,
+                                   "dest": "/115-影视/115-links/电视剧/欧美剧/洛基 (2021)/Season 2/x.mkv"}],
+                         "total": 1}}
+        with patch.object(self.plugin, "_mp_api_json", return_value=body):
+            self.plugin.verify_organization(force=True)
+        final = [r for r in store.list() if r["id"] == record["id"]][0]
+        self.assertEqual(final["organization_status"], "success")
+        self.assertTrue(final["organization_confirmed"])
+        self.assertEqual(final["organized_count"], 1)
+        self.assertIn("标题", final["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

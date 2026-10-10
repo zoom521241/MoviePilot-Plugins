@@ -142,8 +142,9 @@ def identity_matches(batch: Dict[str, Any], entry: Dict[str, Any]) -> bool:
     normalized = {core_title(t) for t in titles if core_title(t)}
     if not core_title(entry.get("title")) or core_title(entry.get("title")) not in normalized:
         return False
-    # When title is the identity, a supplied year must also be established.
-    return not a_year or a_year == b_year
+    # 年份只在双方都给出时才要求一致（上面已拒绝冲突年份）；
+    # MP 的整理记录经常不带年份，若要求"条目必须有年份"会漏判，这里不再额外要求。
+    return True
 
 
 def prepare_manifest(items: Iterable[Dict[str, Any]], complete: bool = False,

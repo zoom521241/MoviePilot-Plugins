@@ -21,7 +21,8 @@ from . import doc_parser, subscribe_sync
 from .ledger import TaskLedger
 from .link_router import LINK_115_SHARE, LINK_MAGNET, LINK_ED2K, classify_link
 from .mp_adapter import MPAdapter, MPDeferred
-from .organization import classify_optional_media, core_title, match_history, path_is_within
+from .organization import (classify_optional_media, core_title, identity_matches, match_history,
+                           path_is_within)
 from .p115_transfer import P115Error, extract_hash
 
 
@@ -738,6 +739,38 @@ class TaskRuntime:
                     raise cache[key]
                 entries, total = cache[key]
                 complete = key[1] * 100 >= total if total is not None else len(entries) < 100
+                if not (rec.get("manifest") or []):
+                    # 旧版本（0.9.x）记录没有"本批文件清单"，无法做逐文件映射：
+                    # 退回「标题/类型/季号」身份匹配，只认成功证据，且明确告知依据（不虚报整批完整）。
+                    counts["checked"] += 1
+                    legacy_ok = [e for e in entries if e.get("status") is True and identity_matches(rec, e)]
+                    if legacy_ok:
+                        counts["confirmed"] += 1
+                        self._update_live(rec["id"], generation, org_attempts=0, org_last_check=now,
+                            org_error_count=0, query_error="", org_giveup=False, org_requested=False,
+                            org_next_ts=0, organization_status="success", organization_confirmed=True,
+                            organized_count=len(legacy_ok), organized_failed=0,
+                            message=f"整理成功：依据 MoviePilot 整理记录按标题/季号核对到 {len(legacy_ok)} 个已整理文件"
+                                    f"（该记录由旧版本写入，没有本批文件清单）")
+                        logger.info(f"115文档订阅与查询：旧记录按标题匹配判成功：{core_title(rec.get('title'))}"
+                                    f"｜{len(legacy_ok)} 个文件")
+                    else:
+                        waits = int(rec.get("org_attempts") or 0) + 1
+                        giveup = waits >= self.ORG_GIVEUP_ATTEMPTS
+                        if giveup:
+                            counts["unfound"] += 1
+                        fields = dict(org_attempts=waits, org_last_check=now, org_error_count=0, query_error="",
+                                      org_giveup=giveup, org_requested=False,
+                                      org_next_ts=0 if giveup else now + self._delay(waits,
+                                          base=self.ORG_BACKOFF_BASE, cap=self.ORG_BACKOFF_MAX),
+                                      organization_status="unfound" if giveup else "unknown")
+                        if giveup:
+                            fields["message"] = ("未找到整理证据（旧版本记录没有本批文件清单，只能按标题/季号核对），"
+                                                 "已停止自动核对")
+                            logger.info(f"115文档订阅与查询：旧记录未匹配到整理证据，停止自动核对："
+                                        f"{core_title(rec.get('title'))}")
+                        self._update_live(rec["id"], generation, **fields)
+                    continue
                 batch = store.record_evidence(rec["id"], entries, pagination_complete=complete)
                 self._confirm_move_from_evidence(batch, generation)
                 counts["checked"] += 1
