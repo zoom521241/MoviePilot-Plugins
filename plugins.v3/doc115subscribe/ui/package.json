@@ -1,7 +1,7 @@
 {
   "name": "doc115subscribe-ui",
   "private": true,
-  "version": "0.11.1",
+  "version": "0.11.2",
   "type": "module",
   "description": "115文档订阅与查询 (Doc115Subscribe) 插件前端：Vue3 + Vuetify3 + Vite 模块联邦",
   "scripts": {

@@ -667,6 +667,9 @@ class TaskRuntime:
             if item.get("kind") == LINK_115_SHARE:
                 # 磁力/ed2k 的文件可能仍在暂存目录，人工确认会跳过搬运，因此只对分享开放
                 actions.append("confirm_saved")
+            # 「确认已整理」仅在：已转存、整理状态为 unfound（MP 历史记录查不到）、且有清单时显示
+            if acquisition in ("saved", "success") and item.get("organization_status") == "unfound" and item.get("manifest"):
+                actions.append("confirm_organized")
         item["allowed_actions"] = list(dict.fromkeys(actions))
         item["hidden"] = bool(item.get("hidden"))
         item["tracking"] = self._is_tracking(item)
@@ -878,6 +881,8 @@ class TaskRuntime:
             return self._request_reconcile(rec)
         if action == "confirm_saved":
             return self._confirm_saved(rec)
+        if action == "confirm_organized":
+            return self._confirm_organized(rec)
         return {"code": 1, "msg": "不支持的任务操作"}
 
     def _request_reconcile(self, rec):
@@ -899,6 +904,25 @@ class TaskRuntime:
         self._complete_subscription_if_ready(rec.get("subscription_key"))
         self._refresh_event_paths(force=True)
         return {"code": 0, "msg": "已标记为已转存，进入整理核对", "data": {"state": "saved"}}
+
+    def _confirm_organized(self, rec):
+        """用户人工确认已整理：直接标记为整理成功，不查询 MP；用于 MP 历史记录查不到但用户已确认入库的批次。"""
+        store = self._records()
+        batch = store.get(rec["id"])
+        if not batch:
+            return {"code": 1, "msg": "任务不存在"}
+        manifest = batch.get("manifest") or []
+        required = [u for u in manifest if u.get("required")]
+        if not required and not batch.get("manifest_complete"):
+            return {"code": 1, "msg": "该任务没有文件清单或清单不完整，无法标记为已整理"}
+        now = time.time()
+        store.update(rec["id"], tracking_enabled=True, organization_status="success",
+                     organized_count=len(required) or 1, organized_total=len(required) or 1,
+                     manifest_complete=True, organization_confirmed=True, org_giveup=False, org_requested=False,
+                     org_last_check=now, query_error="", message="已人工确认整理成功")
+        self._mark_resource_complete(rec.get("subscription_key"), rec.get("resource_key"))
+        self._complete_subscription_if_ready(rec.get("subscription_key"))
+        return {"code": 0, "msg": "已标记为整理成功", "data": {"state": "success"}}
 
     def _reconcile_step(self, rec, tr, generation):
         """只读核对 uncertain/unverified 分享批次：列 final_path 目录，看清单条目名是否都在。
@@ -949,13 +973,15 @@ class TaskRuntime:
 
     @staticmethod
     def _org_search_key(title):
-        """MP 整理记录的模糊查询词：先去掉括号标签（[] 【】 （） ()），再截到季号/年份前。
+        """MP 整理记录的模糊查询词：先去掉括号标签（[] 【】 （） ()），再截到季号/年份前，再截到第一个英文句点前（避免 MP 模糊搜索匹配失败）。
 
         只用于发现候选，身份由 match_history 全量比较；为空时调用方跳过查询（绝不用 "**" 全量扫描）。
         """
         raw = re.sub(r"[\[【（(][^\]】）)]*[\]】）)]", " ", str(title or ""))
         raw = re.split(r"第[零一二三四五六七八九十两\d]+季|(?<![a-z0-9])s\d{1,2}(?!\d)|\bseason\s*\d+|[\[【（(]",
                        raw, maxsplit=1, flags=re.I)[0]
+        # MP 的模糊搜索（title=*kw*）遇到 . 匹配失败，截到第一个 . 前（通常是中英文分隔点）
+        raw = re.split(r"\.", raw, maxsplit=1)[0]
         return re.sub(r"\s+", " ", raw).strip(" .-·:：_")[:24].strip()
 
     @staticmethod

@@ -139,5 +139,25 @@ class FastSearchTests(unittest.TestCase):
                 self.assertEqual(row["match"], parser.score_title(row, kw)[1])
 
 
-if __name__ == "__main__":
+class OrgSearchKeyTests(unittest.TestCase):
+    """_org_search_key: MP 整理记录模糊查询词生成。"""
+
+    def test_strip_brackets_and_dot_before_english(self):
+        import re
+        def _org_search_key(title):
+            raw = re.sub(r"[\[【（(][^\]】）)]*[\]】）)]", " ", str(title or ""))
+            raw = re.split(r"第[零一二三四五六七八九十两\d]+季|(?<![a-z0-9])s\d{1,2}(?!\d)|season\s*\d+|[\[【（(]", raw, maxsplit=1, flags=re.I)[0]
+            raw = re.split(r"\.", raw, maxsplit=1)[0]
+            return re.sub(r"\s+", " ", raw).strip(" .-·:：_")[:24].strip()
+        
+        self.assertEqual(_org_search_key("蝙蝠侠大战超人：正义黎明[国英多音轨+中文字幕+特效字幕].Batman.v.Superman.Dawn.of.Justice.2016.BluRay.2160p"), "蝙蝠侠大战超人：正义黎明")
+        self.assertEqual(_org_search_key("闪电侠 第六季"), "闪电侠")
+        self.assertEqual(_org_search_key("合成电影.Synthetic.2024"), "合成电影")
+        self.assertEqual(_org_search_key("【高清】沙丘2.Dune.Part.Two.2024"), "沙丘2")
+
+
+
+
+
+if __name__ == '__main__':
     unittest.main()

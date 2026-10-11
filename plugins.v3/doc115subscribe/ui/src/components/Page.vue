@@ -538,6 +538,7 @@ const ACTION_CONFIRM = {
   stop_tracking: r => ({ title: '停止自动跟踪', text: `停止「${r.title}」的自动跟踪？已有下载与文件会保留，之后不再自动核对${r.subscription_key ? '；对应的电影订阅也不再由本插件自动获取' : ''}。`, confirmText: '停止跟踪', tone: 'danger' }),
   retry_submit: r => ({ title: '重新获取', text: `重新获取「${r.title}」？会再次提交 115 转存或离线下载，只适用于此前已明确获取失败的任务。`, confirmText: '重新获取', tone: 'danger' }),
   confirm_saved: r => ({ title: '人工确认已转存', text: `把「${r.title}」标记为已保存，并转入 MP 整理核对。仅当你已在 115 中确认文件存在时使用；标记错误会让任务停在待整理状态。`, confirmText: '确认已转存', tone: 'danger', check: '我已在 115 网盘中看到这些文件' }),
+  confirm_organized: r => ({ title: '人工确认已整理', text: `把「${r.title}」标记为整理成功。适用于文件已在 Emby/Plex/Jellyfin 入库，但 MP 历史记录因标题差异过大查询不到的情况。`, confirmText: '确认已整理', tone: 'danger', check: '我已在媒体库中看到这些影片' }),
 }
 async function runRecordAction(r, action) {
   if (!r?.id || recordBusy(r) || !hasAction(r, action)) return
