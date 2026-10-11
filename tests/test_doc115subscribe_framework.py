@@ -48,7 +48,8 @@ class FrameworkTests(unittest.TestCase):
         self.plugin.get_data_path = lambda: Path(self.temp.name)
         self.plugin.update_config = lambda _: None
         self.plugin.init_plugin({"enabled": False, "tencent_cookie": "SYNTHETIC-TENCENT-COOKIE",
-                                 "p115_cookie": "SYNTHETIC-115-COOKIE"})
+                                 "p115_cookie": "SYNTHETIC-115-COOKIE",
+                                 "doc_url": "https://docs.qq.com/sheet/SyntheticDocument"})
         self.addCleanup(self.plugin.stop_service)
         self.plugin._enabled = True
         self.transfer = SyntheticTransfer()
