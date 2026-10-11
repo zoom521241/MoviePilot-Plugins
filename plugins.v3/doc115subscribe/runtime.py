@@ -667,9 +667,9 @@ class TaskRuntime:
             if item.get("kind") == LINK_115_SHARE:
                 # 磁力/ed2k 的文件可能仍在暂存目录，人工确认会跳过搬运，因此只对分享开放
                 actions.append("confirm_saved")
-            # 「确认已整理」仅在：已转存、整理状态为 unfound（MP 历史记录查不到）、且有清单时显示
-            if acquisition in ("saved", "success") and item.get("organization_status") == "unfound" and item.get("manifest"):
-                actions.append("confirm_organized")
+        # 「确认已整理」：已转存且整理状态为 unfound（MP 历史记录查不到）时显示，供用户人工标记已整理
+        if acquisition in ("saved", "success") and item.get("organization_status") == "unfound":
+            actions.append("confirm_organized")
         item["allowed_actions"] = list(dict.fromkeys(actions))
         item["hidden"] = bool(item.get("hidden"))
         item["tracking"] = self._is_tracking(item)
