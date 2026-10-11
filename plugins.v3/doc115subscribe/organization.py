@@ -80,8 +80,15 @@ def storage_identity(value: Any) -> str:
 
 
 def _media_type(value: Any) -> str:
-    raw = str(getattr(value, "value", value) or "").lower()
-    return {"电影": "movie", "电视剧": "tv", "series": "tv", "mediatype.movie": "movie", "mediatype.tv": "tv"}.get(raw, raw)
+    raw = str(getattr(value, "value", value) or "").strip().lower()
+    mapped = {"电影": "movie", "电视剧": "tv", "series": "tv", "mediatype.movie": "movie", "mediatype.tv": "tv"}.get(raw, raw)
+    # 「未知」不是一种类型：文档没标类型的批次（type=unknown）不能与 MP 识别出的电影/剧集构成冲突
+    return "" if mapped in ("unknown", "未知", "mediatype.unknown", "none") else mapped
+
+
+def _batch_type(batch: Dict[str, Any]) -> str:
+    """批次类型：文档给出的类型优先；文档未标类型时用用户选的保存目录类型（target_type）。"""
+    return _media_type(batch.get("type") or batch.get("media_type")) or _media_type(batch.get("target_type"))
 
 
 def _season(value: Dict[str, Any]) -> Optional[int]:
@@ -141,7 +148,7 @@ def legacy_identity(batch: Dict[str, Any], entry: Dict[str, Any]) -> bool:
     a_id, b_id = str(batch.get("tmdbid") or batch.get("tmdb_id") or ""), str(entry.get("tmdbid") or entry.get("tmdb_id") or "")
     if a_id and b_id and a_id != b_id:
         return False
-    a_type = _media_type(batch.get("type") or batch.get("media_type"))
+    a_type = _batch_type(batch)
     b_type = _media_type(entry.get("type") or entry.get("media_type"))
     if a_type and b_type and a_type != b_type:
         return False
@@ -157,7 +164,7 @@ def identity_matches(batch: Dict[str, Any], entry: Dict[str, Any]) -> bool:
     a_id, b_id = str(batch.get("tmdbid") or batch.get("tmdb_id") or ""), str(entry.get("tmdbid") or entry.get("tmdb_id") or "")
     if a_id and b_id and a_id != b_id:
         return False
-    a_type, b_type = _media_type(batch.get("type") or batch.get("media_type")), _media_type(entry.get("type") or entry.get("media_type"))
+    a_type, b_type = _batch_type(batch), _media_type(entry.get("type") or entry.get("media_type"))
     if a_type and b_type and a_type != b_type:
         return False
     a_year, b_year = _year(batch), _year(entry)

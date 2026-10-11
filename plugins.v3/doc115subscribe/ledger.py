@@ -23,6 +23,23 @@ def _encode(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+
+def _manifest_complete(batch: Dict[str, Any]) -> bool:
+    """清单是否完整。
+
+    0.11.0 及以前，附带小视频/广告文件的 ID 冲突也会把清单标成不完整（manifest_file_identity_conflict），
+    这类旧批次在这里按「冲突只涉及非必要文件」重新判定，无需重新扫描 115。
+    """
+    if batch.get("manifest_complete"):
+        return True
+    reasons = {r for r in str(batch.get("manifest_reason") or "").split(",") if r}
+    if not batch.get("manifest_snapshot_ready") or reasons != {"manifest_file_identity_conflict"}:
+        return False
+    items = batch.get("manifest") or []
+    required_paths = {u.get("source_path") for u in items if u.get("required")}
+    conflicts = batch.get("manifest_conflicts") or []
+    return bool(required_paths) and bool(conflicts) and not any(c.get("source_path") in required_paths for c in conflicts)
+
 class TaskLedger:
     SCHEMA_VERSION = 1
     MAX_PENDING_EVENTS = 2000
@@ -493,7 +510,10 @@ class TaskLedger:
             if incoming_reason:
                 result["complete"] = False
                 result["reason"] = ",".join(filter(None, (result["reason"], incoming_reason)))
-            if conflicts:
+            # 只有「必要」文件的身份冲突才影响完整性：附带的小视频/广告文件被 115 重建换了 ID 很常见，
+            # 若也算冲突，主文件已整理入库的任务会永远停在「未完成」。
+            required_paths = {u.get("source_path") for u in result["items"] if u.get("required")}
+            if any(c.get("source_path") in required_paths for c in conflicts):
                 result["complete"] = False
                 result["reason"] = ",".join(filter(None, (result["reason"], "manifest_file_identity_conflict")))
             expected_count = batch.get("expected_episode_count")
@@ -539,7 +559,7 @@ class TaskLedger:
             # Reassociate saved candidates after manifest enrichment. Early
             # evidence remains useful but cannot confirm an unknown package.
             evidence = match_history(batch, evidence)
-            projection = summarize(batch.get("manifest") or [], evidence, batch.get("manifest_complete", False), pagination_complete)
+            projection = summarize(batch.get("manifest") or [], evidence, _manifest_complete(batch), pagination_complete)
             self._trim_evidence(db, batch_id, projection.get("organization_evidence") or [])
             self._update(db, batch_id, projection)
             return self._get(db, batch_id)

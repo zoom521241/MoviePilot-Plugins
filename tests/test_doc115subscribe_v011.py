@@ -419,7 +419,7 @@ class WorkerAndConfigTests(V011Base):
         self.plugin.check_offline_tasks()
         self.plugin.run_subscribe.assert_called_once()
         status = self.plugin.api_status()["data"]["jobs"]["subscribe"]
-        self.assertEqual((status["state"], status["msg"]), ("failed", "MP读取已排队"))
+        self.assertEqual((status["state"], status["msg"]), ("retrying", "MP读取已排队"))
         self.assertGreater(self.plugin._job_store().get("subscribe")["next_check_at"], time.time())
 
     def test_staging_path_cannot_overlap_download_paths(self):

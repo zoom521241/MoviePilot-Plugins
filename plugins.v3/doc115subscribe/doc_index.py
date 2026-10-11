@@ -5,8 +5,10 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +23,21 @@ INDEX_VERSION = 3
 # 刷新失败、沿用旧数据的工作表超过该天数视为过期
 STALE_MAX_DAYS = 14
 SORTS = ("relevance", "year_desc", "year_asc", "quality")
+# 同一索引版本内缓存最近几个关键词的命中列表：切换筛选/排序/翻页不再重扫全量
+HIT_CACHE_SIZE = 8
+
+
+def _kind_ok(kinds, want: str) -> bool:
+    """与 doc_parser.matches_link_kind 同义，但用预计算的链接类型集合。"""
+    if want == "share":
+        return doc_parser.LINK_115_SHARE in kinds
+    if want == "magnet":
+        return doc_parser.LINK_MAGNET in kinds
+    if want == "ed2k":
+        return doc_parser.LINK_ED2K in kinds
+    if want == "doc":
+        return not (kinds & {doc_parser.LINK_115_SHARE, doc_parser.LINK_MAGNET, doc_parser.LINK_ED2K})
+    return True
 
 
 def _legitimately_empty(data: Dict[str, Any]) -> bool:
@@ -46,6 +63,9 @@ class DocIndex:
         self.errors: List[str] = []
         self._index_version = uuid.uuid4().hex
         self._by_id: Dict[str, Dict[str, Any]] = {}
+        self._search_lock = threading.Lock()
+        self._search_meta: Optional[List[tuple]] = None
+        self._hit_cache: "OrderedDict[str, List[tuple]]" = OrderedDict()
 
     @property
     def index_version(self) -> str:
@@ -62,6 +82,9 @@ class DocIndex:
                                          separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def _set_records(self, records: List[Dict[str, Any]]) -> None:
+        with self._search_lock:
+            self._search_meta = None
+            self._hit_cache.clear()
         self._by_id = {}
         self.records = records
         for rec in records:
@@ -168,33 +191,27 @@ class DocIndex:
             raise ValueError("排序方式无效")
         page_size = max(1, min(100, int(page_size)))
         filtered = []
-        for score, rec, fragment in doc_parser.search_scored(self.records, keyword):
-            mtype = rec.get("media_type") or doc_parser.media_type_of(rec.get("sheet", ""), rec.get("title", ""))
+        for score, rec, meta in self._hits(keyword):
+            mtype, is4k, is1080, cn, kinds, _, _ = meta
             if media_type != "all" and media_type != mtype:
                 continue
-            if not doc_parser.matches_link_kind(rec, link_kind):
+            if link_kind != "all" and not _kind_ok(kinds, link_kind):
                 continue
-            text = f"{rec.get('title', '')} {rec.get('qtext') or rec.get('spec', '')}"
-            cn = doc_parser.has_chinese(text)
             if subtitle == "cn" and not cn:
                 continue
-            is4k = doc_parser.is_4k(rec)
             if (quality == "4k" and not is4k or quality == "cn" and not cn
                     or quality == "4k_cn" and not (is4k and cn)
-                    or quality == "1080p" and not doc_parser._QUALITY_1080.search(text)):
+                    or quality == "1080p" and not is1080):
                 continue
-            filtered.append((score, rec, fragment))
+            filtered.append((score, rec, meta))
         if sort != "relevance":
-            def year(rec):
-                value = str(rec.get("year") or doc_parser.extract_year(rec.get("title", "")) or "")
-                return int(value) if value.isdigit() else None
             if sort == "quality":
-                filtered.sort(key=lambda h: (-doc_parser.quality_score(h[1]), -h[0], h[1].get("row", 0)))
+                filtered.sort(key=lambda h: (-h[2][5], -h[0], h[1].get("row", 0)))
             else:
                 sign = -1 if sort == "year_desc" else 1
                 # 无年份的排在最后；同年按相关度
-                filtered.sort(key=lambda h: (year(h[1]) is None, sign * (year(h[1]) or 0), -h[0],
-                                             -doc_parser.quality_score(h[1]), h[1].get("row", 0)))
+                filtered.sort(key=lambda h: (h[2][6] is None, sign * (h[2][6] or 0), -h[0],
+                                             -h[2][5], h[1].get("row", 0)))
         total = len(filtered)
         total_pages = max(1, -(-total // page_size))
         try:
@@ -204,13 +221,62 @@ class DocIndex:
         page = max(1, min(total_pages, page))
         start = (page - 1) * page_size
         out = []
-        for score, rec, fragment in filtered[start:start + page_size]:
+        for score, rec, _ in filtered[start:start + page_size]:
             public = self._public_record(rec)
-            public.update({"match": fragment, "score": score})
+            # 高亮片段只为当前页计算（全量计算需要逐条做原文映射，非常慢）
+            public.update({"match": doc_parser.score_title(rec, keyword)[1], "score": score})
             out.append(public)
         return {"records": out, "total": total, "page": page, "page_size": page_size,
                 "total_pages": total_pages, "sort": sort,
                 "index_version": self.index_version, "source_doc_id": self.source_doc_id}
+
+    def _meta(self) -> List[tuple]:
+        """每条记录的搜索元数据，随索引版本惰性构建一次：
+        [(search_key, (media_type, is_4k, is_1080, has_cn, link_kinds, quality_score, year_int))]。"""
+        meta = self._search_meta
+        if meta is not None:
+            return meta
+        with self._search_lock:
+            if self._search_meta is None:
+                built = []
+                for rec in self.records:
+                    text = f"{rec.get('title', '')} {rec.get('qtext') or rec.get('spec', '')}"
+                    key = doc_parser.search_key(rec)
+                    year = key[2]
+                    built.append((key, (
+                        rec.get("media_type") or doc_parser.media_type_of(rec.get("sheet", ""), rec.get("title", "")),
+                        doc_parser.is_4k(rec), doc_parser.is_1080(rec), doc_parser.has_chinese(text),
+                        frozenset(doc_parser.link_kinds_of(rec)), doc_parser.quality_score(rec),
+                        int(year) if year.isdigit() else None)))
+                self._search_meta = built
+            return self._search_meta
+
+    def warm_search(self) -> None:
+        """后台预热搜索元数据（加载/刷新索引后调用），首次搜索不再承担构建开销。"""
+        self._meta()
+
+    def _hits(self, keyword: str) -> List[tuple]:
+        """关键词全部命中 [(score, rec, meta)]，按相关度>画质>行号排序；按 (索引版本, 关键词) 缓存。"""
+        cache_key = (keyword or "").strip()
+        with self._search_lock:
+            cached = self._hit_cache.get(cache_key)
+            if cached is not None:
+                self._hit_cache.move_to_end(cache_key)
+                return cached
+        query = doc_parser.prepare_query(cache_key)
+        hits = []
+        if query is not None:
+            records = self.records
+            for i, (key, meta) in enumerate(self._meta()):
+                score = doc_parser.score_key(key, query)
+                if score:
+                    hits.append((score, records[i], meta))
+            hits.sort(key=lambda h: (-h[0], -h[2][5], h[1].get("row", 0)))
+        with self._search_lock:
+            self._hit_cache[cache_key] = hits
+            while len(self._hit_cache) > HIT_CACHE_SIZE:
+                self._hit_cache.popitem(last=False)
+        return hits
 
     def search(self, keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
         return [self._public_record(rec) for rec in doc_parser.search(self.records, keyword, limit=limit)]

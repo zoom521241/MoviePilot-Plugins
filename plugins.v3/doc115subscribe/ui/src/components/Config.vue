@@ -152,7 +152,7 @@ function validateAll() {
 }
 
 function directoryOptions(type) {
-  return directories.value.filter(d => (d.media_type === type || !d.media_type || d.media_type === 'all') && ['115', 'u115', '115网盘Plus'].includes(d.storage)).map(d => ({ title: `${d.name || d.storage} · ${d.path} · ${d.monitored === true ? '监控已启用' : '监控未确认'}`, value: d.path }))
+  return directories.value.filter(d => (d.media_type === type || !d.media_type || d.media_type === 'all') && ['115', 'u115', '115网盘Plus'].includes(d.storage)).map(d => ({ title: `${d.name || d.storage} · ${d.path}${d.monitored === true ? ' · 监控已启用' : d.monitored === false ? ' · 未开启监控' : ''}`, value: d.path }))
 }
 function chooseDirectory(type, path) { if (directoryOptions(type).some(d => d.value === path)) cfg[type === 'tv' ? 'tv_path' : 'movie_path'] = path }
 async function loadDirectories() {

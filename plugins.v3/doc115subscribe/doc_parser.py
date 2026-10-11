@@ -53,7 +53,7 @@ _TV_TITLE_RE = re.compile(
 )
 
 _QUALITY_4K = re.compile(r"(?<![A-Za-z0-9])(?:4k|2160p?|uhd)(?![A-Za-z0-9])", re.I)
-_QUALITY_1080 = re.compile(r"(1080p|1080)", re.I)
+_QUALITY_1080 = re.compile(r"(?<![A-Za-z0-9])1080[pi]?(?![0-9])", re.I)
 _CN_SUB = re.compile(r"(中文|中字|国语|简中|繁中|简繁)", re.I)
 _NO_CN = re.compile(r"无\s*(中文|中字|字幕)|无字幕", re.I)
 _YEAR_RE = re.compile(r"[（(\[]((?:18|19|20|21)\d{2})[)）\]]")
@@ -672,6 +672,57 @@ def score_title(rec: Dict[str, Any], keyword: str) -> Tuple[int, str]:
     if fragment and fragment not in title:
         fragment = ""
     return max(score, 1), fragment
+
+
+def is_1080(rec: Dict[str, Any]) -> bool:
+    return bool(_QUALITY_1080.search(f"{rec.get('title', '')} {rec.get('qtext') or rec.get('spec', '')}"))
+
+
+def search_key(rec: Dict[str, Any]) -> Tuple[str, str, str]:
+    """预计算的搜索键：(去规格后的归一化片名, 完整标题归一化, 年份)。随索引版本缓存，避免每次搜索重算 23 万条。"""
+    title = str(rec.get("title") or "")
+    core_norm = _normalize_map(core_title(title))[0]
+    full_norm = _normalize_map(title)[0]
+    year = str(rec.get("year") or extract_year(title) or "")
+    return core_norm, (full_norm if full_norm != core_norm else ""), year
+
+
+def prepare_query(keyword: str) -> Optional[Dict[str, Any]]:
+    """把关键词预处理成 score_key 需要的形式；无有效片名时返回 None。"""
+    kw, kw_year = _split_keyword(keyword)
+    stripped = _SPEC_WORDS.sub(" ", kw)
+    if normalize_title(stripped):
+        kw = stripped
+    needle = normalize_title(kw)
+    if not needle:
+        return None
+    return {"needle": needle, "year": kw_year, "full": normalize_title(keyword)}
+
+
+def score_key(key: Tuple[str, str, str], query: Dict[str, Any]) -> int:
+    """与 score_title 同一套打分规则，但只用预计算键，不生成高亮片段。0 表示不命中。"""
+    norm, full_norm, rec_year = key
+    needle, kw_year, full = query["needle"], query["year"], query["full"]
+    pos = _find_bounded(norm, needle)
+    penalty = 0
+    if pos < 0 and kw_year:
+        pos = _find_bounded(norm, full)
+        if pos >= 0:
+            needle, kw_year = full, ""
+    if pos < 0:
+        target = full_norm or norm
+        pos = _find_bounded(target, full)
+        if pos < 0:
+            return 0
+        norm, needle, kw_year, penalty = target, full, "", 20
+    score = 100 if pos == 0 and len(needle) == len(norm) else 60 if pos == 0 else 30
+    score -= penalty
+    if kw_year:
+        if rec_year == kw_year:
+            score += 20
+        elif rec_year:
+            score -= 25
+    return max(score, 1)
 
 
 def search_scored(records: List[Dict[str, Any]], keyword: str) -> List[Tuple[int, Dict[str, Any], str]]:

@@ -18,7 +18,7 @@ function component(name, api, options = {}) {
   const lifecycle = {}
   const helpers = { ...vue, inject: () => options.theme || null, onMounted(fn) { lifecycle.mounted = fn }, onBeforeUnmount(fn) { lifecycle.unmount = fn }, onActivated(fn) { lifecycle.activate = fn }, onDeactivated(fn) { lifecycle.deactivate = fn } }
   const names = name === 'Page'
-    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterSubtitle,filterLink,sortBy,busy,resultVersion,close,startQr,checkQr,qrSessionId,qrImage,records,loadRecords,verifyOne,verifying,needsVerify,tab,recordsFilter,recordsMedia,recordsQuery,recordsPage,recordsTotal,prepareTransfer,confirmTransfer,transferRecord,transferTarget,transferSource,transferOpen,transferQuick,transferNote,msg,msgType,resultFeedback,status,stats,statsItems,applyStatsFilter,hasAction,taskAction,runRecordAction,visibleActions,settingsOpen,visibilityChanged,shouldPoll,specTokens,highlightParts,linkHref,darkTheme,organizationSummary,manifestText,loadSubscriptions,subscriptions,subscriptionNote,subscriptionCacheEmpty,loadStatus,refreshIndex,runSubscribe,jobBusy,runningJobs,confirmState,answerConfirm,deleteRecord,unhideRecord,clearRecords,bulkAction,selected,selectedIds,toggleAll,isTracking,isCompact,orderedRecords,onSearchKey,changePage,changeRecordsPage'
+    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterSubtitle,filterLink,sortBy,busy,resultVersion,close,startQr,checkQr,qrSessionId,qrImage,records,loadRecords,verifyOne,verifying,needsVerify,tab,recordsFilter,recordsMedia,recordsQuery,recordsPage,recordsTotal,prepareTransfer,confirmTransfer,transferRecord,transferTarget,transferSource,transferOpen,transferQuick,transferNote,msg,msgType,resultFeedback,status,stats,statsItems,applyStatsFilter,hasAction,taskAction,runRecordAction,visibleActions,settingsOpen,visibilityChanged,shouldPoll,specTokens,highlightParts,linkHref,darkTheme,organizationSummary,manifestText,loadSubscriptions,fetchSubscriptions,subscriptions,subscriptionNote,subscriptionCacheEmpty,loadStatus,refreshIndex,runSubscribe,jobBusy,runningJobs,confirmState,answerConfirm,deleteRecord,unhideRecord,clearRecords,bulkAction,selected,selectedIds,toggleAll,isTracking,isCompact,orderedRecords,onSearchKey,changePage,changeRecordsPage'
     : 'load,save,cfg,secrets,msg,msgType,close,loadDirectories,directoryOptions,chooseDirectory,directories,darkTheme,rules,validateAll,tencentHint'
   const setup = new Function('helpers', 'suppliedProps', 'suppliedEmit', 'document', 'setTimeout', 'clearTimeout', 'window', 'localStorage', `
     const { computed, inject, reactive, ref, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } = helpers;
@@ -700,8 +700,21 @@ test('subscription preview shows the empty-cache state and keeps year / qtext / 
   assert.deepEqual([full.subscriptions.value[0].year, full.subscriptions.value[0].qtext], ['2026', '4K'])
   assert.match(full.subscriptionNote.value, /更新于/)
   const source = readFileSync(new URL('src/components/Page.vue', ui), 'utf8')
-  assert.match(source, /尚无 MP 订阅缓存，执行一次同步后可预演/)
-  assert.match(source, /s\.next_check_at/)
+  assert.match(source, /读取 MP 订阅并预演/)
+  assert.match(source, /下次自动同步/)
+  // 不再在空状态里重复放「同步并获取匹配资源」按钮
+  assert.equal((source.match(/@click="runSubscribe"/g) || []).length, 1)
+})
+
+test('read-only subscription fetch calls subscriptions_fetch then reloads the preview', async () => {
+  const calls = []
+  const page = component('Page', {
+    post: async (path) => { calls.push(['post', path]); return { code: 0, msg: '已读取 MP 订阅 3 个（电影 2 个），未提交任何资源' } },
+    get: async (path) => { calls.push(['get', path]); return { code: 0, data: { records: [], cache_empty: false, cached_at: 1 } } },
+  })
+  await page.fetchSubscriptions()
+  assert.deepEqual(calls.map(([m, p]) => [m, p.split('/').pop()]), [['post', 'subscriptions_fetch'], ['get', 'subscriptions_preview']])
+  assert.match(page.msg.value, /未提交任何资源/)
 })
 
 test('close only notifies the host; reactivation after deactivation keeps the component working', async () => {

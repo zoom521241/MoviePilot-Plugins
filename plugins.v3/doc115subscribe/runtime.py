@@ -856,7 +856,9 @@ class TaskRuntime:
         self._records().update(rid, tracking_enabled=True, config_generation=self._generation,
             acquisition_status="downloading" if rec.get("acquisition_status") == "failed" else rec.get("acquisition_status"),
             status="downloading" if rec.get("acquisition_status") == "failed" else rec.get("status"),
-            next_check_at=max(time.time(), float(rec.get("next_check_at") or 0)), message="已恢复原任务核对，未重新下载")
+            # 用户手动点「重查下载状态」：立即排队（仍受 115 请求额度约束），不再沿用自动退避的下次时间
+            next_check_at=time.time() if (payload or {}).get("action") == "check_download" else max(time.time(), float(rec.get("next_check_at") or 0)),
+            message="已恢复原任务核对，未重新下载")
         self._set_subscription(rec.get("subscription_key"), status="pending")
         return {"code": 0, "msg": "已排队核对原任务，遵守冷却和请求额度"}
 
@@ -1188,6 +1190,25 @@ class TaskRuntime:
             page += 1
             self._subscriptions_cursor = {"rows": rows, "page": page}
 
+    def api_subscriptions_fetch(self, payload: dict = None):
+        """只读拉取 MP 订阅列表并刷新本地缓存（不匹配提交、不转存），之后「预演」即可看到最新订阅。"""
+        if not self._enabled:
+            return {"code": 1, "msg": "插件未启用"}
+        mp = self._mp()
+        try:
+            context = mp.work_slice() if hasattr(mp, "work_slice") else nullcontext()
+            with context:
+                self._subscriptions_cache = None
+                self._subscriptions_cursor = None
+                rows = self._mp_subscribes()
+        except MPDeferred as exc:
+            return {"code": 1, "msg": f"暂时无法读取 MP 订阅：{exc}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"code": 1, "msg": "读取 MP 订阅失败：" + self._error(exc)}
+        movies = sum(1 for x in rows if x.get("type") == "电影")
+        return {"code": 0, "msg": f"已读取 MP 订阅 {len(rows)} 个（电影 {movies} 个），未提交任何资源",
+                "data": {"total": len(rows), "movies": movies}}
+
     def api_subscriptions_preview(self):
         index = self._ensure_index()
         cached = getattr(self, "_subscriptions_cache", None)
@@ -1315,8 +1336,11 @@ class TaskRuntime:
             if state == "done":
                 state = "idle"
             elif state == "queued" and int(job.get("failures") or 0) > 0:
-                state = "failed"
-            result[name] = {"state": state if state in ("idle", "queued", "running", "failed") else "idle",
+                # 失败后会自动退避重试（不是终态）：标成 retrying，前端继续显示进行中并给出失败原因
+                state = "retrying"
+            result[name] = {"state": state if state in ("idle", "queued", "running", "retrying", "failed") else "idle",
+                            "failures": int(job.get("failures") or 0),
+                            "next_at": float(job.get("next_check_at") or 0) if state == "retrying" else 0,
                             "msg": str(job.get("msg") or ""), "at": float(job.get("finished_at") or job.get("queued_at") or 0)}
         if result["index"]["state"] == "idle" and getattr(self, "_refresh_lock", None) and self._refresh_lock.locked():
             result["index"]["state"] = "running"

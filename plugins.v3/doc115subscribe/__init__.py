@@ -48,7 +48,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.11.0"
+    plugin_version = "0.11.1"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -278,6 +278,20 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
     def _load_index(self):
         client = self._new_client()
         self._index = DocIndex.load(self.index_path, client=client, expected_doc_id=client.doc_id)
+        self._warm_search(self._index)
+
+    @staticmethod
+    def _warm_search(index):
+        """后台预热搜索元数据：23 万条约需 10 秒，放到后台线程，首次搜索若碰上会等它完成而不是重复构建。"""
+        if index is None or not hasattr(index, "warm_search"):
+            return
+
+        def run():
+            try:
+                index.warm_search()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"115文档：搜索预热失败：{exc}")
+        threading.Thread(target=run, name="doc115-search-warm", daemon=True).start()
 
     def _ensure_index(self):
         if self._index is None:
@@ -328,6 +342,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                     return {"code": 1, "msg": "配置已变化，已丢弃旧刷新结果"}
                 idx.save(self.index_path)
                 self._index = idx
+            self._warm_search(idx)
             partial = bool(summary.get("errors"))
             self._last_refresh = {"success": not partial, "at": time.time(),
                                   "msg": "部分工作表失败，已保留可用旧记录" if partial else "刷新完成"}
@@ -508,7 +523,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                    ("records", self.api_records, "GET"),
                    ("records_delete", self.api_records_delete, "POST"), ("records_bulk", self.api_records_bulk, "POST"),
                    ("records_verify", self.api_records_verify, "POST"), ("run_subscribe", self.api_run_subscribe, "POST"),
-                   ("subscriptions_preview", self.api_subscriptions_preview, "GET"),
+                   ("subscriptions_preview", self.api_subscriptions_preview, "GET"), ("subscriptions_fetch", self.api_subscriptions_fetch, "POST"),
                    ("diagnostics", self.api_diagnostics, "GET"), ("directories", self.api_directories, "GET"),
                    ("task_action", self.api_task_action, "POST"),
                    ("qr_start", self.api_qr_start, "GET"), ("qr_status", self.api_qr_check, "GET")]

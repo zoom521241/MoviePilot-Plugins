@@ -197,13 +197,13 @@
 }
 @media (prefers-reduced-motion: reduce) { .doc115-stale { transition: none; } }
 
-.doc115-config .doc115-muted[data-v-5d0a3937] { font-size: 0.875rem; margin: 0.75rem 0; overflow-wrap: anywhere;
+.doc115-config .doc115-muted[data-v-3d9ae519] { font-size: 0.875rem; margin: 0.75rem 0; overflow-wrap: anywhere;
 }
-.doc115-config-switches[data-v-5d0a3937] { display: flex; flex-wrap: wrap; column-gap: 1.5rem;
+.doc115-config-switches[data-v-3d9ae519] { display: flex; flex-wrap: wrap; column-gap: 1.5rem;
 }
-.doc115-config-groups[data-v-5d0a3937] { margin-top: 0.5rem;
+.doc115-config-groups[data-v-3d9ae519] { margin-top: 0.5rem;
 }
-.doc115-group-state[data-v-5d0a3937] { margin-left: auto; padding-right: 0.75rem; font-size: 0.825rem; font-weight: 400;
+.doc115-group-state[data-v-3d9ae519] { margin-left: auto; padding-right: 0.75rem; font-size: 0.825rem; font-weight: 400;
 }
-.doc115-config .doc115-config-version[data-v-5d0a3937] { margin: 1rem 0 0; font-size: 0.8rem;
+.doc115-config .doc115-config-version[data-v-3d9ae519] { margin: 1rem 0 0; font-size: 0.8rem;
 }

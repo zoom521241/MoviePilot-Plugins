@@ -1,7 +1,7 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
 
 // 前端构建版本：Page 与 Config 共用；测试会断言它与 ui/package.json、package.v3.json 一致。
-const UI_BUILD = '0.11.0';
+const UI_BUILD = '0.11.1';
 
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;
@@ -95,7 +95,7 @@ function validateAll() {
 }
 
 function directoryOptions(type) {
-  return directories.value.filter(d => (d.media_type === type || !d.media_type || d.media_type === 'all') && ['115', 'u115', '115网盘Plus'].includes(d.storage)).map(d => ({ title: `${d.name || d.storage} · ${d.path} · ${d.monitored === true ? '监控已启用' : '监控未确认'}`, value: d.path }))
+  return directories.value.filter(d => (d.media_type === type || !d.media_type || d.media_type === 'all') && ['115', 'u115', '115网盘Plus'].includes(d.storage)).map(d => ({ title: `${d.name || d.storage} · ${d.path}${d.monitored === true ? ' · 监控已启用' : d.monitored === false ? ' · 未开启监控' : ''}`, value: d.path }))
 }
 function chooseDirectory(type, path) { if (directoryOptions(type).some(d => d.value === path)) cfg[type === 'tv' ? 'tv_path' : 'movie_path'] = path; }
 async function loadDirectories() {
@@ -642,6 +642,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-5d0a3937"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-3d9ae519"]]);
 
 export { UI_BUILD as U, Config as default };

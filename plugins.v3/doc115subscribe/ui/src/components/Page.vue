@@ -95,16 +95,16 @@
     <section v-else-if="tab === 'subscriptions'" class="doc115-panel" aria-label="电影订阅">
       <div class="doc115-section-heading"><h3>电影订阅</h3><span class="doc115-chip" :class="status.subscribe_enabled ? 'doc115-green' : 'doc115-neutral'">{{ status.subscribe_enabled ? '自动同步已启用' : '自动同步已关闭' }}</span></div>
       <p class="doc115-muted doc115-small">按已缓存的 MP 电影订阅预演文档匹配结果，不提交资源。订阅的创建、编辑和整理由 MP 处理。</p>
-      <div class="doc115-actions doc115-wrap"><v-btn variant="outlined" size="small" prepend-icon="mdi-eye-outline" :loading="busy.preview" @click="loadSubscriptions">刷新预演</v-btn><v-btn variant="outlined" size="small" prepend-icon="mdi-sync" :loading="busy.subscribe" :disabled="status.enabled === false || !status.subscribe_enabled || jobBusy('subscribe')" @click="runSubscribe">同步并获取匹配资源</v-btn></div>
+      <div class="doc115-actions doc115-wrap"><v-btn variant="outlined" size="small" prepend-icon="mdi-eye-outline" :loading="busy.preview" :disabled="status.enabled === false" @click="fetchSubscriptions">读取 MP 订阅并预演</v-btn><v-btn variant="outlined" size="small" prepend-icon="mdi-sync" :loading="busy.subscribe" :disabled="status.enabled === false || !status.subscribe_enabled || jobBusy('subscribe')" @click="runSubscribe">同步并获取匹配资源</v-btn></div>
       <p v-if="status.last_subscribe" class="doc115-small" :class="status.last_subscribe.success === false ? 'doc115-red' : 'doc115-muted'">最近同步：{{ status.last_subscribe.msg || status.last_subscribe.error || '已完成' }}</p>
       <p class="doc115-muted doc115-small">{{ subscriptionNote }}</p>
-      <div v-if="subscriptionCacheEmpty" class="doc115-empty"><p>尚无 MP 订阅缓存，执行一次同步后可预演。</p><v-btn v-if="status.subscribe_enabled && status.enabled !== false" size="small" variant="outlined" :loading="busy.subscribe" :disabled="jobBusy('subscribe')" @click="runSubscribe">同步并获取匹配资源</v-btn></div>
+      <p v-if="subscriptionNextAt" class="doc115-muted doc115-small">下次自动同步：{{ formatTime(subscriptionNextAt) }}</p>
+      <p v-if="subscriptionCacheEmpty" class="doc115-empty">还没有读取过 MP 订阅。点「读取 MP 订阅并预演」只读查看匹配结果，不会提交资源。</p>
       <p v-else-if="!busy.preview && !subscriptions.length" class="doc115-empty">MP 中暂无电影订阅。</p>
       <article v-for="(s, i) in subscriptions" :key="s.id || i" class="doc115-resource-card doc115-sub-card">
         <h3 class="doc115-title">{{ s.title || s.name || '电影订阅' }} <span v-if="s.year" class="doc115-blue doc115-year">（{{ s.year }}）</span></h3>
         <p :class="Number(s.matched) > 0 ? 'doc115-green' : 'doc115-amber'">{{ s.reason || s.message || (Number(s.matched) > 0 ? '匹配到可用资源' : '当前没有匹配资源') }}<template v-if="Number(s.matched) > 0"> · {{ s.matched }} 条可用</template></p>
         <p v-if="s.qtext" class="doc115-spec"><span class="doc115-muted">候选规格：</span><span v-for="(token, j) in specTokens(s.qtext)" :key="j" :class="token.color || 'doc115-muted'">{{ token.text }}</span></p>
-        <p v-if="s.next_check_at" class="doc115-muted doc115-small">下次计划：{{ formatTime(s.next_check_at) }}</p>
       </article>
     </section>
     <section v-else class="doc115-panel" aria-label="任务记录" :aria-busy="busy.records ? 'true' : 'false'">
@@ -222,6 +222,7 @@ const tabs = [{ value: 'search', label: '搜索' }, { value: 'subscriptions', la
 const tab = ref('search'), records = ref([]), recordsTotal = ref(0), recordsPage = ref(1), recordsFilter = ref('all'), recordsMedia = ref('all'), recordsQuery = ref('')
 const selected = reactive({}), expanded = reactive({})
 const subscriptions = ref([]), subscriptionNote = ref('预演只读取本地缓存，不提交资源。'), subscriptionCacheEmpty = ref(false)
+const subscriptionNextAt = computed(() => Number(subscriptions.value.find(s => Number(s.next_check_at) > 0)?.next_check_at) || 0)
 const prefs = readPrefs()
 const page = ref(1), filterType = ref(prefs.type || 'all'), filterQuality = ref(prefs.quality || 'all'), filterSubtitle = ref(prefs.subtitle || 'all'), filterLink = ref(prefs.link || 'all'), sortBy = ref(prefs.sort || 'relevance')
 // reactive() 会解包并回写这些 ref，模板里的 chip 组可以按 key 循环绑定
@@ -232,11 +233,11 @@ const narrow = ref(false)
 let searchSerial = 0, searchController = null, searchDebounce = null, disposed = false, componentActive = true
 let recTimer = null, recFailures = 0, recUnchanged = 0, lastRecordsSnapshot = '', recordsSerial = 0, recController = null, reloadPending = false, pageFallbackSerial = -1, recQueryTimer = null
 let qrTimer = null, qrGeneration = 0, msgTimer = null, jobTimer = null, confirmResolve = null, mediaQuery = null
-const watchedJobs = new Set()
+const watchedJobs = new Set(), lastRetryNotice = {}
 
 const searchFilterGroups = [
   { key: 'type', label: '类型', options: [{ value: 'all', label: '全部' }, { value: 'movie', label: '电影' }, { value: 'tv', label: '电视剧' }] },
-  { key: 'quality', label: '画质', options: [{ value: 'all', label: '不限' }, { value: '4k', label: '4K' }] },
+  { key: 'quality', label: '画质', options: [{ value: 'all', label: '不限' }, { value: '4k', label: '4K' }, { value: '1080p', label: '1080P' }] },
   { key: 'subtitle', label: '字幕', options: [{ value: 'all', label: '不限' }, { value: 'cn', label: '中文字幕 / 国语' }] },
   { key: 'link', label: '链接', options: [{ value: 'all', label: '不限' }, { value: 'share', label: '115分享' }, { value: 'magnet', label: '磁力' }, { value: 'ed2k', label: 'ed2k' }, { value: 'doc', label: '仅文档' }] },
 ]
@@ -479,7 +480,7 @@ const BULK_TEXT = {
   verify: { label: '批量核对整理', text: n => `为选中的 ${n} 条任务排队核对 MP 整理证据？只读取整理记录，不会重新获取资源。` },
   hide: { label: '批量隐藏', text: n => `把选中的 ${n} 条任务从列表隐藏？仅从列表隐藏，可在『已隐藏』筛选中恢复；跟踪中的任务会被跳过。` },
   unhide: { label: '恢复显示', text: n => `恢复显示选中的 ${n} 条任务？` },
-  stop_tracking: { label: '批量停止跟踪', text: n => `停止选中的 ${n} 条任务的自动跟踪？已有下载与文件会保留，之后不再自动核对。`, tone: 'danger' },
+  stop_tracking: { label: '批量停止跟踪', text: n => `停止选中的 ${n} 条任务的自动跟踪？已有下载与文件会保留，之后不再自动核对；来自电影订阅的任务，对应订阅也不再由本插件自动获取。`, tone: 'danger' },
 }
 // 写操作后同时刷新列表与全局统计（统计来自 status，不受筛选影响）
 async function afterMutation() { await Promise.all([loadRecords(), loadStatus()]) }
@@ -534,7 +535,7 @@ async function taskAction(r, action) {
   await afterMutation()
 }
 const ACTION_CONFIRM = {
-  stop_tracking: r => ({ title: '停止自动跟踪', text: `停止「${r.title}」的自动跟踪？已有下载与文件会保留，之后不再自动核对。`, confirmText: '停止跟踪', tone: 'danger' }),
+  stop_tracking: r => ({ title: '停止自动跟踪', text: `停止「${r.title}」的自动跟踪？已有下载与文件会保留，之后不再自动核对${r.subscription_key ? '；对应的电影订阅也不再由本插件自动获取' : ''}。`, confirmText: '停止跟踪', tone: 'danger' }),
   retry_submit: r => ({ title: '重新获取', text: `重新获取「${r.title}」？会再次提交 115 转存或离线下载，只适用于此前已明确获取失败的任务。`, confirmText: '重新获取', tone: 'danger' }),
   confirm_saved: r => ({ title: '人工确认已转存', text: `把「${r.title}」标记为已保存，并转入 MP 整理核对。仅当你已在 115 中确认文件存在时使用；标记错误会让任务停在待整理状态。`, confirmText: '确认已转存', tone: 'danger', check: '我已在 115 网盘中看到这些文件' }),
 }
@@ -576,7 +577,7 @@ async function loadStatus() {
 const JOB_LABEL = { index: '文档索引', subscribe: '订阅同步' }
 let jobLegacyPolls = 0
 function jobState(name) { const job = jobs.value[name]; return job && typeof job === 'object' ? job.state : undefined }
-function jobBusy(name) { const state = jobState(name); return state === 'queued' || state === 'running' || (name === 'index' && !!status.refreshing) }
+function jobBusy(name) { const state = jobState(name); return state === 'queued' || state === 'running' || state === 'retrying' || (name === 'index' && !!status.refreshing) }
 function stopJobPoll() { if (jobTimer) { clearTimeout(jobTimer); jobTimer = null } }
 function startJobPoll() { stopJobPoll(); if (disposed || !componentActive || !pageVisible() || !watchedJobs.size) return; jobTimer = setTimeout(pollJobs, JOB_POLL_MS) }
 // 排队后每 5 秒读一次 status，作业离开 queued/running 后提示结果并停止
@@ -593,6 +594,12 @@ async function pollJobs() {
       if ((name === 'index' && status.refreshing) || (jobLegacyPolls < 6 && ok)) continue
       watchedJobs.delete(name); continue
     }
+    if (state === 'retrying') {
+      // 后台会自动重试：提示一次原因，不当作失败、不停止观察
+      const job = jobs.value[name] || {}
+      if (job.failures !== lastRetryNotice[name]) { lastRetryNotice[name] = job.failures; setMsg(`${JOB_LABEL[name]}暂未完成（${job.msg || '稍后自动重试'}），${job.next_at ? `将于 ${formatTime(job.next_at)} ` : ''}自动重试。`, 'warning') }
+      continue
+    }
     if (state === 'queued' || state === 'running' || (name === 'index' && status.refreshing)) continue
     watchedJobs.delete(name)
     const job = jobs.value[name] || {}
@@ -605,6 +612,16 @@ async function pollJobs() {
 }
 function watchJob(name) { watchedJobs.add(name); jobLegacyPolls = 0; startJobPoll() }
 async function loadDiagnostics() { if (busy.diagnostics) return; busy.diagnostics = true; try { const res = unwrap(await props.api.get('plugin/Doc115Subscribe/diagnostics')); if (res.code !== 0) throw new Error(res.msg || '本地诊断不可用'); diagnostics.value = res.data || {} } catch (e) { setMsg(`本地诊断：${describeError(e)}`, 'warning') } finally { busy.diagnostics = false } }
+// 只读拉取 MP 订阅（不提交资源），再刷新本地预演
+async function fetchSubscriptions() {
+  if (busy.preview || disposed) return
+  busy.preview = true
+  let res = null
+  try { res = await post('subscriptions_fetch', {}) } catch (e) { setMsg(`读取 MP 订阅失败：${describeError(e)}`, 'error') } finally { busy.preview = false }
+  if (res && res.code !== 0) setMsg(res.msg || '读取 MP 订阅失败', 'warning')
+  else if (res) setMsg(res.msg || '已读取 MP 订阅', 'success')
+  await loadSubscriptions()
+}
 async function loadSubscriptions() {
   if (busy.preview || disposed) return
   busy.preview = true
