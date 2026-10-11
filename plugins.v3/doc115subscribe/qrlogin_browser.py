@@ -69,7 +69,7 @@ def _validate_doc_url(doc_url: str) -> str:
         parsed = urlparse(str(doc_url or "").strip())
         valid = (parsed.scheme == "https" and parsed.hostname == "docs.qq.com"
                  and not parsed.username and not parsed.password and parsed.port in (None, 443)
-                 and re.fullmatch(r"/sheet/[A-Za-z0-9_-]+/?", parsed.path))
+                 and re.fullmatch(r"/sheet/[A-Za-z0-9]+/?", parsed.path))
     except ValueError:
         valid = False
     if not valid:
@@ -85,6 +85,7 @@ def _tencent_cookie(cookie: Dict[str, Any]) -> bool:
 class _Worker:
     """唯一的浏览器工作线程：playwright + Chromium 常驻，按指令服务。"""
 
+    # 类级默认值：测试会用 __new__ 直接构造 worker（不起线程），这些默认值必须保留
     _qr_born = 0.0
     _page = None
     _doc_url = ""

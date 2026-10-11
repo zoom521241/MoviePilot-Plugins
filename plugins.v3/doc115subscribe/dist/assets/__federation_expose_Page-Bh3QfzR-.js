@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
-import Config, { U as UI_BUILD } from './__federation_expose_Config-CQo8YDB1.js';
+import Config, { U as UI_BUILD } from './__federation_expose_Config-C43jFu1d.js';
 
 const {toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,vModelCheckbox:_vModelCheckbox,withDirectives:_withDirectives$1,createTextVNode:_createTextVNode$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,normalizeClass:_normalizeClass$1,createBlock:_createBlock$1} = await importShared('vue');
 
@@ -399,6 +399,7 @@ const ACTIONS = {
   retry_move: { label: '重试搬运', primary: true },
   retry_submit: { label: '重新获取（此前未获取成功）' },
   confirm_saved: { label: '我已确认文件在 115 中' },
+  confirm_organized: { label: '人工确认已整理', primary: true },
   stop_tracking: { label: '停止自动跟踪' },
 };
 
@@ -407,8 +408,15 @@ const recordsPageCount = computed(() => Math.max(1, Math.ceil(recordsTotal.value
 const indexSummary = computed(() => `本地索引 ${status.record_count || 0} 条，来自 ${status.sheet_count || 0} 张表` + (status.enabled === false ? '；插件已停用' : ''));
 const indexWarnings = computed(() => [...new Set([...(status.index_errors || []).map(String), ...(status.stale_sheets || []).map(s => typeof s === 'string' ? `保留旧索引：${s}` : `保留旧索引：${s.title || s.name || s.sheet_id || '未知工作表'}`)])]);
 const cookieText = computed(() => !status.cookie_ready ? '未登录，请扫码' : status.cookie_days_left == null ? '已登录' : `已登录，约 ${Math.max(0, Math.floor(status.cookie_days_left))} 天后过期`);
-// 统计优先用 status.stats（全局、不受筛选影响）；旧后端只在 records 响应里给 stats
-const stats = computed(() => ({ ...emptyStats(), ...(status.stats || recordsStats.value || {}) }));
+// 统计条与任务列表同源同刻：/status 与 /records 都带全局统计（含生成时间 at），
+// 取较新的一份，避免统计条停在旧快照（显示「进行中 1」却点进去为空）；
+// 旧后端没有 at 时按 0 处理，仍以 status.stats 为准（保持原行为）。
+const stats = computed(() => {
+  const remote = status.stats || null;
+  const local = recordsStats.value || null;
+  const picked = local && Number(local.at || 0) > Number(remote?.at || 0) ? local : remote;
+  return { ...emptyStats(), ...(picked || {}) }
+});
 const statsItems = computed(() => {
   const s = stats.value, items = [
     { key: 'movie', label: `电影 · 已入库 ${s.movie?.organized || 0}`, value: s.movie?.total || 0, color: 'doc115-purple' },
@@ -534,9 +542,10 @@ function hasAction(r, action) { return Array.isArray(r?.allowed_actions) && r.al
 function needsVerify(r) { return Array.isArray(r.allowed_actions) ? hasAction(r, 'verify') : !r.organization_confirmed && r.status !== 'failed' }
 function visibleActions(r) { return Object.keys(ACTIONS).filter(action => hasAction(r, action)).map(action => ({ action, ...ACTIONS[action] })) }
 function recordMedia(r) { const kind = String(r.media_type || r.type || r.target_type || '').toLowerCase(); return ['tv', '电视剧', '剧集'].includes(kind) ? 'tv' : ['movie', '电影'].includes(kind) ? 'movie' : kind }
-function isActiveTask(r) { return r.tracking_enabled !== false && !['cancelled', 'stopped', 'paused'].includes(acquisitionState(r)) && ['submitting', 'submitted', 'uncertain', 'downloading', 'waiting', 'awaiting_move', 'moving', 'queued'].includes(acquisitionState(r)) }
+function needsAttention(r) { return !!(r.query_error || ['partial', 'failed', 'paused', 'unfound'].includes(organizationState(r)) || ['uncertain', 'failed'].includes(acquisitionState(r))) }
+// 「需处理」优先：需要用户介入的记录不再算进行中，两个清单互斥（与后端 _is_active/_needs_attention 一致）
+function isActiveTask(r) { return !needsAttention(r) && r.tracking_enabled !== false && !['cancelled', 'stopped', 'paused'].includes(acquisitionState(r)) && ['submitting', 'submitted', 'uncertain', 'downloading', 'waiting', 'awaiting_move', 'moving', 'queued'].includes(acquisitionState(r)) }
 function isPendingOrganize(r) { return r.tracking_enabled !== false && !r.org_giveup && !r.tracking_stopped && !['organized', 'success', 'confirmed', 'paused', 'cancelled', 'stopped', 'not_applicable'].includes(organizationState(r)) && ['done', 'moved', 'saved', 'acquired'].includes(acquisitionState(r)) }
-function needsAttention(r) { return !!(r.query_error || ['partial', 'failed', 'paused'].includes(organizationState(r)) || ['uncertain', 'failed'].includes(acquisitionState(r))) }
 // 后端 0.11.0 给出 tracking；旧后端以 stop_tracking 是否可用推断
 function isTracking(r) { return typeof r.tracking === 'boolean' ? r.tracking : hasAction(r, 'stop_tracking') }
 // 已完成任务用紧凑单行；需处理/进行中保持卡片

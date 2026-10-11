@@ -48,7 +48,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.11.3"
+    plugin_version = "0.11.4"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -56,7 +56,8 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
     auth_level = 1
 
     DEFAULTS = {
-        "enabled": False, "doc_url": "https://docs.qq.com/sheet/DZWtEeFFGZW9XUkJo",
+        # 不预置任何文档地址：新装用户必须自己填写，避免默认去读仓库作者的个人文档
+        "enabled": False, "doc_url": "",
         "tencent_cookie": "", "p115_cookie": "",
         "movie_path": "/115-影视/115-downloads/电影",
         "tv_path": "/115-影视/115-downloads/电视剧",
@@ -81,7 +82,12 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
     @_transfer_event("TransferComplete")
     @_transfer_event("TransferFailed")
     def on_transfer_result(self, event):
-        self._receive_event(event)
+        # 事件回调跑在 MP 的事件线程里：任何异常都不能冒泡到宿主的分发链，
+        # 本地账本写入失败只记一条警告即可。
+        try:
+            self._receive_event(event)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("115文档订阅与查询：整理事件处理失败：" + self._error(exc))
 
     def _ensure_runtime(self):
         with self._runtime_lock:
@@ -91,6 +97,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                 self._config_lock = threading.RLock()
                 self._refresh_lock = threading.Lock()
                 self._subscribe_lock = threading.Lock()
+                self._jobs_lock = threading.Lock()
                 self._offline_lock = threading.Lock()
                 self._org_lock = threading.Lock()
                 self._ledger_instance = None
@@ -121,11 +128,14 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                 raise ValueError(f"{k} 必须是文本")
             else:
                 conf[k] = conf[k].strip()
-        url = urllib.parse.urlparse(conf["doc_url"])
-        if (url.scheme != "https" or url.hostname != "docs.qq.com" or url.username or url.password
-                or url.port not in (None, 443)):
-            raise ValueError("腾讯文档地址必须是 https://docs.qq.com/sheet/ 链接")
-        TencentDocsClient.parse_doc_id(conf["doc_url"])
+        # 腾讯文档地址允许留空（表示尚未配置）：不在这里 raise，否则 init_plugin 的回退分支
+        # 也会失败，插件将整个加载不起来、连设置页都进不去。留空时由 init_plugin 停用并提示。
+        if conf["doc_url"]:
+            url = urllib.parse.urlparse(conf["doc_url"])
+            if (url.scheme != "https" or url.hostname != "docs.qq.com" or url.username or url.password
+                    or url.port not in (None, 443)):
+                raise ValueError("腾讯文档地址必须是 https://docs.qq.com/sheet/ 链接")
+            TencentDocsClient.parse_doc_id(conf["doc_url"])
         for field in ("index_cron", "subscribe_cron"):
             CronTrigger.from_crontab(conf[field], timezone="Asia/Shanghai")
         for field in ("movie_path", "tv_path", "magnet_staging_path"):
@@ -168,22 +178,40 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
             self._directories_next_ts = 0
             self._directories_error = ""
             self._index = None
-            self._load_index()
-            self._refresh_event_paths(force=True)
+            # 下面两步都要读本地文件（索引快照 / 账本迁移），任何失败都只降级不阻断插件加载
+            try:
+                self._load_index()
+            except Exception as exc:  # noqa: BLE001
+                self._index = None
+                logger.warning("115文档订阅与查询：本地索引加载失败，本次以空索引启动：" + self._error(exc))
+            try:
+                self._refresh_event_paths(force=True)
+            except Exception as exc:  # noqa: BLE001
+                self._event_paths = {}
+                self._event_paths_token = None      # 让下一次调用（而非相同 token）重新构建
+                logger.warning("115文档订阅与查询：事件路径缓存构建失败，整理事件将暂不关联：" + self._error(exc))
             # 启动迁移/清理：旧版本写坏的事件直接 ack、旧 inbox 行与超量证据清理（不删除任务批次）
             self._maintain_ledger(force=True)
             if not self._enabled:
                 return
             scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
             options = {"max_instances": 1, "coalesce": True, "misfire_grace_time": 300}
-            scheduler.add_job(self.refresh_index,
-                trigger=CronTrigger.from_crontab(self._index_cron, timezone="Asia/Shanghai"),
-                id="doc115-index", name="115文档刷新索引", **options)
+            if self._doc_url:
+                scheduler.add_job(self.refresh_index,
+                    trigger=CronTrigger.from_crontab(self._index_cron, timezone="Asia/Shanghai"),
+                    id="doc115-index", name="115文档刷新索引", **options)
+            else:
+                # 未配置文档地址时不排索引任务：与文档无关的搬运/整理核对照常工作
+                logger.warning("115文档订阅与查询：尚未填写腾讯文档地址，搜索与索引刷新不可用，请在设置中填写")
             if self._subscribe_enabled:
-                # cron 只排队，由离线 worker 执行（失败有退避重试，不会因 MP 读取锁冲突直接失败）
+                # cron 只排队，由后台任务 worker 执行（失败有退避重试，不会因 MP 读取锁冲突直接失败）
                 scheduler.add_job(self.queue_subscribe_job,
                     trigger=CronTrigger.from_crontab(self._subscribe_cron, timezone="Asia/Shanghai"),
                     id="doc115-subscribe", name="115文档电影订阅", **options)
+            # 后台任务（刷新索引 / 同步订阅）独立线程执行：刷新 23 万条的索引要数分钟，
+            # 放在 2 秒的离线状态机里会把搬运与落盘确认一起卡住。
+            scheduler.add_job(self.run_queued_jobs, trigger=IntervalTrigger(seconds=2),
+                              id="doc115-jobs", name="115文档后台任务", **options)
             scheduler.add_job(self.check_offline_tasks, trigger=IntervalTrigger(seconds=2),
                               id="doc115-offline", name="115文档离线搬运", **options)
             # 后台自动核对「本次资源是否已整理入库」：只调本机 MP 的整理记录接口，不访问 115。
@@ -276,6 +304,9 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
         return TencentDocsClient(doc_id, self._tencent_cookie)
 
     def _load_index(self):
+        if not self._doc_url:
+            self._index = None          # 未配置文档地址：以空索引启动，设置页仍可打开
+            return
         client = self._new_client()
         self._index = DocIndex.load(self.index_path, client=client, expected_doc_id=client.doc_id)
         self._warm_search(self._index)
@@ -329,6 +360,8 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
 
     def refresh_index(self):
         self._ensure_runtime()
+        if not self._doc_url:
+            return {"code": 1, "msg": "尚未配置腾讯文档地址，请在设置中填写"}
         if not self._tencent_cookie:
             return {"code": 1, "msg": "缺少腾讯文档Cookie"}
         if not self._refresh_lock.acquire(blocking=False):
@@ -625,7 +658,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
         try:
             index = self._ensure_index()
             if not index:
-                raise ValueError("本地索引尚未建立，请刷新索引")
+                raise ValueError("尚未配置腾讯文档地址，请在设置中填写" if not self._doc_url else "本地索引尚未建立，请刷新索引")
             kw = str(body.get("keyword") or "").strip()
             if not kw:
                 raise ValueError("请输入影视名称")

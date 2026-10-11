@@ -92,11 +92,12 @@ class TaskLedger:
         self._migrate_index_columns()
 
     # 0.11.0：把高频调度要用的字段冗余成列，2 秒/20 秒的 tick 只取到期/活跃的行，不再全表反序列化。
+    # 0.11.4：补 task_file_id 列 —— 离线任务「这个落盘文件已被哪个批次认领」原先靠全表反序列化求集合。
     INDEX_COLUMNS = (("acquisition_status", "TEXT NOT NULL DEFAULT ''"), ("organization_status", "TEXT NOT NULL DEFAULT ''"),
                      ("move_status", "TEXT NOT NULL DEFAULT ''"), ("next_check_at", "REAL NOT NULL DEFAULT 0"),
                      ("org_next_ts", "REAL NOT NULL DEFAULT 0"), ("tracking_enabled", "INTEGER NOT NULL DEFAULT 1"),
                      ("org_giveup", "INTEGER NOT NULL DEFAULT 0"), ("org_requested", "INTEGER NOT NULL DEFAULT 0"),
-                     ("media_type", "TEXT NOT NULL DEFAULT ''"))
+                     ("media_type", "TEXT NOT NULL DEFAULT ''"), ("task_file_id", "TEXT NOT NULL DEFAULT ''"))
 
     @staticmethod
     def _number(value: Any) -> float:
@@ -112,7 +113,8 @@ class TaskLedger:
         return (str(item.get("acquisition_status") or ""), str(item.get("organization_status") or ""),
                 str(item.get("move_status") or ""), cls._number(item.get("next_check_at")),
                 cls._number(item.get("org_next_ts")), int(bool(item.get("tracking_enabled", True))),
-                int(bool(item.get("org_giveup"))), int(bool(item.get("org_requested"))), media)
+                int(bool(item.get("org_giveup"))), int(bool(item.get("org_requested"))), media,
+                str(item.get("task_file_id") or ""))
 
     def _write_index(self, db, batch_id: str, item: Dict[str, Any]) -> None:
         names = ",".join(f"{name}=?" for name, _ in self.INDEX_COLUMNS)
@@ -137,6 +139,9 @@ class TaskLedger:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=10000")
         db.execute("PRAGMA foreign_keys=ON")
+        # 未启用 WAL：实测（容器内 Linux）在「每次操作新开连接」的访问模式下，
+        # WAL 写入持平、读反而略慢，且多线程同时建账本时要抢一次日志模式切换；
+        # 收益不足以抵消这两项代价，真正的解法是复用连接而不是改日志模式。
         try:
             if write:
                 db.execute("BEGIN IMMEDIATE")
@@ -385,6 +390,17 @@ class TaskLedger:
     def tracked(self) -> List[Dict[str, Any]]:
         with self._connection() as db:
             return [self._row(r) for r in db.execute("SELECT * FROM batches WHERE tracking_enabled=1 ORDER BY created_ts DESC,batch_id DESC")]
+
+    def claimed_task_file_ids(self, exclude_batch_id: str = "") -> set:
+        """已被其它批次认领的 115 落盘文件 ID。
+
+        离线任务核对原先每个 tick 全表 list(limit=None) 反序列化一遍求这个集合；
+        改用 task_file_id 索引列一条 SQL 取回。
+        """
+        with self._connection() as db:
+            return {str(row[0]) for row in db.execute(
+                "SELECT task_file_id FROM batches WHERE task_file_id!='' AND batch_id!=?",
+                (str(exclude_batch_id),))}
 
     def change_token(self) -> tuple:
         """任意批次增删改都会改变该值（revision 单调递增），用于判断是否需要重建本地缓存。"""
@@ -706,6 +722,43 @@ class TaskLedger:
                 imported += 1
             db.execute("INSERT INTO metadata(key,value) VALUES(?,?)", (migration_key, str(time.time())))
             return {"imported": imported, "pending": len(pending), "already_migrated": False}
+
+    ORG_MATCHER_REVISION_KEY = "organization_matcher_revision"
+
+    def reopen_unverified_organization(self, revision: int) -> int:
+        """整理匹配规则升级后的一次性重开。
+
+        把「已转存、仍未判整理成功、且留有本批清单」的批次重新纳入自动核对，
+        让新规则有机会纠正旧规则给出的「未找到整理证据」结论。
+        用 metadata 记版本号，同一 revision 只重开一次；重开后仍受原有退避与
+        放弃次数约束（backoff → ORG_GIVEUP_ATTEMPTS 次后再次放弃），不会无限重试。
+        """
+        with self._connection(write=True) as db:
+            row = db.execute("SELECT value FROM metadata WHERE key=?", (self.ORG_MATCHER_REVISION_KEY,)).fetchone()
+            try:
+                stored = int(row[0]) if row else 0
+            except (TypeError, ValueError):
+                stored = 0
+            if stored >= int(revision):
+                return 0
+            reopened = 0
+            for row in list(db.execute("SELECT batch_id,payload,acquisition_status,organization_status FROM batches")):
+                if row["acquisition_status"] not in ("saved", "success") or row["organization_status"] == "success":
+                    continue
+                item = json.loads(row[1])
+                if not item.get("tracking_enabled", True):
+                    continue
+                if not (item.get("manifest") or item.get("manifest_complete")):
+                    continue
+                now = time.time()
+                self._update(db, row[0], {"org_giveup": False, "org_attempts": 0, "org_stale_count": 0,
+                                          "org_page": 1, "org_requested": True, "org_request_ts": now,
+                                          "org_next_ts": now, "query_error": "",
+                                          "message": "整理匹配规则已升级，正在重新核对本批次整理证据"})
+                reopened += 1
+            db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
+                       (self.ORG_MATCHER_REVISION_KEY, str(int(revision))))
+            return reopened
 
     def backup(self, path: Path) -> None:
         """SQLite's consistent snapshot API, including concurrent transactions."""

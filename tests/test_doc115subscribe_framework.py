@@ -151,19 +151,21 @@ class FrameworkTests(unittest.TestCase):
 
     def test_real_scheduler_reloads_and_stops_without_cloud_calls(self):
         # All schedules are far in the future; nothing is allowed to contact a server.
-        config = {"enabled": True, "subscribe_enabled": True, "index_cron": "0 0 1 1 *", "subscribe_cron": "0 0 1 1 *"}
+        config = {"enabled": True, "subscribe_enabled": True, "doc_url": "https://docs.qq.com/sheet/SyntheticDocument",
+                  "index_cron": "0 0 1 1 *", "subscribe_cron": "0 0 1 1 *"}
         self.plugin.init_plugin(config)
         old = self.plugin._scheduler
         self.assertIsInstance(old, self.Scheduler)
-        # 三个定时任务 + 后台整理核对（doc115-organize）
+        # 索引 / 订阅 两条 cron，离线搬运 / 后台任务 两个 2 秒 tick，加后台整理核对（doc115-organize）
         old_ids = {job.id for job in old.get_jobs()}
-        self.assertEqual(len(old.get_jobs()), 4)
+        self.assertEqual(len(old.get_jobs()), 5)
         self.assertIn("doc115-organize", old_ids)
+        self.assertIn("doc115-jobs", old_ids)
         self.plugin.init_plugin(config)
         current = self.plugin._scheduler
         self.assertIsNot(old, current)
         self.assertFalse(old.running)
-        self.assertEqual(len(current.get_jobs()), 4)
+        self.assertEqual(len(current.get_jobs()), 5)
         self.assertIn("doc115-organize", {job.id for job in current.get_jobs()})
         self.plugin.stop_service()
         self.assertFalse(current.running)

@@ -96,10 +96,10 @@ class OrganizationTests(unittest.TestCase):
         result = summary(batch(1), [evidence(1, True, 1200), evidence(1, False, 1100, id="old")])
         self.assertEqual(result["organization_status"], "success")
 
-    def test_same_name_old_history_wrong_year_type_storage_path_id_season_do_not_match(self):
+    def test_file_identity_conflicts_always_reject(self):
+        """文件身份层面的冲突一律拒绝：时间不可信/缺失、存储、路径、文件ID、缺存储。"""
         original = evidence(1)
-        cases = [evidence(1, stamp=900), evidence(1, year="2024"), evidence(1, type="电影"),
-                 evidence(1, seasons="S02"), evidence(1, title="合成剧续集"), evidence(1, date=None),
+        cases = [evidence(1, stamp=900), evidence(1, date=None),
                  evidence(1, src_fileitem={**original["src_fileitem"], "storage": "另一账户存储"}),
                  evidence(1, src_fileitem={**original["src_fileitem"], "path": "/下载/合成剧2/S01E01.mkv"}),
                  evidence(1, src_fileitem={**original["src_fileitem"], "fileid": "999"}),
@@ -107,6 +107,54 @@ class OrganizationTests(unittest.TestCase):
         for index, row in enumerate(cases):
             with self.subTest(index=index):
                 self.assertEqual(org.match_history(batch(), [row]), [])
+
+    def test_exact_file_identity_is_not_vetoed_by_batch_metadata(self):
+        """逐文件身份对得上时，MP 推断的年份/类型/季号/标题不同也不该否决该文件已整理。
+
+        批次级元数据是「整包」粒度的启发式：合集批次（如「…[共3部合集]…2005-2012」）
+        会被 MP 拆成若干部各自命名的记录，批次标题与年份必然对不上任何一条；
+        拿它当硬门槛会让整包必要文件全部判成「无证据」。
+        """
+        cases = [evidence(1, year="2024"), evidence(1, type="电影"),
+                 evidence(1, seasons="S02"), evidence(1, title="合成剧续集")]
+        for index, row in enumerate(cases):
+            with self.subTest(index=index):
+                self.assertEqual(len(org.match_history(batch(), [row])), 1)
+
+    def test_batch_level_metadata_still_rejects_when_no_file_identity(self):
+        """没有逐文件身份（无路径、无文件ID）时，批次级身份启发式仍是硬门槛。"""
+        rows = [evidence(1, year="2024", src="", src_fileitem={"storage": "115"}),
+                evidence(1, type="电影", src="", src_fileitem={"storage": "115"}),
+                evidence(1, seasons="S02", src="", src_fileitem={"storage": "115"}),
+                evidence(1, title="合成剧续集", src="", src_fileitem={"storage": "115"})]
+        for index, row in enumerate(rows):
+            with self.subTest(index=index):
+                self.assertEqual(org.match_history(batch(), [row]), [])
+
+    def test_collection_pack_confirmed_by_per_file_identity(self):
+        """真实故障回归：合集整包被 MP 拆成若干部，逐文件 ID 一致时必须判成功。
+
+        批次标题是合集名、批次年份取自「2005-2012」区间末位，
+        MP 每条记录的标题/年份都是单部的 —— 元数据全对不上，但文件 ID 与源路径逐一对应。
+        """
+        current = {"title": "蝙蝠侠：侠影之谜[共3部合集].The.Dark.Knight.Trilogy.Collection.2005-2012",
+                   "year": "2012", "type": "unknown", "target_type": "movie", "season": None,
+                   "created_ts": 1000, "source_storage": "115网盘Plus", "final_path": "/下载/电影",
+                   "item_names": ["合集"],
+                   "manifest": org.prepare_manifest(
+                       [{"source_path": f"/下载/电影/合集/Batman.{n}.mkv", "storage": "115网盘Plus",
+                         "file_id": str(100 + n)} for n in (1, 2, 3)], complete=True)["items"],
+                   "manifest_complete": True}
+        titles = [("蝙蝠侠：侠影之谜", 2005), ("蝙蝠侠：黑暗骑士", 2008), ("蝙蝠侠：黑暗骑士崛起", 2012)]
+        entries = [{"id": str(200 + n), "title": title, "year": str(year), "type": "电影", "status": True,
+                    "date": 1100, "src": f"/下载/电影/合集/Batman.{n}.mkv",
+                    "src_fileitem": {"path": f"/下载/电影/合集/Batman.{n}.mkv", "storage": "115网盘Plus",
+                                     "fileid": str(100 + n)}}
+                   for n, (title, year) in enumerate(titles, start=1)]
+        result = summary(current, entries)
+        self.assertEqual((result["organization_status"], result["organized_count"], result["organized_missing"]),
+                         ("success", 3, 0))
+        self.assertTrue(result["organization_confirmed"])
 
     def test_root_path_boundary_and_all_item_names_are_respected(self):
         current = batch()
@@ -123,7 +171,9 @@ class OrganizationTests(unittest.TestCase):
         self.assertEqual(org.match_history(current, [evidence(1)]), [])
 
     def test_long_title_is_compared_full_length_not_search_prefix(self):
+        # 逐文件身份优先后，标题比较只作用于「没有逐文件身份」的批次级路径
         current = batch(1)
+        current["manifest"] = []
         current["title"] = "A Very Long Synthetic Movie Title Beyond Twenty Four Characters Season 1 [1080P]"
         row = evidence(1, title="A Very Long Synthetic Movie Title Beyond Twenty Four Characters")
         self.assertEqual(len(org.match_history(current, [row])), 1)

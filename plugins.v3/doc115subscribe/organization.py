@@ -255,8 +255,21 @@ def _entry_time(entry: Dict[str, Any]) -> Optional[float]:
 
 
 def history_matches(batch: Dict[str, Any], entry: Dict[str, Any], unit: Optional[Dict[str, Any]] = None) -> bool:
-    if not identity_matches(batch, entry):
-        return False
+    """MP 的一条整理记录能否证明「本批次 / 本单元」已整理。
+
+    带逐文件单元（manifest）时，**只认逐文件身份**，批次级的标题/年份/类型/季号启发式不能否决它：
+
+    一条 MP 记录对应一个整理动作，文件是否真的被搬走过，只能由「这个文件」本身证明 ——
+    115 文件 ID + 存储一致，或 NFKC 归一化后源路径 + 存储一致（`exact_path` / `exact_id`）。
+    批次级元数据（整包标题、`extract_year` 取得的年份）在合集类批次上必然对不上：
+    例如「…[共3部合集]…2005-2012」整包会被 MP 拆成若干部各自命名的记录，
+    批次标题永远不等于任何一条记录标题，批次年份还会被取成区间末位（2012）；
+    若先拿这些元数据当硬门槛，整包的必要文件会全部判成「无证据」。
+    反过来，批次级身份是「整批一个动作」的粒度，也**不能**摊到每个文件上
+    （否则一季 20 集会被同一条记录一次性确认），所以这里不回落批次级启发式。
+
+    不带单元（旧记录 / 无清单）时才用批次级身份：标题、年份、类型、季号、根路径。
+    """
     history_id = str(entry.get("id") or entry.get("history_id") or "")
     linked = history_id and history_id in {str(h) for h in batch.get("mp_history_ids", [])}
     source = _source(entry)
@@ -282,9 +295,18 @@ def history_matches(batch: Dict[str, Any], entry: Dict[str, Any], unit: Optional
         exact_path = bool(path and source["path"] == path)
         exact_id = bool(fid and source["file_id"] == fid and wanted_storage and wanted_storage == source["storage"])
         unit_linked = history_id and history_id in {str(h) for h in [*(unit.get("mp_history_ids") or []), unit.get("history_id")] if h}
-        # A batch-level history ID identifies one history action, never every
-        # file in a season. Without file identity it cannot fan out to all units.
-        return bool(exact_path or exact_id or unit_linked)
+        # 单元级只认逐文件身份（或该单元自己的历史记录 id）：一条 MP 记录对应一个动作，
+        # 批次级标题/年份身份是「整批」粒度，摊到每个文件会把一季的所有集一起误判。
+        if not (exact_path or exact_id or unit_linked):
+            return False
+        # 逐文件身份成立，即证明「这个文件」确实被 MP 搬走过；年份/类型/季号/标题都是批次级
+        # 启发式，在合集/整包场景下必然对不上，不能用来否决既成事实。
+        # TMDB ID 是标识符而非启发式：双方都给出且冲突时说明不是同一部媒体，仍然拒绝。
+        a_id = str(batch.get("tmdbid") or batch.get("tmdb_id") or "")
+        b_id = str(entry.get("tmdbid") or entry.get("tmdb_id") or "")
+        return not (a_id and b_id and a_id != b_id)
+    if not identity_matches(batch, entry):
+        return False
     roots = list(batch.get("source_roots") or [])
     final = normalize_path(batch.get("final_path"))
     names = batch.get("item_names") or ([batch["item_name"]] if batch.get("item_name") else [])

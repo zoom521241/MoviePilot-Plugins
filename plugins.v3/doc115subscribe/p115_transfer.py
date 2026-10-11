@@ -584,11 +584,30 @@ class P115Transfer:
         except Exception:  # noqa: BLE001
             return False
 
+    # 目录创建：SDK 层分不清「回执丢失」与「API 明确报错」，同一路径最多对账这么多次
+    MAX_RECONCILE_ATTEMPTS = 3
+
+    def _reconcile_allowed(self, path: str) -> bool:
+        """是否还允许对账重试。
+
+        传输层的「响应丢失」可以靠读目录对账，但 SDK 内部抛出的明确错误
+        （例如非法目录名、权限不足）也会被包成 P115Error，若一律当丢包处理，
+        就会在目录始终不存在时无限重试（退避 30 秒），永远进不了终态。
+        """
+        with self._state_lock:
+            attempts = self.__dict__.setdefault("_reconcile_attempts", {})
+            count = int(attempts.get(path) or 0)
+            if count >= self.MAX_RECONCILE_ATTEMPTS:
+                return False
+            attempts[path] = count + 1
+            return True
+
     def _remember_directory(self, path: str, cid: int):
         with self._state_lock:
             self._dir_cache[path] = int(cid)
             if hasattr(self, "_dir_cache_times"):
                 self._dir_cache_times[path] = time.time()
+            self.__dict__.setdefault("_reconcile_attempts", {}).pop(path, None)
 
     def _cached_directory(self, path: str, refresh: bool = False) -> Optional[int]:
         if refresh:
@@ -660,7 +679,11 @@ class P115Transfer:
             except P115NotFound:
                 raise
             except P115Error as exc:
-                # Transport failure of a re-entrant mkdir: read before retrying.
+                # Transport failure of a re-entrant mkdir: read before retrying,
+                # but only a bounded number of times per path so that a permanent
+                # API error cannot turn into an endless retry loop.
+                if not self._reconcile_allowed(built):
+                    raise
                 cur = self._reconcile_directory(built, exc)
                 continue
             self._require_success(r2, "创建目录")
@@ -1751,7 +1774,8 @@ class P115Transfer:
                 src = posixpath.normpath(src_path.replace("\\", "/"))
                 if getattr(item, "type", "") == "dir":
                     self._forget_directory_tree(src)
-                    self._remember_directory(posixpath.join(dest_dir, name), int(file_id))
+                    if str(file_id).isdigit():      # 兼容无 file_id 的测试替身路径
+                        self._remember_directory(posixpath.join(dest_dir, name), int(file_id))
                 return True, ""
             if transport and transport.local.last_deferred:
                 deferred = transport.local.last_deferred

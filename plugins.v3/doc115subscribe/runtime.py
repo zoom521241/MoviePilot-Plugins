@@ -429,8 +429,12 @@ class TaskRuntime:
                 self._update_live(rec["id"], generation, offline_cursor=exc.state)
             raise
         matcher = getattr(tr, "match_task", None)
-        claimed = {str(x.get("task_file_id")) for x in self._records().list(limit=None, include_hidden=True)
-                   if x.get("id") != rec["id"] and x.get("task_file_id")}
+        # 已被其它批次认领的落盘文件：走 task_file_id 索引列一条 SQL，不再全表反序列化。
+        if hasattr(store, "claimed_task_file_ids"):
+            claimed = store.claimed_task_file_ids(rec["id"])
+        else:
+            claimed = {str(x.get("task_file_id")) for x in store.list(limit=None, include_hidden=True)
+                       if x.get("id") != rec["id"] and x.get("task_file_id")}
         task = next((x for x in result["items"]
                      if str(x.get("file_id") or x.get("fid") or "") not in claimed
                      and (matcher(x, rec.get("url") or "", rec.get("hash") or "") if callable(matcher)
@@ -569,9 +573,6 @@ class TaskRuntime:
         try:
             store, now = self._records(), time.time()
             self._maintain_ledger(now)
-            if self._run_requested_job(generation):
-                self._note_offline_tick("ok", background_job=True)
-                return {"code": 0, "data": {"background_job": True}}
             due = store.due_acquisitions(now, limit=1)
             if not due["rows"]:
                 return {"code": 0, "data": {"pending": 0, "skipped": True}}
@@ -625,6 +626,7 @@ class TaskRuntime:
             self._offline_lock.release()
 
     LEDGER_MAINTENANCE_INTERVAL = 6 * 3600
+    ORG_MATCHER_REVISION = 2          # 整理匹配规则版本：升级后一次性重开「已转存但未判成功」的批次
 
     def _maintain_ledger(self, now=None, force=False):
         """启动时与每 6 小时一次的本地账本清理（坏事件 ack、旧 inbox、证据上限）；失败只记日志。"""
@@ -632,6 +634,18 @@ class TaskRuntime:
         if not force and now < float(getattr(self, "_ledger_maintenance_next", 0) or 0):
             return None
         self._ledger_maintenance_next = now + self.LEDGER_MAINTENANCE_INTERVAL
+        try:
+            store = self._records()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("115文档订阅与查询：账本不可用：" + self._error(exc))
+            return None
+        try:
+            reopened = store.reopen_unverified_organization(self.ORG_MATCHER_REVISION)
+        except Exception as exc:  # noqa: BLE001
+            reopened = 0
+            logger.warning("115文档订阅与查询：整理规则升级重开失败：" + self._error(exc))
+        if reopened:
+            logger.info(f"115文档订阅与查询：整理匹配规则已升级，{reopened} 条已转存任务重新纳入自动核对")
         try:
             result = self._records().maintenance()
         except Exception as exc:  # noqa: BLE001
@@ -667,8 +681,11 @@ class TaskRuntime:
             if item.get("kind") == LINK_115_SHARE:
                 # 磁力/ed2k 的文件可能仍在暂存目录，人工确认会跳过搬运，因此只对分享开放
                 actions.append("confirm_saved")
-        # 「确认已整理」：已转存且整理状态为 unfound（MP 历史记录查不到）时显示，供用户人工标记已整理
-        if acquisition in ("saved", "success") and item.get("organization_status") == "unfound":
+        # 「确认已整理」：已转存但整理未判成功（unfound / partial / unknown / failed）时都显示，
+        # 供用户在 MP 历史记录查不到或只查到一部分时人工收尾；无必要清单时的批次不显示（后端也拒绝）。
+        has_manifest = bool(item.get("manifest_complete")) or any(
+            unit.get("required") for unit in (item.get("manifest") or []))
+        if acquisition in ("saved", "success") and item.get("organization_status") != "success" and has_manifest:
             actions.append("confirm_organized")
         item["allowed_actions"] = list(dict.fromkeys(actions))
         item["hidden"] = bool(item.get("hidden"))
@@ -684,15 +701,20 @@ class TaskRuntime:
         for entry in item.get("organization_evidence") or []:
             for unit_key in entry.get("unit_keys") or []:
                 evidence[unit_key] = entry
+        # 人工「确认已整理」的批次没有逐文件证据，文件列表不应再显示「尚无证据」而与结论自相矛盾。
+        manual_confirm = bool(item.get("organization_confirmed")) and not (item.get("organization_evidence") or [])
         files = []
         for unit in item.get("manifest") or []:
             if not unit.get("required"):
                 continue
             proof = evidence.get(unit.get("unit_key"))
             state = "success" if proof and proof.get("status") is True else "failed" if proof and proof.get("status") is False else "unverified"
+            if manual_confirm and state == "unverified":
+                state = "manual"
             files.append({"id": unit.get("unit_key"), "name": unit.get("name") or PurePosixPath(unit.get("source_path") or "").name,
                           "path": unit.get("source_path"), "status": state,
-                          "message": "MP整理成功" if state == "success" else str(proof.get("errmsg") or "MP整理失败") if state == "failed" else "尚无本批次整理证据"})
+                          "message": "MP整理成功" if state == "success" else "已由用户人工确认入库" if state == "manual"
+                          else str(proof.get("errmsg") or "MP整理失败") if state == "failed" else "尚无本批次整理证据"})
         item["files"] = files
         item["ignored_files"] = [{"name": u.get("name") or PurePosixPath(u.get("source_path") or "").name,
                                   "reason": u["ignored_reason"], "size": u.get("size")}
@@ -708,6 +730,13 @@ class TaskRuntime:
 
     @classmethod
     def _is_active(cls, x):
+        """仍在后台自动处理的任务。
+
+        「需处理」优先：需要用户介入的记录一律不再计入「进行中」，
+        两个清单互斥（否则同一条会同时出现在两个筛选里，且按需处理计数点进去可能为空）。
+        """
+        if cls._needs_attention(x):
+            return False
         return bool(x.get("tracking_enabled", True) and
                     (x.get("acquisition_status") in ("queued", "submitting", "uncertain", "downloading", "awaiting_move", "moving")
                      or x.get("acquisition_status") in ("saved", "success") and x.get("organization_status") not in ("success", "paused", "failed")
@@ -754,9 +783,13 @@ class TaskRuntime:
 
     @classmethod
     def _record_stats(cls, rows) -> Dict[str, Any]:
-        """全部未隐藏记录的统计（不受筛选影响）：电影/电视剧任务数与已整理入库数、进行中与需处理数。"""
+        """全部未隐藏记录的统计（不受筛选影响）：电影/电视剧任务数与已整理入库数、进行中与需处理数。
+
+        带 ``at`` 生成时间：/status 与 /records 都会返回这份统计，前端按时间取较新的一份，
+        避免统计条停在旧快照（显示「进行中 1」却点进去为空）。
+        """
         stats = {"movie": {"total": 0, "organized": 0}, "tv": {"total": 0, "organized": 0},
-                 "total": 0, "organized": 0, "active": 0, "attention": 0}
+                 "total": 0, "organized": 0, "active": 0, "attention": 0, "at": time.time()}
         for row in rows:
             if row.get("hidden"):
                 continue
@@ -1380,6 +1413,27 @@ class TaskRuntime:
     def api_refresh_index(self):
         return self._queue_job("index")
 
+    def run_queued_jobs(self):
+        """后台任务（刷新索引 / 同步订阅）专用 worker。
+
+        这两个任务原先由 2 秒的离线状态机「顺手」同步执行：刷新 23 万条的索引可能持续数分钟，
+        期间离线搬运与落盘确认全部停摆，APScheduler 还会每 2 秒刷一次「实例数超限」警告。
+        现在它们跑在各自的调度线程上，用 _jobs_lock 保证同一时刻只有一个后台任务，
+        离线状态机不再被长任务饿死。
+        """
+        self._ensure_runtime()
+        if not self._enabled:
+            return {"code": 1, "msg": "插件未启用"}
+        if not self._jobs_lock.acquire(blocking=False):
+            return {"code": 0, "data": {"skipped": True}}
+        generation = self._generation
+        try:
+            ran = self._run_requested_job(generation)
+            self._last_job_run = {"at": time.time(), "ran": bool(ran)}
+            return {"code": 0, "data": {"ran": bool(ran)}}
+        finally:
+            self._jobs_lock.release()
+
     def _run_requested_job(self, generation):
         jobs, now = self._job_store(), time.time()
         due = [x for x in jobs.list() if x.get("state") in ("queued", "running") and float(x.get("next_check_at") or 0) <= now]
@@ -1406,6 +1460,10 @@ class TaskRuntime:
                             msg=str(result.get("msg") or "执行失败"), finished_at=done)
                 if failures + 1 >= 5:
                     logger.warning(f"115文档订阅与查询：后台任务 {job['id']} 连续 {failures + 1} 次失败：{result.get('msg')}")
+        else:
+            # 执行期间配置被更新/插件停用：结果已丢弃，但任务状态必须落终态，
+            # 否则 local_jobs.json 会永远停在 running，界面一直显示「运行中」。
+            jobs.update(job["id"], state="done", next_check_at=0, msg="配置已更新，本次执行结果已丢弃", finished_at=time.time())
         return True
 
     def api_directories(self):
@@ -1448,6 +1506,7 @@ class TaskRuntime:
             "mp": mp.diagnostics() if mp else {"state": "未验证"},
             "active_tasks": sum(self._is_tracking(x) for x in store.tracked()),
             "offline": {"last_tick": getattr(self, "_last_offline_tick", None) or {"state": "尚未执行"}},
+            "jobs_worker": getattr(self, "_last_job_run", None) or {"state": "尚未执行"},
             "organization": {"last_tick": getattr(self, "_last_org_tick", None) or {"state": "尚未执行"},
                              "last_event_stats": getattr(self, "_last_event_stats", None),
                              "last_event_error": getattr(self, "_last_event_error", None),

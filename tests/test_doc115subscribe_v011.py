@@ -65,7 +65,8 @@ class V011Base(unittest.TestCase):
         self.plugin = Plugin()
         self.plugin.synthetic_root = Path(self.tmp.name)
         self.plugin.saved_configs = []
-        self.plugin.init_plugin({"enabled": True, "p115_cookie": "SYNTHETIC", "tencent_cookie": "SYNTHETIC"})
+        self.plugin.init_plugin({"enabled": True, "p115_cookie": "SYNTHETIC", "tencent_cookie": "SYNTHETIC",
+                                 "doc_url": "https://docs.qq.com/sheet/SyntheticDocument"})
         self.addCleanup(self.plugin.stop_service)
         self.cloud = SyntheticCloud()
         self.plugin._transfers = lambda: self.cloud
@@ -83,9 +84,12 @@ class V011Base(unittest.TestCase):
             self.plugin.check_offline_tasks()
 
     def histories(self, batch, count=20, failed=()):
+        # 以 evidence_started_at 为基准 +60 秒余量：它才是 history_matches 的时间门槛，
+        # 用 created_ts 会让「提交比排队晚多少」这种调度抖动影响到核对结论。
+        base = (batch.get("evidence_started_at") or batch["created_ts"]) + 60
         return [{"id": i, "title": "Show", "year": "2025", "type": "电视剧", "tmdbid": "900",
                  "src": f"{batch['final_path']}/Season/Show.S01E{i:02}.mkv", "src_storage": "115网盘Plus",
-                 "date": batch["created_ts"] + i, "status": i not in failed} for i in range(1, count + 1)]
+                 "date": base + i, "status": i not in failed} for i in range(1, count + 1)]
 
     def mp_returns(self, entries):
         self.plugin._mp_api_json = Mock(return_value={"success": True, "data": {"list": entries, "total": len(entries)}})
@@ -308,11 +312,25 @@ class ApiContractTests(V011Base):
         self.assertEqual(data["stats"]["movie"], {"total": 2, "organized": 1})
         self.assertEqual(data["stats"]["tv"], {"total": 2, "organized": 1})
         self.assertEqual((data["stats"]["total"], data["stats"]["organized"]), (4, 2))
-        self.assertEqual(data["stats"]["active"], 2)
+        # 「需处理」优先：tv_partial（saved + partial）只计入需处理，不再同时计入进行中
+        self.assertEqual(data["stats"]["active"], 1)
         self.assertEqual(data["stats"]["attention"], 1)
+        self.assertIn("at", data["stats"])          # 统计带生成时间，前端按时间取较新的一份
         self.assertEqual(set(data["jobs"]), {"index", "subscribe"})
         self.assertEqual(data["jobs"]["subscribe"]["state"], "idle")
         self.assertIn("refreshing", data)
+
+    def test_active_and_attention_are_mutually_exclusive(self):
+        """同一条记录不得同时出现在「进行中」和「需处理」两个清单里。"""
+        rows = self.seed()
+        everything = self.plugin._records().list(limit=None, include_hidden=True)
+        active = {x["id"] for x in everything if self.plugin._is_active(x)}
+        attention = {x["id"] for x in everything if self.plugin._needs_attention(x)}
+        self.assertFalse(active & attention, "需处理的记录不得同时计入进行中")
+        self.assertIn(rows["running"]["id"], active)
+        self.assertIn(rows["tv_partial"]["id"], attention)
+        self.assertNotIn(rows["tv_partial"]["id"], active)
+        self.assertNotIn(rows["movie_ok"]["id"], active | attention)
 
     def test_records_filters_query_media_hidden_and_page_clamp(self):
         rows = self.seed()
@@ -416,7 +434,8 @@ class WorkerAndConfigTests(V011Base):
         jobs["doc115-subscribe"]()
         self.plugin.run_subscribe.assert_not_called()
         self.assertEqual(self.plugin.api_status()["data"]["jobs"]["subscribe"]["state"], "queued")
-        self.plugin.check_offline_tasks()
+        # 后台任务由独立的 worker 执行（不再占用 2 秒的离线搬运状态机）
+        jobs["doc115-jobs"]()
         self.plugin.run_subscribe.assert_called_once()
         status = self.plugin.api_status()["data"]["jobs"]["subscribe"]
         self.assertEqual((status["state"], status["msg"]), ("retrying", "MP读取已排队"))

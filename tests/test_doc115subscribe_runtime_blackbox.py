@@ -99,7 +99,8 @@ class RuntimeBlackBox(unittest.TestCase):
         self.plugin = Plugin()
         self.plugin.synthetic_root = Path(self.tmp.name)
         self.plugin.saved_configs = []
-        self.plugin.init_plugin({"enabled": True, "p115_cookie": "SYNTHETIC", "tencent_cookie": "SYNTHETIC"})
+        self.plugin.init_plugin({"enabled": True, "p115_cookie": "SYNTHETIC", "tencent_cookie": "SYNTHETIC",
+                                 "doc_url": "https://docs.qq.com/sheet/SyntheticDocument"})
         self.addCleanup(self.plugin.stop_service)
         self.cloud = SyntheticCloud()
         self.plugin._transfers = lambda: self.cloud
@@ -117,9 +118,12 @@ class RuntimeBlackBox(unittest.TestCase):
             self.plugin.check_offline_tasks()
 
     def histories(self, batch, count=20, *, failed=(), older=False):
+        # 以 evidence_started_at 为基准 +60 秒余量（它才是 history_matches 的时间门槛）：
+        # 用 created_ts 会让「提交比排队晚多少」这种调度抖动影响到核对结论。
+        base = (batch.get("evidence_started_at") or batch["created_ts"]) + (0 if older else 60)
         return [{"id": i, "title": "Show", "year": "2025", "type": "电视剧", "tmdbid": "900",
             "src": f"{batch['final_path']}/Season/Show.S01E{i:02}.mkv", "src_storage": "115网盘Plus",
-            "date": batch["created_ts"] + (-100 if older else i), "status": i not in failed,
+            "date": base + (-100 if older else i), "status": i not in failed,
             "seasons": "S01", "episodes": f"E{i:02}"} for i in range(1, count+1)]
 
     def organize(self, batch, entries):
