@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
-import Config, { U as UI_BUILD } from './__federation_expose_Config-Hkaw7ywc.js';
+import Config, { U as UI_BUILD } from './__federation_expose_Config-CQo8YDB1.js';
 
 const {toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,vModelCheckbox:_vModelCheckbox,withDirectives:_withDirectives$1,createTextVNode:_createTextVNode$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,normalizeClass:_normalizeClass$1,createBlock:_createBlock$1} = await importShared('vue');
 

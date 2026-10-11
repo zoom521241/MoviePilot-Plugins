@@ -1,7 +1,7 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
 
 // 前端构建版本：Page 与 Config 共用；测试会断言它与 ui/package.json、package.v3.json 一致。
-const UI_BUILD = '0.11.2';
+const UI_BUILD = '0.11.3';
 
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;
