@@ -10,6 +10,9 @@ const require = createRequire(new URL('package.json', ui))
 const vue = require('vue')
 // Page / Config 从 src/version.js 导入 UI_BUILD；测试执行器会删掉 import 行，所以在这里注入同一个值
 const UI_BUILD = readFileSync(new URL('src/version.js', ui), 'utf8').match(/export const UI_BUILD = '([^']+)'/)[1]
+// 合成文档地址：设置页默认不再预置任何文档链接，需要它来通过保存前的校验。
+// 不要在这里写真实的腾讯文档 ID。
+const SYNTHETIC_DOC_URL = 'https://docs.qq.com/sheet/SYNTHETIC_DOC_ID'
 
 function component(name, api, options = {}) {
   const source = readFileSync(new URL(`src/components/${name}.vue`, ui), 'utf8')
@@ -18,8 +21,8 @@ function component(name, api, options = {}) {
   const lifecycle = {}
   const helpers = { ...vue, inject: () => options.theme || null, onMounted(fn) { lifecycle.mounted = fn }, onBeforeUnmount(fn) { lifecycle.unmount = fn }, onActivated(fn) { lifecycle.activate = fn }, onDeactivated(fn) { lifecycle.deactivate = fn } }
   const names = name === 'Page'
-    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterSubtitle,filterLink,sortBy,busy,resultVersion,close,startQr,checkQr,qrSessionId,qrImage,records,loadRecords,verifyOne,verifying,needsVerify,tab,recordsFilter,recordsMedia,recordsQuery,recordsPage,recordsTotal,prepareTransfer,confirmTransfer,transferRecord,transferTarget,transferSource,transferOpen,transferQuick,transferNote,msg,msgType,resultFeedback,status,stats,statsItems,applyStatsFilter,hasAction,taskAction,runRecordAction,visibleActions,settingsOpen,visibilityChanged,shouldPoll,specTokens,highlightParts,linkHref,darkTheme,organizationSummary,manifestText,loadSubscriptions,fetchSubscriptions,subscriptions,subscriptionNote,subscriptionCacheEmpty,loadStatus,refreshIndex,runSubscribe,jobBusy,runningJobs,confirmState,answerConfirm,deleteRecord,unhideRecord,clearRecords,bulkAction,selected,selectedIds,toggleAll,isTracking,isCompact,orderedRecords,onSearchKey,changePage,changeRecordsPage'
-    : 'load,save,cfg,secrets,msg,msgType,close,loadDirectories,directoryOptions,chooseDirectory,directories,darkTheme,rules,validateAll,tencentHint'
+    ? 'doSearch,searchPage,transfer,keyword,searchedKeyword,results,total,page,filterType,filterQuality,filterSubtitle,filterLink,sortBy,busy,resultVersion,close,startQr,checkQr,qrSessionId,qrImage,records,loadRecords,verifyOne,verifying,needsVerify,tab,recordsFilter,recordsMedia,recordsQuery,recordsPage,recordsTotal,prepareTransfer,confirmTransfer,transferRecord,transferTarget,transferSource,transferOpen,transferQuick,transferNote,msg,msgType,resultFeedback,status,stats,statsItems,applyStatsFilter,hasAction,taskAction,runRecordAction,visibleActions,settingsOpen,visibilityChanged,shouldPoll,specTokens,highlightParts,linkHref,darkTheme,organizationSummary,manifestText,loadSubscriptions,fetchSubscriptions,subscriptions,subscriptionNote,subscriptionCacheEmpty,loadStatus,refreshIndex,runSubscribe,jobBusy,runningJobs,confirmState,answerConfirm,deleteRecord,unhideRecord,clearRecords,bulkAction,selected,selectedIds,toggleAll,isTracking,isCompact,orderedRecords,onSearchKey,changePage,changeRecordsPage,recordMedia,mediaTypeName,statActive'
+    : 'load,save,cfg,secrets,msg,msgType,close,loadDirectories,directoryOptions,chooseDirectory,directories,darkTheme,rules,validateAll,tencentHint,directoriesPending'
   const setup = new Function('helpers', 'suppliedProps', 'suppliedEmit', 'document', 'setTimeout', 'clearTimeout', 'window', 'localStorage', `
     const { computed, inject, reactive, ref, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } = helpers;
     const UI_BUILD = ${JSON.stringify(UI_BUILD)};
@@ -44,6 +47,8 @@ const deferred = () => {
 test('small video threshold is explicit and saved as an integer including disable zero', async () => {
   const calls = []
   const config = component('Config', { post: async (path, payload) => { calls.push(payload); return { code: 0 } } })
+  // 设置页不再预置任何文档地址（与后端空默认值对齐），保存前必须自己填一个合法链接
+  config.cfg.doc_url = SYNTHETIC_DOC_URL
   assert.equal(config.cfg.min_media_size_mb, 10)
   config.cfg.min_media_size_mb = '5'
   await config.save()
@@ -56,6 +61,7 @@ test('small video threshold is explicit and saved as an integer including disabl
 test('invalid or blank small video threshold never sends a config write', async () => {
   const calls = []
   const config = component('Config', { post: async (path, payload) => { calls.push(payload); return { code: 0 } } })
+  config.cfg.doc_url = SYNTHETIC_DOC_URL
   for (const invalid of ['', null, -1, 1.5, 'abc', 1025]) {
     config.cfg.min_media_size_mb = invalid
     await config.save()
@@ -170,7 +176,7 @@ test('same result cannot submit twice while transfer is outstanding', async () =
 
 test('configuration masks legacy plaintext responses and does not report rejected save as success', async () => {
   const config = component('Config', {
-    get: async () => ({ code: 0, data: { tencent_cookie: 'synthetic-secret', p115_cookie: 'other-secret' } }),
+    get: async () => ({ code: 0, data: { doc_url: SYNTHETIC_DOC_URL, tencent_cookie: 'synthetic-secret', p115_cookie: 'other-secret' } }),
     post: async () => ({ code: 1, msg: 'invalid cron' }),
   })
   await config.load()
@@ -199,7 +205,7 @@ test('QR start forces a new session and accepts immediate confirmed response', a
 test('successful config save cannot ask the host to overwrite stored secrets', async () => {
   let payload
   const config = component('Config', {
-    get: async () => ({ code: 0, data: { tencent_cookie_ready: true, p115_cookie_ready: false, p115_ready: true } }),
+    get: async () => ({ code: 0, data: { doc_url: SYNTHETIC_DOC_URL, tencent_cookie_ready: true, p115_cookie_ready: false, p115_ready: true } }),
     post: async (path, sent) => { payload = sent; return { code: 0 } },
   })
   await config.load()
@@ -589,6 +595,54 @@ test('global stats come from status, load on mount and stat chips switch the tas
   page.lifecycle.unmount()
 })
 
+test('record badges reuse the backend attribution and never stop at the unknown placeholder', () => {
+  const page = component('Page', { get: async () => ({ code: 0, data: {} }), post: async () => ({ code: 0, data: {} }) })
+  assert.equal(page.recordMedia({ type: 'unknown', target_type: 'movie' }), 'movie', 'unknown must fall through to the chosen directory')
+  assert.equal(page.recordMedia({ type: 'unknown', target_type: 'tv' }), 'tv')
+  assert.equal(page.recordMedia({ mp_media_type: 'tv', type: 'movie' }), 'tv', 'MP authoritative type outranks the document')
+  assert.equal(page.recordMedia({ type: 'unknown' }), 'unknown', 'still unclassified reads as unknown, not as a type')
+  assert.equal(page.mediaTypeName(page.recordMedia({ type: 'unknown' })), '类型待确认')
+  page.lifecycle.unmount?.()
+})
+
+test('unclassified tasks get their own stat chip and it filters the task list by unknown', async () => {
+  const page = component('Page', {
+    get: async path => path.endsWith('/status')
+      ? { code: 0, data: { stats: { movie: { total: 2, organized: 2 }, tv: { total: 8, organized: 8 }, total: 15, organized: 10, active: 0, attention: 0, unclassified: 5 } } }
+      : { code: 0, data: { records: [], total: 0, page: 1, stats: { total: 0 } } },
+    post: async () => ({ code: 0, data: {} }),
+  })
+  await page.lifecycle.mounted(); await flush()
+  assert.equal(page.stats.value.unclassified, 5)
+  assert.deepEqual(page.statsItems.value.map(i => i.key), ['movie', 'tv', 'completed', 'active', 'needs_attention', 'unclassified', 'all'])
+  page.applyStatsFilter('unclassified')
+  assert.equal(page.tab.value, 'records')
+  assert.equal(page.recordsMedia.value, 'unknown')
+  assert.equal(page.recordsFilter.value, 'all')
+  assert.equal(page.statActive('unclassified'), true)
+  page.lifecycle.unmount()
+})
+
+test('settings say the MP directory snapshot is still loading instead of showing a bare empty list', async () => {
+  const timers = []
+  const dirs = [
+    { code: 0, data: { records: [], cached_at: 0, error: '' } },
+    { code: 0, data: { records: [{ name: '115电影', storage: '115网盘Plus', download_path: '/115-影视/115-downloads/电影/', media_type: 'movie', path: '/115-影视/115-downloads/电影/' }], cached_at: 1700000000 } },
+  ]
+  const config = component('Config', {
+    get: async path => (path.endsWith('/directories') ? dirs.shift() : { code: 0, data: {} }),
+    post: async () => ({ code: 0, data: {} }),
+  }, { setTimeout: (fn, delay) => { timers.push([fn, delay]); return timers.length }, clearTimeout: () => {} })
+  await config.lifecycle.mounted(); await flush()
+  assert.equal(config.directoriesPending.value, true, 'an empty first snapshot must not look like "no directories"')
+  assert.equal(timers.length, 1, 'exactly one retry is scheduled')
+  assert.equal(timers[0][1], 22000, 'retry after the MP tick window')
+  await timers[0][0](); await flush()
+  assert.equal(config.directoriesPending.value, false)
+  assert.equal(config.directories.value.length, 1)
+  config.lifecycle.unmount()
+})
+
 test('hiding uses the shared dialog, is refused for tracked tasks and unhide goes through records_bulk', async () => {
   const posts = []
   const page = component('Page', { post: async (path, payload) => { posts.push([path.split('/').pop(), payload]); return { code: 0, data: { done: 1, skipped: 0 } } }, get: async () => ({ code: 0, data: { records: [], total: 0, page: 1 } }) })
@@ -821,10 +875,11 @@ test('records order puts attention and active tasks first; finished tasks become
 test('config validates fields live and refuses to save invalid values', async () => {
   const posts = []
   const config = component('Config', { post: async (path, payload) => { posts.push(payload); return { code: 0 } } })
+  config.cfg.doc_url = SYNTHETIC_DOC_URL
   const { rules } = config
   assert.notEqual(rules.docUrl(''), true)
   assert.notEqual(rules.docUrl('https://example.com/sheet/abc'), true)
-  assert.equal(rules.docUrl('https://docs.qq.com/sheet/DZWtEeFFGZW9XUkJo'), true)
+  assert.equal(rules.docUrl(SYNTHETIC_DOC_URL), true)
   assert.equal(rules.cron('0 6 * * *'), true)
   assert.equal(rules.cron('*/15 1-5 * * mon-fri'), true)
   assert.notEqual(rules.cron('0 6 * *'), true)
@@ -844,7 +899,8 @@ test('config validates fields live and refuses to save invalid values', async ()
 })
 
 test('config save refills normalised values returned by the backend', async () => {
-  const config = component('Config', { post: async () => ({ code: 0, msg: '配置已保存', data: { movie_path: '/115/电影', tv_path: '/115/电视剧', magnet_staging_path: '/115/暂存', tencent_cookie: '', tencent_cookie_ready: true, p115_cookie_ready: false } }) })
+  const config = component('Config', { post: async () => ({ code: 0, msg: '配置已保存', data: { doc_url: SYNTHETIC_DOC_URL, movie_path: '/115/电影', tv_path: '/115/电视剧', magnet_staging_path: '/115/暂存', tencent_cookie: '', tencent_cookie_ready: true, p115_cookie_ready: false } }) })
+  config.cfg.doc_url = SYNTHETIC_DOC_URL
   config.cfg.movie_path = '/115/电影/'
   config.cfg.tv_path = '/115/电视剧'
   config.cfg.magnet_staging_path = '/115/暂存'

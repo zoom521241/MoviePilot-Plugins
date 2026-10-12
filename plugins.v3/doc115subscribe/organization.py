@@ -86,9 +86,72 @@ def _media_type(value: Any) -> str:
     return "" if mapped in ("unknown", "未知", "mediatype.unknown", "none") else mapped
 
 
+_PATH_MEDIA = (("电视剧", "tv"), ("剧集", "tv"), ("电视节目", "tv"), ("电影", "movie"))
+
+
+def media_type_from_path(value: Any) -> str:
+    """从 MP 整理记录的目标路径推断类型（``/…/电影/…`` 或 ``/…/电视剧/…``）。
+
+    「电视剧」先于「电影」判断：不依赖分词，只要求 ``/类型词`` 出现在路径里，
+    所以 ``/115-links/电视剧/欧美剧/…`` 不会因为「电影」二字被判成电影。
+    """
+    raw = unicodedata.normalize("NFKC", str(value or ""))
+    for token, kind in _PATH_MEDIA:
+        if "/" + token in raw:
+            return kind
+    return ""
+
+
+def media_bucket(item: Any) -> str:
+    """把一个批次行归一化为 ``'movie'`` / ``'tv'`` / ``''``（空串＝类型待确认）。
+
+    这是全插件**唯一**的媒体类型判定口径：统计条、任务列表筛选、SQLite 派生列
+    与身份匹配全部走它，避免同一条规则多处实现后互相打架。回落顺序：
+
+    1. ``mp_media_type``：MoviePilot 整理记录给出的权威类型（最可信）；
+    2. ``type`` / ``media_type``：文档索引当时判定出来的类型；
+    3. ``target_type``：用户提交时选择的下载目录。
+
+    ⚠️ ``unknown`` / ``未知`` 是**占位符而不是一种类型**：它必须被当作「没有」
+    继续往后回落。曾经的实现写成 ``type or target_type``，于是 ``type='unknown'``
+    这个真值把后面的 ``target_type='movie'`` 整个挡住，电影/电视剧两边都不统计。
+    """
+    if not isinstance(item, dict):
+        return ""
+    for field in ("mp_media_type", "type", "media_type", "target_type"):
+        kind = _media_type(item.get(field))
+        if kind in ("movie", "tv"):
+            return kind
+    return ""
+
+
+def observed_media_type(entries: Iterable[Dict[str, Any]]) -> str:
+    """从 MP 整理记录里提取**权威**媒体类型；没有可判定证据时返回空串。
+
+    只认 ``status is True`` 的成功记录——失败记录不能作为类型依据（例如 MP 会把
+    附带的推广小文件单独判成「未知」）。优先用记录自带的 ``type``，缺失时退到
+    ``dest`` 目标路径。证据互相矛盾（两种类型票数相同）时返回空串，宁可回落到
+    文档/目录判断，也不写一个可能错的「权威」值。
+    """
+    votes: Dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("status") is not True:
+            continue
+        kind = _media_type(entry.get("type") or entry.get("media_type")) or media_type_from_path(entry.get("dest"))
+        if kind in ("movie", "tv"):
+            votes[kind] = votes.get(kind, 0) + 1
+    if not votes:
+        return ""
+    if len(votes) == 1:
+        return next(iter(votes))
+    top = max(votes.values())
+    winners = [kind for kind, count in votes.items() if count == top]
+    return winners[0] if len(winners) == 1 else ""
+
+
 def _batch_type(batch: Dict[str, Any]) -> str:
-    """批次类型：文档给出的类型优先；文档未标类型时用用户选的保存目录类型（target_type）。"""
-    return _media_type(batch.get("type") or batch.get("media_type")) or _media_type(batch.get("target_type"))
+    """批次类型：与 :func:`media_bucket` 同一口径（MP 权威 > 文档 > 用户选的目录）。"""
+    return media_bucket(batch)
 
 
 def _season(value: Dict[str, Any]) -> Optional[int]:

@@ -1,7 +1,7 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
 
 // 前端构建版本：Page 与 Config 共用；测试会断言它与 ui/package.json、package.v3.json 一致。
-const UI_BUILD = '0.11.4';
+const UI_BUILD = '0.11.5';
 
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;
@@ -11,15 +11,19 @@ const _export_sfc = (sfc, props) => {
   return target;
 };
 
-const {toDisplayString:_toDisplayString,createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,createVNode:_createVNode,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,normalizeClass:_normalizeClass,renderSlot:_renderSlot,withModifiers:_withModifiers,unref:_unref,Fragment:_Fragment,createElementBlock:_createElementBlock} = await importShared('vue');
+const {toDisplayString:_toDisplayString,createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,createVNode:_createVNode,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,normalizeClass:_normalizeClass,renderSlot:_renderSlot,createElementBlock:_createElementBlock,withModifiers:_withModifiers,unref:_unref,Fragment:_Fragment} = await importShared('vue');
 
 
 const _hoisted_1 = { class: "doc115-config-switches" };
 const _hoisted_2 = { class: "doc115-muted" };
 const _hoisted_3 = { class: "doc115-muted" };
-const _hoisted_4 = { class: "doc115-muted doc115-config-version" };
+const _hoisted_4 = {
+  key: 0,
+  class: "doc115-muted"
+};
+const _hoisted_5 = { class: "doc115-muted doc115-config-version" };
 
-const {computed,inject,onMounted,reactive,ref} = await importShared('vue');
+const {computed,inject,onBeforeUnmount,onMounted,reactive,ref} = await importShared('vue');
 
 
 const _sfc_main = {
@@ -41,7 +45,9 @@ const darkTheme = computed(() => !!(props.model?.dark ?? hostTheme?.current?.val
 
 const DEFAULTS = {
   enabled: false,
-  doc_url: 'https://docs.qq.com/sheet/DZWtEeFFGZW9XUkJo',
+  // 与后端 DEFAULTS 保持一致：不预置任何文档地址（后端注释明确「避免默认去读仓库作者的个人文档」）。
+  // 这里曾硬编码作者的个人文档链接，get_config 失败时会把它填进表单。
+  doc_url: '',
   tencent_cookie: '',
   p115_cookie: '',
   clear_tencent_cookie: false,
@@ -70,6 +76,8 @@ const openPanels = ref(['tencent', 'paths']);
 const fetchedVersion = ref('');
 const shownBackendVersion = computed(() => props.backendVersion || fetchedVersion.value);
 const directories = ref([]);
+const directoriesLoaded = ref(false);
+const directoriesPending = computed(() => !directoriesLoaded.value);
 const selectedMovieDirectory = ref(''), selectedTvDirectory = ref('');
 const movieDirectories = computed(() => directoryOptions('movie'));
 const tvDirectories = computed(() => directoryOptions('tv'));
@@ -98,9 +106,24 @@ function directoryOptions(type) {
   return directories.value.filter(d => (d.media_type === type || !d.media_type || d.media_type === 'all') && ['115', 'u115', '115网盘Plus'].includes(d.storage)).map(d => ({ title: `${d.name || d.storage} · ${d.path}${d.monitored === true ? ' · 监控已启用' : d.monitored === false ? ' · 未开启监控' : ''}`, value: d.path }))
 }
 function chooseDirectory(type, path) { if (directoryOptions(type).some(d => d.value === path)) cfg[type === 'tv' ? 'tv_path' : 'movie_path'] = path; }
+let directoriesTimer = null;
 async function loadDirectories() {
-  try { const res = unwrap(await props.api.get('plugin/Doc115Subscribe/directories')); const data = res.data || {}; if (res.code === 0 && Array.isArray(data.directories || data.records)) directories.value = data.directories || data.records; }
-  catch (_) { /* 旧后端没有目录接口时保留手填路径 */ }
+  try {
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/directories'));
+    const data = res.data || {};
+    if (res.code === 0 && Array.isArray(data.directories || data.records)) {
+      const rows = data.directories || data.records;
+      directories.value = rows;
+      // 后端是「先记录请求、下一次整理核对 tick 才抓快照」，所以首屏必然拿到空列表：
+      // 只有快照已就绪（cached_at>0）或确实没有目录时才停止「加载中」提示，否则 22 秒后重取一次。
+      directoriesLoaded.value = rows.length > 0 || Number(data.cached_at || 0) > 0;
+      if (!directoriesLoaded.value) directoriesTimer = setTimeout(loadDirectories, 22000);
+    } else {
+      directoriesLoaded.value = true;
+    }
+  } catch (_) {
+    directoriesLoaded.value = true;   // 旧后端没有目录接口时保留手填路径
+  }
 }
 async function loadVersion() {
   if (props.embedded) return
@@ -189,6 +212,7 @@ function unwrap(res) {
 }
 
 onMounted(() => { load(); loadDirectories(); loadVersion(); });
+onBeforeUnmount(() => { if (directoriesTimer) { clearTimeout(directoriesTimer); directoriesTimer = null; } });
 
 return (_ctx, _cache) => {
   const _component_v_spacer = _resolveComponent("v-spacer");
@@ -370,9 +394,12 @@ return (_ctx, _cache) => {
                       _createVNode(_component_v_expansion_panel_text, null, {
                         default: _withCtx(() => [
                           _cache[26] || (_cache[26] = _createElementVNode("p", { class: "doc115-muted" }, "下载目录应对应 MP 已配置的 115 存储目录。本插件不修改 MP 监控或整理配置；未核实监控时不能保证保存后会自动整理。", -1)),
+                          (directoriesPending.value)
+                            ? (_openBlock(), _createElementBlock("p", _hoisted_4, "尚未取得 MP 目录快照：首次打开约 20 秒后会加载下拉列表，期间可以直接手填下面的路径。"))
+                            : _createCommentVNode("", true),
                           (movieDirectories.value.length)
                             ? (_openBlock(), _createBlock(_component_v_select, {
-                                key: 0,
+                                key: 1,
                                 modelValue: selectedMovieDirectory.value,
                                 "onUpdate:modelValue": [
                                   _cache[5] || (_cache[5] = $event => ((selectedMovieDirectory).value = $event)),
@@ -388,7 +415,7 @@ return (_ctx, _cache) => {
                             : _createCommentVNode("", true),
                           (tvDirectories.value.length)
                             ? (_openBlock(), _createBlock(_component_v_select, {
-                                key: 1,
+                                key: 2,
                                 modelValue: selectedTvDirectory.value,
                                 "onUpdate:modelValue": [
                                   _cache[7] || (_cache[7] = $event => ((selectedTvDirectory).value = $event)),
@@ -584,7 +611,7 @@ return (_ctx, _cache) => {
             ]),
             _: 3
           }, 512),
-          _createElementVNode("p", _hoisted_4, [
+          _createElementVNode("p", _hoisted_5, [
             _createTextVNode("前端 v" + _toDisplayString(_unref(UI_BUILD)), 1),
             (shownBackendVersion.value)
               ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
@@ -642,6 +669,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-3d9ae519"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-2a56f2ba"]]);
 
 export { UI_BUILD as U, Config as default };

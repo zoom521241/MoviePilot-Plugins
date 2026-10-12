@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import inspect
 import json
 import re
 import threading
@@ -19,7 +18,6 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas.types import MediaType
 
 from . import doc_parser, subscribe_sync
 from .runtime import TaskRuntime
@@ -48,7 +46,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.11.4"
+    plugin_version = "0.11.5"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -108,7 +106,6 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                 self._generation = 0
                 self._tr = None
                 self._tr_cookie = ""
-                self._mt_cache = {}
                 self._qr_img = b""
                 self._qr_ts = 0.0
                 self._last_refresh = {}
@@ -170,7 +167,6 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
             for key, val in conf.items():
                 setattr(self, "_" + key, val)
             self._tr, self._tr_cookie = None, ""
-            self._mt_cache = {}
             self._mp_instance = None
             self._subscriptions_cache = None
             self._subscriptions_cursor = None
@@ -328,35 +324,6 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
         if self._index is None:
             self._load_index()
         return self._index
-
-    def resolve_media_type(self, rec):
-        explicit = rec.get("tmdb_type") or rec.get("media_type")
-        hint = explicit if explicit in ("movie", "tv") else doc_parser.media_type_of(rec.get("sheet", ""), rec.get("title", ""))
-        tmdbid = str(rec.get("tmdbid") or "")
-        if not tmdbid.isdigit() or hint not in ("movie", "tv"):
-            return hint
-        key = ("themoviedb", tmdbid, hint)
-        if key in self._mt_cache:
-            return self._mt_cache[key]
-        try:
-            from app.chain.media import MediaChain
-            chain = MediaChain()
-            params = inspect.signature(chain.recognize_media).parameters
-            mtype = MediaType.MOVIE if hint == "movie" else MediaType.TV
-            if "media_id" in params:
-                from app.schemas.types import MediaSource
-                media = chain.recognize_media(media_source=MediaSource.TMDB, media_id=tmdbid, mtype=mtype)
-            elif "tmdbid" in params:
-                media = chain.recognize_media(tmdbid=int(tmdbid), mtype=mtype)
-            else:
-                return hint
-            if media and media.type in (MediaType.MOVIE, MediaType.TV):
-                result = "movie" if media.type == MediaType.MOVIE else "tv"
-                self._mt_cache[key] = result
-                return result
-        except Exception as exc:
-            logger.debug(f"115文档：媒体类型识别失败：{self._error(exc)}")
-        return hint
 
     def refresh_index(self):
         self._ensure_runtime()

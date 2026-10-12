@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
-import Config, { U as UI_BUILD } from './__federation_expose_Config-C43jFu1d.js';
+import Config, { U as UI_BUILD } from './__federation_expose_Config-Ml6ylt0_.js';
 
 const {toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,vModelCheckbox:_vModelCheckbox,withDirectives:_withDirectives$1,createTextVNode:_createTextVNode$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,normalizeClass:_normalizeClass$1,createBlock:_createBlock$1} = await importShared('vue');
 
@@ -361,7 +361,7 @@ const msg = ref(''), msgType = ref('info');
 const busy = reactive({ refresh: false, qr: false, search: false, subscribe: false, check: false, records: false, preview: false, diagnostics: false, bulk: false });
 const qrImage = ref(''), qrTip = ref('等待扫码'), qrSessionId = ref('');
 const settingsOpen = ref(false), diagnostics = ref(null);
-const emptyStats = () => ({ movie: { total: 0, organized: 0 }, tv: { total: 0, organized: 0 }, total: 0, organized: 0 });
+const emptyStats = () => ({ movie: { total: 0, organized: 0 }, tv: { total: 0, organized: 0 }, total: 0, organized: 0, unclassified: 0 });
 const recordsStats = ref(null);
 const jump = reactive({ search: '', records: '' });
 const keyword = ref(''), results = ref([]), searched = ref(false), searchedKeyword = ref(''), total = ref(0), resultVersion = ref('');
@@ -385,13 +385,13 @@ const watchedJobs = new Set(), lastRetryNotice = {};
 
 const searchFilterGroups = [
   { key: 'type', label: '类型', options: [{ value: 'all', label: '全部' }, { value: 'movie', label: '电影' }, { value: 'tv', label: '电视剧' }] },
-  { key: 'quality', label: '画质', options: [{ value: 'all', label: '不限' }, { value: '4k', label: '4K' }, { value: '1080p', label: '1080P' }] },
+  { key: 'quality', label: '画质', options: [{ value: 'all', label: '不限' }, { value: '4k', label: '4K' }, { value: '4k_cn', label: '4K 中字' }, { value: '1080p', label: '1080P' }] },
   { key: 'subtitle', label: '字幕', options: [{ value: 'all', label: '不限' }, { value: 'cn', label: '中文字幕 / 国语' }] },
   { key: 'link', label: '链接', options: [{ value: 'all', label: '不限' }, { value: 'share', label: '115分享' }, { value: 'magnet', label: '磁力' }, { value: 'ed2k', label: 'ed2k' }, { value: 'doc', label: '仅文档' }] },
 ];
 const sortOptions = [{ title: '相关度', value: 'relevance' }, { title: '年份：新 → 旧', value: 'year_desc' }, { title: '年份：旧 → 新', value: 'year_asc' }, { title: '画质优先', value: 'quality' }];
 const recordFilterOptions = [{ value: 'all', label: '全部' }, { value: 'active', label: '进行中' }, { value: 'needs_attention', label: '需处理' }, { value: 'completed', label: '已入库' }, { value: 'hidden', label: '已隐藏' }];
-const mediaOptions = [{ value: 'all', label: '全部' }, { value: 'movie', label: '电影' }, { value: 'tv', label: '电视剧' }];
+const mediaOptions = [{ value: 'all', label: '全部' }, { value: 'movie', label: '电影' }, { value: 'tv', label: '电视剧' }, { value: 'unknown', label: '类型待确认' }];
 const targetOptions = [{ title: '电影目录', value: 'movie' }, { title: '电视剧目录', value: 'tv' }];
 const ACTIONS = {
   reconcile: { label: '核对转存结果', primary: true },
@@ -425,6 +425,8 @@ const statsItems = computed(() => {
   ];
   if (s.active != null) items.push({ key: 'active', label: '进行中', value: s.active, color: 'doc115-blue' });
   if (s.attention != null) items.push({ key: 'needs_attention', label: '需处理', value: s.attention, color: s.attention ? 'doc115-red' : 'doc115-neutral' });
+  // 类型仍无法归属的记录必须显式占一格：否则它们只在「全部任务」里，用户只能靠总数对不上自己猜
+  if (s.unclassified) items.push({ key: 'unclassified', label: '类型待确认', value: s.unclassified, color: 'doc115-amber' });
   items.push({ key: 'all', label: '全部任务', value: s.total || 0, color: 'doc115-neutral' });
   return items
 });
@@ -541,7 +543,17 @@ function progressValue(r) { return Math.max(0, Math.min(100, Number(r.progress) 
 function hasAction(r, action) { return Array.isArray(r?.allowed_actions) && r.allowed_actions.some(a => (typeof a === 'string' ? a : a.action || a.name) === action) }
 function needsVerify(r) { return Array.isArray(r.allowed_actions) ? hasAction(r, 'verify') : !r.organization_confirmed && r.status !== 'failed' }
 function visibleActions(r) { return Object.keys(ACTIONS).filter(action => hasAction(r, action)).map(action => ({ action, ...ACTIONS[action] })) }
-function recordMedia(r) { const kind = String(r.media_type || r.type || r.target_type || '').toLowerCase(); return ['tv', '电视剧', '剧集'].includes(kind) ? 'tv' : ['movie', '电影'].includes(kind) ? 'movie' : kind }
+// 与后端 organization.media_bucket 同一口径：mp_media_type > type > media_type > target_type。
+// 'unknown' / '未知' 是占位符而不是一种类型，必须当作「没有」继续回落——否则它会挡住
+// 后面的 target_type，出现「统计条已算作电影、卡片却写类型待确认」的自相矛盾。
+function recordMedia(r) {
+  for (const raw of [r?.mp_media_type, r?.type, r?.media_type, r?.target_type]) {
+    const kind = String(raw || '').trim().toLowerCase();
+    if (['tv', '电视剧', '剧集'].includes(kind)) return 'tv'
+    if (['movie', '电影'].includes(kind)) return 'movie'
+  }
+  return 'unknown'
+}
 function needsAttention(r) { return !!(r.query_error || ['partial', 'failed', 'paused', 'unfound'].includes(organizationState(r)) || ['uncertain', 'failed'].includes(acquisitionState(r))) }
 // 「需处理」优先：需要用户介入的记录不再算进行中，两个清单互斥（与后端 _is_active/_needs_attention 一致）
 function isActiveTask(r) { return !needsAttention(r) && r.tracking_enabled !== false && !['cancelled', 'stopped', 'paused'].includes(acquisitionState(r)) && ['submitting', 'submitted', 'uncertain', 'downloading', 'waiting', 'awaiting_move', 'moving', 'queued'].includes(acquisitionState(r)) }
@@ -705,7 +717,7 @@ async function runRecordAction(r, action) {
 }
 function changeRecordsPage(value) { const target = Math.min(Math.max(1, Number(value) || 1), recordsPageCount.value); if (target === recordsPage.value && !busy.records) return; recordsPage.value = target; restartRecords(); }
 function applyStatsFilter(key) {
-  const media = key === 'movie' || key === 'tv' ? key : 'all';
+  const media = key === 'movie' || key === 'tv' ? key : key === 'unclassified' ? 'unknown' : 'all';
   const filter = ['completed', 'active', 'needs_attention'].includes(key) ? key : 'all';
   recordsMedia.value = media; recordsFilter.value = filter;
   tab.value = 'records';
@@ -713,6 +725,7 @@ function applyStatsFilter(key) {
 function statActive(key) {
   if (tab.value !== 'records') return false
   if (key === 'movie' || key === 'tv') return recordsMedia.value === key && recordsFilter.value === 'all'
+  if (key === 'unclassified') return recordsMedia.value === 'unknown' && recordsFilter.value === 'all'
   if (key === 'all') return recordsMedia.value === 'all' && recordsFilter.value === 'all'
   return recordsFilter.value === key && recordsMedia.value === 'all'
 }

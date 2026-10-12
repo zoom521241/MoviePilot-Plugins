@@ -36,6 +36,7 @@
           <v-expansion-panel-title>保存目录</v-expansion-panel-title>
           <v-expansion-panel-text>
             <p class="doc115-muted">下载目录应对应 MP 已配置的 115 存储目录。本插件不修改 MP 监控或整理配置；未核实监控时不能保证保存后会自动整理。</p>
+            <p v-if="directoriesPending" class="doc115-muted">尚未取得 MP 目录快照：首次打开约 20 秒后会加载下拉列表，期间可以直接手填下面的路径。</p>
             <v-select v-if="movieDirectories.length" v-model="selectedMovieDirectory" :items="movieDirectories" label="选择已缓存的 MP 电影下载目录" variant="outlined" density="comfortable" hide-details class="mb-3" @update:model-value="chooseDirectory('movie', $event)" />
             <v-select v-if="tvDirectories.length" v-model="selectedTvDirectory" :items="tvDirectories" label="选择已缓存的 MP 电视剧下载目录" variant="outlined" density="comfortable" hide-details class="mb-3" @update:model-value="chooseDirectory('tv', $event)" />
             <v-row dense>
@@ -81,7 +82,7 @@
 </template>
 
 <script setup>
-import { computed, inject, onMounted, reactive, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { UI_BUILD } from '../version.js'
 import '../styles/doc115.css'
 
@@ -98,7 +99,9 @@ const darkTheme = computed(() => !!(props.model?.dark ?? hostTheme?.current?.val
 
 const DEFAULTS = {
   enabled: false,
-  doc_url: 'https://docs.qq.com/sheet/DZWtEeFFGZW9XUkJo',
+  // 与后端 DEFAULTS 保持一致：不预置任何文档地址（后端注释明确「避免默认去读仓库作者的个人文档」）。
+  // 这里曾硬编码作者的个人文档链接，get_config 失败时会把它填进表单。
+  doc_url: '',
   tencent_cookie: '',
   p115_cookie: '',
   clear_tencent_cookie: false,
@@ -127,6 +130,8 @@ const openPanels = ref(['tencent', 'paths'])
 const fetchedVersion = ref('')
 const shownBackendVersion = computed(() => props.backendVersion || fetchedVersion.value)
 const directories = ref([])
+const directoriesLoaded = ref(false)
+const directoriesPending = computed(() => !directoriesLoaded.value)
 const selectedMovieDirectory = ref(''), selectedTvDirectory = ref('')
 const movieDirectories = computed(() => directoryOptions('movie'))
 const tvDirectories = computed(() => directoryOptions('tv'))
@@ -155,9 +160,24 @@ function directoryOptions(type) {
   return directories.value.filter(d => (d.media_type === type || !d.media_type || d.media_type === 'all') && ['115', 'u115', '115网盘Plus'].includes(d.storage)).map(d => ({ title: `${d.name || d.storage} · ${d.path}${d.monitored === true ? ' · 监控已启用' : d.monitored === false ? ' · 未开启监控' : ''}`, value: d.path }))
 }
 function chooseDirectory(type, path) { if (directoryOptions(type).some(d => d.value === path)) cfg[type === 'tv' ? 'tv_path' : 'movie_path'] = path }
+let directoriesTimer = null
 async function loadDirectories() {
-  try { const res = unwrap(await props.api.get('plugin/Doc115Subscribe/directories')); const data = res.data || {}; if (res.code === 0 && Array.isArray(data.directories || data.records)) directories.value = data.directories || data.records }
-  catch (_) { /* 旧后端没有目录接口时保留手填路径 */ }
+  try {
+    const res = unwrap(await props.api.get('plugin/Doc115Subscribe/directories'))
+    const data = res.data || {}
+    if (res.code === 0 && Array.isArray(data.directories || data.records)) {
+      const rows = data.directories || data.records
+      directories.value = rows
+      // 后端是「先记录请求、下一次整理核对 tick 才抓快照」，所以首屏必然拿到空列表：
+      // 只有快照已就绪（cached_at>0）或确实没有目录时才停止「加载中」提示，否则 22 秒后重取一次。
+      directoriesLoaded.value = rows.length > 0 || Number(data.cached_at || 0) > 0
+      if (!directoriesLoaded.value) directoriesTimer = setTimeout(loadDirectories, 22000)
+    } else {
+      directoriesLoaded.value = true
+    }
+  } catch (_) {
+    directoriesLoaded.value = true   // 旧后端没有目录接口时保留手填路径
+  }
 }
 async function loadVersion() {
   if (props.embedded) return
@@ -246,6 +266,7 @@ function unwrap(res) {
 }
 
 onMounted(() => { load(); loadDirectories(); loadVersion() })
+onBeforeUnmount(() => { if (directoriesTimer) { clearTimeout(directoriesTimer); directoriesTimer = null } })
 </script>
 
 <style scoped>

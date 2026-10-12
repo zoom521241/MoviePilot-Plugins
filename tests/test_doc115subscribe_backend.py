@@ -66,14 +66,6 @@ class MediaSource(enum.Enum):
     TMDB = "themoviedb"
 
 
-class FakeMediaChain:
-    calls = []
-
-    def recognize_media(self, media_source, media_id, mtype):
-        self.__class__.calls.append((media_source, media_id, mtype))
-        return types.SimpleNamespace(type=mtype)
-
-
 def module(name, **members):
     result = types.ModuleType(name)
     result.__dict__.update(members)
@@ -90,7 +82,6 @@ STUBS.update({
     "app.log": module("app.log", logger=Mock()),
     "app.plugins": module("app.plugins", _PluginBase=object),
     "app.schemas.types": module("app.schemas.types", MediaType=MediaType, MediaSource=MediaSource),
-    "app.chain.media": module("app.chain.media", MediaChain=FakeMediaChain),
     "app.core.config": module("app.core.config", settings=types.SimpleNamespace(API_TOKEN="synthetic-only", PORT=5000)),
     "app.db.systemconfig_oper": module("app.db.systemconfig_oper", SystemConfigOper=lambda: types.SimpleNamespace(get=lambda _: {})),
     "app.api": module("app.api"),
@@ -221,7 +212,6 @@ class BackendTests(unittest.TestCase):
         self.plugin.saved_configs = []
         FakeScheduler.instances = []
         FakeScheduler.fail_next_start = False
-        FakeMediaChain.calls = []
         self.plugin.init_plugin({**main.Doc115Subscribe.DEFAULTS, "enabled": True,
                                  "subscribe_enabled": True,
                                  "doc_url": "https://docs.qq.com/sheet/SyntheticDocument",
@@ -395,16 +385,6 @@ class BackendTests(unittest.TestCase):
         self.assertEqual({r["title"] for r in self.plugin._index.records}, {"Synthetic Old", "Synthetic New"})
         self.assertFalse(self.plugin._last_refresh["success"])
         self.assertEqual(len(self.plugin.api_status()["data"]["stale_sheets"]), 1)
-
-    def test_v3_media_recognition_uses_current_contract_and_separate_cache(self):
-        self.assertEqual(self.plugin.resolve_media_type(rec()), "movie")
-        self.assertEqual(self.plugin.resolve_media_type(rec(media_type="tv")), "tv")
-        self.assertEqual([(call[1], call[2]) for call in FakeMediaChain.calls], [("550", MediaType.MOVIE), ("550", MediaType.TV)])
-
-    def test_unknown_type_does_not_guess_tv_from_same_numeric_id(self):
-        result = self.plugin.resolve_media_type(rec(media_type="unknown", sheet="4K原盘"))
-        self.assertEqual(result, "unknown")
-        self.assertEqual(FakeMediaChain.calls, [])
 
     def test_subscriptions_exclude_conflicting_id_year_and_tv(self):
         good = rec(row=4)

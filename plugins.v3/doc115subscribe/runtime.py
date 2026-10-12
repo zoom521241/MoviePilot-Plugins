@@ -23,7 +23,7 @@ from .ledger import TaskLedger
 from .link_router import LINK_115_SHARE, LINK_MAGNET, LINK_ED2K, classify_link
 from .mp_adapter import MPAdapter, MPDeferred
 from .organization import (classify_optional_media, core_title, legacy_identity, match_history,
-                           path_is_within)
+                           media_bucket, path_is_within)
 from .p115_transfer import P115Error, extract_hash
 
 
@@ -752,7 +752,7 @@ class TaskRuntime:
         try:
             if filter not in ("all", "active", "needs_attention", "completed", "hidden"):
                 raise ValueError("无效的任务筛选")
-            if media not in ("all", "movie", "tv"):
+            if media not in ("all", "movie", "tv", "unknown"):
                 raise ValueError("无效的类型筛选")
             everything = self._records().list(limit=None, include_hidden=True)
             visible = [x for x in everything if not x.get("hidden")]
@@ -763,7 +763,10 @@ class TaskRuntime:
                 rows = [x for x in rows if self._needs_attention(x)]
             elif filter == "completed":
                 rows = [x for x in rows if x.get("organization_status") == "success"]
-            if media != "all":
+            if media == "unknown":
+                # 「类型待确认」是显式的一档：只有统计条报出这个数，它才不会凭空消失
+                rows = [x for x in rows if not self._media_bucket(x)]
+            elif media != "all":
                 rows = [x for x in rows if self._media_bucket(x) == media]
             needle = self._title_query(q)
             if needle:
@@ -778,8 +781,13 @@ class TaskRuntime:
 
     @staticmethod
     def _media_bucket(row):
-        kind = str(row.get("type") or row.get("target_type") or row.get("media_type") or "").strip().lower()
-        return "tv" if kind in ("tv", "电视剧", "剧集") else "movie" if kind in ("movie", "电影") else ""
+        """媒体类型归属：唯一口径在 ``organization.media_bucket``。
+
+        曾经这里自己写了一遍 ``type or target_type or media_type``，而 ``type`` 的
+        值是字符串 ``'unknown'``（真值），于是短路后永不回落到 ``target_type``，
+        电影/电视剧两边都不统计——这就是「15 条任务只统计出 10 条」的根因。
+        """
+        return media_bucket(row)
 
     @classmethod
     def _record_stats(cls, rows) -> Dict[str, Any]:
@@ -787,9 +795,13 @@ class TaskRuntime:
 
         带 ``at`` 生成时间：/status 与 /records 都会返回这份统计，前端按时间取较新的一份，
         避免统计条停在旧快照（显示「进行中 1」却点进去为空）。
+
+        ``unclassified`` 是类型仍无法归属的记录数：它必须显式报出来，否则这些记录
+        在统计条上会凭空消失（总数对不上电影+电视剧，用户只能自己猜）。
         """
         stats = {"movie": {"total": 0, "organized": 0}, "tv": {"total": 0, "organized": 0},
-                 "total": 0, "organized": 0, "active": 0, "attention": 0, "at": time.time()}
+                 "total": 0, "organized": 0, "active": 0, "attention": 0, "unclassified": 0,
+                 "at": time.time()}
         for row in rows:
             if row.get("hidden"):
                 continue
@@ -802,6 +814,8 @@ class TaskRuntime:
             if bucket:
                 stats[bucket]["total"] += 1
                 stats[bucket]["organized"] += organized
+            else:
+                stats["unclassified"] += 1
         return stats
 
     def records_stats(self):

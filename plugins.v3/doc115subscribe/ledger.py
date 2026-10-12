@@ -16,7 +16,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from .organization import match_history, prepare_manifest, summarize, timestamp
+from .organization import (match_history, media_bucket, observed_media_type, prepare_manifest,
+                           summarize, timestamp)
 
 
 def _encode(value: Any) -> str:
@@ -91,8 +92,8 @@ class TaskLedger:
             db.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version',?)", (str(self.SCHEMA_VERSION),))
         self._migrate_index_columns()
 
-    # 0.11.0：把高频调度要用的字段冗余成列，2 秒/20 秒的 tick 只取到期/活跃的行，不再全表反序列化。
-    # 0.11.4：补 task_file_id 列 —— 离线任务「这个落盘文件已被哪个批次认领」原先靠全表反序列化求集合。
+    # 0.11.5：媒体类型改由 organization.media_bucket 统一判定——SQLite 里的 media_type
+    # 只是它的派生缓存，不再自己写一套 `type or target_type`（那是统计漏算的根因）。
     INDEX_COLUMNS = (("acquisition_status", "TEXT NOT NULL DEFAULT ''"), ("organization_status", "TEXT NOT NULL DEFAULT ''"),
                      ("move_status", "TEXT NOT NULL DEFAULT ''"), ("next_check_at", "REAL NOT NULL DEFAULT 0"),
                      ("org_next_ts", "REAL NOT NULL DEFAULT 0"), ("tracking_enabled", "INTEGER NOT NULL DEFAULT 1"),
@@ -108,12 +109,10 @@ class TaskLedger:
 
     @classmethod
     def _index_values(cls, item: Dict[str, Any]) -> tuple:
-        kind = str(item.get("type") or item.get("target_type") or item.get("media_type") or "").strip().lower()
-        media = "tv" if kind in ("tv", "电视剧", "剧集") else "movie" if kind in ("movie", "电影") else ""
         return (str(item.get("acquisition_status") or ""), str(item.get("organization_status") or ""),
                 str(item.get("move_status") or ""), cls._number(item.get("next_check_at")),
                 cls._number(item.get("org_next_ts")), int(bool(item.get("tracking_enabled", True))),
-                int(bool(item.get("org_giveup"))), int(bool(item.get("org_requested"))), media,
+                int(bool(item.get("org_giveup"))), int(bool(item.get("org_requested"))), media_bucket(item),
                 str(item.get("task_file_id") or ""))
 
     def _write_index(self, db, batch_id: str, item: Dict[str, Any]) -> None:
@@ -576,6 +575,12 @@ class TaskLedger:
             # evidence remains useful but cannot confirm an unknown package.
             evidence = match_history(batch, evidence)
             projection = summarize(batch.get("manifest") or [], evidence, _manifest_complete(batch), pagination_complete)
+            # MP 是唯一见过真实文件与整理结果的权威方：一旦它把本批文件判成电影/电视剧，
+            # 就把它记下来（``mp_media_type``），统计与筛选优先采用它，而不是文档/目录的猜测。
+            # 只在结论变化时写，避免每轮核对都无谓地 +1 revision。
+            observed = observed_media_type(evidence)
+            if observed and observed != str(batch.get("mp_media_type") or ""):
+                projection["mp_media_type"] = observed
             self._trim_evidence(db, batch_id, projection.get("organization_evidence") or [])
             self._update(db, batch_id, projection)
             return self._get(db, batch_id)
