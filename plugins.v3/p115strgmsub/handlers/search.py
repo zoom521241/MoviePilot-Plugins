@@ -10,6 +10,7 @@ from app.schemas import MediaInfo
 from app.schemas.types import MediaType
 
 from ..utils import convert_nullbr_to_pansou_format
+from ..utils.file_matcher import FileMatcher
 
 
 class SearchHandler:
@@ -233,38 +234,148 @@ class SearchHandler:
         logger.info(f"Nullbr 未找到资源")
         return []
 
+    @staticmethod
+    def _movie_title_variants(mediainfo: MediaInfo) -> List[str]:
+        """
+        生成电影标题的不同写法，用于降低关键词召回偏差
+
+        中文名优先，其次英文名与原始名（如《街头霸王》对应 Street Fighter）
+
+        :param mediainfo: 媒体信息
+        :return: 去重后的标题列表
+        """
+        variants: List[str] = []
+        for attr in ("title", "en_title", "original_title", "hk_title", "tw_title"):
+            value = getattr(mediainfo, attr, None)
+            if value and str(value).strip():
+                name = str(value).strip()
+                if name not in variants:
+                    variants.append(name)
+        return variants
+
+    def _filter_movie_results(self, results: List[Dict], mediainfo: MediaInfo) -> List[Dict]:
+        """
+        按年份/续集号预筛网盘资源，剔除明显是另一部作品的候选
+
+        分享标题里没有年份时不会误杀，交给文件级校验（FileMatcher.match_movie_file）兜底
+
+        :param results: 网盘资源列表
+        :param mediainfo: 媒体信息
+        :return: 过滤后的资源列表
+        """
+        if not results:
+            return []
+
+        target_year = getattr(mediainfo, "year", None)
+        target_title = getattr(mediainfo, "title", None) or ""
+        kept: List[Dict] = []
+
+        for resource in results:
+            resource_title = (resource.get("title") or "").strip()
+            if not resource_title:
+                kept.append(resource)
+                continue
+
+            if FileMatcher.years_conflict(target_year, resource_title, target_title=target_title):
+                logger.info(
+                    f"剔除年份不符的资源：{resource_title}"
+                    f"（识别年份 {FileMatcher.guess_year(resource_title)}，订阅年份 {target_year}）")
+                continue
+
+            if FileMatcher.is_sequel_variant(target_title, resource_title):
+                logger.info(f"剔除疑似续集/其它作品的资源：{resource_title}（订阅片名 {target_title}）")
+                continue
+
+            kept.append(resource)
+
+        if not kept:
+            logger.info(f"{target_title} 的候选资源均与订阅不符，已全部剔除")
+        return kept
+
+    @staticmethod
+    def _has_confirmed_year(resource: Dict, mediainfo: MediaInfo) -> bool:
+        """
+        判断候选资源标题里是否带有与订阅年份一致的年份
+
+        片名自带年份（《2012》《1917》）会先被剔除，避免把片名当年份误判为确认命中
+        """
+        title = (resource.get("title") or "").strip()
+        if not title:
+            return False
+        try:
+            target = int(str(getattr(mediainfo, "year", "") or "")[:4])
+        except (TypeError, ValueError):
+            return False
+        stripped = FileMatcher._strip_title(getattr(mediainfo, "title", "") or "", title)
+        years = FileMatcher.extract_years(stripped)
+        return any(abs(year - target) <= 1 for year in years)
+
     def _search_pansou_movie(
         self,
         mediainfo: MediaInfo,
     ) -> List[Dict]:
         """
-        仅使用 PanSou 搜索电视剧资源（带降级关键词策略）
+        仅使用 PanSou 搜索电影资源（带降级关键词策略 + 年份/续集过滤）
 
         :param mediainfo: 媒体信息
-        :param season: 季号
         :return: 115网盘资源列表
         """
         if not self._pansou_client:
             logger.warning(f"PanSou 客户端未初始化，跳过 PanSou 查询")
             return []
 
-        # 电视剧使用降级搜索策略
-        search_keywords = [
-            f"{mediainfo.title} {mediainfo.year}",
-            mediainfo.title
-        ]
+        titles = self._movie_title_variants(mediainfo) or [mediainfo.title]
+        primary_title = titles[0]
+
+        # 关键词优先级：中文名+年份 → 中文名 → 其它语言名+年份 → 其它语言名。
+        # 每次降级都要经过年份/续集过滤，避免「街头霸王 2026」搜不到时
+        # 直接把「街头霸王2(1994)」当成结果转存
+        search_keywords = []
+        if mediainfo.year:
+            search_keywords.append(f"{primary_title} {mediainfo.year}")
+        search_keywords.append(primary_title)
+        if mediainfo.year:
+            for name in titles[1:]:
+                keyword = f"{name} {mediainfo.year}"
+                if keyword not in search_keywords:
+                    search_keywords.append(keyword)
+        for name in titles[1:]:
+            if name not in search_keywords:
+                search_keywords.append(name)
+        search_keywords = [kw for kw in search_keywords if kw and kw.strip()]
+
+        weak_results: List[Dict] = []
 
         for keyword in search_keywords:
             logger.info(f"使用 PanSou 搜索电影资源: {mediainfo.title}，关键词: '{keyword}'")
             results = self._pansou_search(keyword)
-            if results:
-                logger.info(f"PanSou 关键词 '{keyword}' 搜索到 {len(results)} 个结果")
-                return results
-            else:
+            if not results:
                 logger.info(f"PanSou 关键词 '{keyword}' 无结果，尝试下一个降级关键词")
+                continue
 
-        logger.info(f"PanSou 未找到资源")
-        return []
+            logger.info(f"PanSou 关键词 '{keyword}' 搜索到 {len(results)} 个结果")
+            filtered = self._filter_movie_results(results, mediainfo)
+            if not filtered:
+                logger.info(f"PanSou 关键词 '{keyword}' 的结果均与订阅不符，尝试下一个降级关键词")
+                continue
+
+            # 标题里带「与订阅一致」的年份 → 直接采用，不再继续降级
+            confirmed = [item for item in filtered if self._has_confirmed_year(item, mediainfo)]
+            if confirmed:
+                logger.info(f"PanSou 关键词 '{keyword}' 命中 {len(confirmed)} 个带匹配年份的资源")
+                return confirmed
+
+            # 只有「无法判定年份」的候选（如标题不含年份）→ 先记下，继续尝试其它关键词，
+            # 避免因为一个无关候选就放弃英文名兜底；全部关键词都不确认时才回退使用。
+            if not weak_results:
+                weak_results = filtered
+            logger.info(f"PanSou 关键词 '{keyword}' 仅有无年份候选，继续尝试更多关键词")
+
+        if weak_results:
+            logger.info(f"PanSou 未命中带年份的资源，回退 {len(weak_results)} 个无年份候选（交由文件名校验）")
+        else:
+            logger.info(f"PanSou 未找到资源")
+        return weak_results
 
     def _search_pansou_tv(
         self,

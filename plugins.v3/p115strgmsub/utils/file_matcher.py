@@ -9,6 +9,9 @@ from app.core.metainfo import MetaInfo
 from app.schemas import MediaInfo
 from app.log import logger
 
+# 从资源标题/文件名里识别年份（仅 19xx / 20xx，避免把 1080p、2160p、H.265 当成有效年份）
+_YEAR_IN_NAME_RE = re.compile(r'(?<!\d)(19\d{2}|20\d{2})(?!\d)')
+
 
 class SubscribeFilter:
     """订阅过滤条件"""
@@ -109,7 +112,93 @@ class FileMatcher:
 
     # 视频文件扩展名
     VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.rmvb', '.wmv', '.flv', '.ts', '.m2ts'}
-    
+
+    @staticmethod
+    def extract_years(*names: str) -> Set[int]:
+        """
+        从文件名/资源标题中提取所有可能的年份
+
+        故意取「全部候选」而不是第一个：像《2012》《1917》《2001太空漫游》这类
+        片名本身就是年份的作品，只取第一个会把片名年份当成发行年，误判成不同作品
+
+        :param names: 候选文本（文件名、分享标题等）
+        :return: 年份集合
+        """
+        years: Set[int] = set()
+        for name in names:
+            if not name:
+                continue
+            years.update(int(m) for m in _YEAR_IN_NAME_RE.findall(str(name)))
+            if not years:
+                # 正则没找到时才回退到 MetaInfo，避免它把码率/清晰度识别成年份
+                try:
+                    meta = MetaInfo(Path(str(name)).stem)
+                    if meta.year and str(meta.year).isdigit():
+                        years.add(int(meta.year))
+                except Exception:
+                    pass
+        return years
+
+    @staticmethod
+    def guess_year(*names: str) -> Optional[int]:
+        """返回最靠前的年份候选，仅用于日志展示"""
+        years = FileMatcher.extract_years(*names)
+        return min(years) if years else None
+
+    @staticmethod
+    def _strip_title(title: str, text: str) -> str:
+        """从文本里去掉片名本身，避免《2012》《1917》这类片名年份被当成发行年"""
+        if not title or not text:
+            return text or ""
+        return re.sub(re.escape(str(title).strip()), " ", str(text), flags=re.IGNORECASE)
+
+    @staticmethod
+    def years_conflict(target_year, *names: str, target_title: str = "", tolerance: int = 1) -> bool:
+        """
+        判断资源里的年份是否与订阅年份冲突
+
+        规则：
+        1. 先剔除片名本身（《2012》《1917》这类片名即年份的作品），再提取剩余年份；
+        2. 剩余年份只要有一个落在订阅年份 ±tolerance 内，就认为可能是同一部作品；
+        3. 剔除片名后已无年份 → 不作判定（放行），交给后续识别兜底。
+
+        :param target_year: 订阅年份（如 "2026"）
+        :param names: 资源标题/文件名
+        :param target_title: 订阅片名，用于剔除片名自带的年份
+        :param tolerance: 允许的年份误差（制作年/上映年常差 1 年）
+        :return: True 表示明显是另一部作品
+        """
+        if not target_year:
+            return False
+        try:
+            target = int(str(target_year)[:4])
+        except (TypeError, ValueError):
+            return False
+
+        stripped = [FileMatcher._strip_title(target_title, name) for name in names if name]
+        years = FileMatcher.extract_years(*stripped) if stripped else set()
+        if not years:
+            # 剩下的年份只可能来自片名本身，不据此判定
+            return False
+        return not any(abs(year - target) <= tolerance for year in years)
+
+    @staticmethod
+    def is_sequel_variant(target_title: str, resource_title: str) -> bool:
+        """
+        判断资源标题是否为「正片 + 续集号」的其它作品
+
+        例：订阅《街头霸王》而资源为《街头霸王2》→ True；
+            《名侦探柯南》与《名侦探柯南2024剧场版》、《街头霸王 4K》不算续集 → False
+
+        :param target_title: 订阅标题
+        :param resource_title: 资源标题
+        :return: 是否疑似续集
+        """
+        if not target_title or not resource_title:
+            return False
+        pattern = re.escape(str(target_title).strip()) + r'\s*[（(\[【:：]?\s*[2-9](?![0-9A-Za-z])'
+        return bool(re.search(pattern, str(resource_title), re.IGNORECASE))
+
     @staticmethod
     def _contains_other_season(file_name: str, target_season: int) -> bool:
         """
@@ -337,7 +426,10 @@ class FileMatcher:
         files: List[dict],
         title: str,
         min_size_mb: int = 500,
-        subscribe_filter: 'SubscribeFilter' = None
+        subscribe_filter: 'SubscribeFilter' = None,
+        year=None,
+        source_title: str = "",
+        year_tolerance: int = 1
     ) -> Optional[dict]:
         """
         匹配电影文件（查找最大的视频文件）
@@ -346,6 +438,9 @@ class FileMatcher:
         :param title: 电影标题
         :param min_size_mb: 最小文件大小（MB），用于过滤小文件
         :param subscribe_filter: 订阅过滤条件（质量、分辨率、特效）
+        :param year: 订阅年份，用于剔除同名片（如 2026 订阅匹配到 1994 版本）
+        :param source_title: 分享标题，作为年份/续集的补充线索
+        :param year_tolerance: 允许的年份误差
         :return: 匹配的文件信息
         """
         # 候选列表：(file, filter_score)
@@ -372,6 +467,14 @@ class FileMatcher:
                 # 检查文件大小
                 file_size = file.get("size", 0)
                 if file_size < min_size_bytes:
+                    continue
+
+                # 年份校验：文件名/分享标题年份与订阅年份明显不符 → 不是同一部作品
+                if FileMatcher.years_conflict(year, file_name, source_title,
+                                              target_title=title, tolerance=year_tolerance):
+                    logger.info(
+                        f"电影文件 {file_name} 年份与订阅年份 {year} 不符"
+                        f"（识别到 {sorted(FileMatcher.extract_years(file_name, source_title))}），跳过")
                     continue
 
                 # 应用订阅过滤条件

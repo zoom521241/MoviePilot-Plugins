@@ -228,10 +228,12 @@ class SyncHandler:
                         logger.info(f"分享链接无内容：{share_url}")
                         continue
 
-                    # 匹配电影文件
+                    # 匹配电影文件（传入订阅年份，避免同名片/续集被当成目标影片）
                     matched_file = FileMatcher.match_movie_file(
                         share_files, mediainfo.title,
-                        subscribe_filter=subscribe_filter
+                        subscribe_filter=subscribe_filter,
+                        year=mediainfo.year,
+                        source_title=resource_title
                     )
 
                     if matched_file:
