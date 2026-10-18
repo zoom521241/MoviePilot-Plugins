@@ -1038,6 +1038,97 @@ class TaskRuntime:
     ORG_STALE_ATTEMPTS = 6         # partial / failed 连续 6 次完整核对结果都没变化 → 停止自动核对（保留手动核对）
     ORG_FINAL_STATES = ("success", "partial", "failed")
 
+    # ---------- MP 订阅完成对账（整理入库成功后） ----------
+    @staticmethod
+    def _match_mp_movie_subscribe(batch: dict, rows: list) -> dict:
+        """在 MP 订阅行里找出与该整理批次同属一部电影的进行中订阅（纯函数，便于单测）。
+
+        优先用 TMDB ID 精确匹配；批次没有 TMDB ID 时才退回「片名 + 年份」，
+        避免同名不同年的翻拍被误完成。
+        """
+        if not batch or not rows:
+            return {}
+        tmdb = str(batch.get("tmdbid") or batch.get("tmdb_id") or "").strip()
+        title = core_title(batch.get("title") or "")
+        year = str(batch.get("year") or "").strip()
+        for row in rows:
+            if not isinstance(row, dict) or row.get("type") != "电影":
+                continue
+            if row.get("state") not in (None, "", "N", "R"):
+                continue
+            if tmdb:
+                source = str(row.get("media_source") or "themoviedb")
+                row_tmdb = str(row.get("media_id") or "").strip() if source == "themoviedb" else ""
+                if row_tmdb and row_tmdb == tmdb:
+                    return row
+                continue
+            if title and core_title(row.get("name")) == title:
+                if not year or str(row.get("year") or "").strip() == year:
+                    return row
+        return {}
+
+    def _reconcile_mp_subscribe(self, batch: dict) -> None:
+        """整理入库成功后，对这一条 MP 订阅做完成对账（仅当媒体库里确实已存在才会完成）。"""
+        try:
+            if not self._enabled or not batch:
+                return
+            if media_bucket(batch) != "movie":
+                return
+            try:
+                rows = self._mp_subscribes()
+            except Exception as exc:  # noqa: BLE001
+                logger.info(f"115文档订阅与查询：读取 MP 订阅失败，跳过完成对账：{self._error(exc)}")
+                return
+            row = self._match_mp_movie_subscribe(batch, rows or [])
+            if not row:
+                return
+            subscribe_id = row.get("id")
+            if subscribe_id is None:
+                return
+            try:
+                from app.chain.media import MediaChain
+                from app.chain.subscribe import SubscribeChain
+                from app.core.metainfo import MetaInfo
+                from app.db.subscribe_oper import SubscribeOper
+                from app.schemas.types import MediaType
+            except Exception as exc:  # noqa: BLE001
+                logger.info(f"115文档订阅与查询：当前运行环境不支持完成 MP 订阅：{self._error(exc)}")
+                return
+
+            subscribe = SubscribeOper().get(int(subscribe_id))
+            if not subscribe or getattr(subscribe, "state", None) not in (None, "", "N", "R"):
+                return
+
+            meta = MetaInfo(subscribe.name)
+            meta.year = subscribe.year
+            meta.type = MediaType.MOVIE
+            mediainfo = MediaChain().recognize_media(
+                meta=meta,
+                mtype=MediaType.MOVIE,
+                media_source=getattr(subscribe, "media_source", None),
+                media_id=getattr(subscribe, "media_id", None),
+                cache=True,
+            )
+            if not mediainfo:
+                logger.warning(f"115文档订阅与查询：无法识别订阅《{subscribe.name}》的媒体信息，跳过完成对账")
+                return
+
+            chain = SubscribeChain()
+            reconcile = getattr(chain, "reconcile_subscription_completion", None)
+            if callable(reconcile):
+                try:
+                    if reconcile(subscribe=subscribe, meta=meta, mediainfo=mediainfo):
+                        logger.info(f"115文档订阅与查询：已按媒体库现状完成 MP 订阅《{subscribe.name}》")
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    # 对账接口对订阅对象类型有要求，类型不兼容时退回到与同类插件一致的强制完成路径
+                    logger.info(f"115文档订阅与查询：完成对账接口不可用（{self._error(exc)}），改用强制完成")
+            chain.finish_subscribe_or_not(subscribe=subscribe, meta=meta, mediainfo=mediainfo,
+                                          downloads=None, lefts={}, force=True)
+            logger.info(f"115文档订阅与查询：已强制完成 MP 订阅《{subscribe.name}》")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"115文档订阅与查询：完成 MP 订阅对账失败：{self._error(exc)}")
+
     def _log_org_change(self, before_rec, before_status, batch):
         """仅在整理结论变化时打印「整理成功/部分/失败」，返回是否变化。"""
         status = (batch or {}).get("organization_status")
@@ -1131,6 +1222,8 @@ class TaskRuntime:
                         org_attempts=0, org_stale_count=0, org_last_check=now, org_error_count=0, query_error="",
                         org_giveup=False, org_requested=False, organization_status="success",
                         message=f"整理成功：本批 {batch.get('organized_count')}/{total} 个文件已入库")
+                    # 入库已被 MP 逐文件证实 → 顺带把这条 MP 订阅对账完成（只处理这一条，不触发全量刷新）
+                    self._reconcile_mp_subscribe(batch)
                     continue
                 if not complete:
                     # 翻页中：结论未定，不计等待/停滞次数
