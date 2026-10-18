@@ -3,10 +3,10 @@ const currentImports = {};
       let moduleMap = {
 "./Page":()=>{
       dynamicLoadingCss(["style-4CSI3S1a.css"], false, './Page');
-      return __federation_import('./__federation_expose_Page-D1G8jrqt.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_Page-DgcrY3Gq.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Config":()=>{
       dynamicLoadingCss(["style-4CSI3S1a.css"], false, './Config');
-      return __federation_import('./__federation_expose_Config-Ml6ylt0_.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      return __federation_import('./__federation_expose_Config-BV0TtiDx.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
       const seen = {};
       const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
         const metaUrl = import.meta.url;
