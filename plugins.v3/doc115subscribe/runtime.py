@@ -30,6 +30,8 @@ from .p115_transfer import P115Error, extract_hash
 class TaskRuntime:
     ORG_BACKOFF_BASE = 20          # 查不到整理证据时的退避：第 1/2/3 次后分别等 40 → 80 → 160 秒（_delay = base·2^次数）
     ORG_BACKOFF_MAX = 900
+    ORG_RETRY_BASE = 20            # MP 读取被排队（MPDeferred）时的退避重试：40 → 80 → 160 → 300 秒封顶
+    ORG_RETRY_MAX = 300
     ORG_MAX_PER_RUN = 5
     ORG_GIVEUP_ATTEMPTS = 4        # 连续 4 次仍无任何整理证据 → 判「未找到整理记录」并移出自动核对（约 5 分钟，按 20 秒 tick 取整）
     EVENT_GIVEUP_ATTEMPTS = 3      # 同一条事件连续处理失败 3 次后跳过，避免毒事件拖死整轮核对
@@ -1273,6 +1275,9 @@ class TaskRuntime:
 
         0.10.1 起：任何失败都会留痕（含堆栈，5 分钟最多记一次）并把最近一次执行结果写进 diagnostics，
         不再像 0.10.0 那样静默 return——静默会让"任务其实没在跑"这件事完全无法被发现。
+
+        0.11.9 起：MP 读取被排队（``MPDeferred``，例如整点撞上 MP 自身的订阅/索引任务）不再当作错误、
+        也不丢这一轮——按 40 → 80 → 160 → 300 秒退避后自动重试，成功后清零；事件处理不受退避影响。
         """
         self._ensure_runtime()
         if not self._enabled:
@@ -1288,12 +1293,25 @@ class TaskRuntime:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("115文档订阅与查询：事件路径缓存刷新失败：" + self._error(exc))
             events = self._drain_events()
+            now = time.time()
+            retry_at = float(getattr(self, "_org_retry_at", 0) or 0)
+            if retry_at > now:                  # 上轮 MP 读取被排队，仍在退避窗口内：事件照常处理，核对等窗口结束
+                attempts = int(getattr(self, "_org_retry_attempts", 0) or 0)
+                self._last_org_tick = {"at": now, "state": "deferred", "attempts": attempts,
+                                       "next_at": retry_at, "events": events}
+                return {"code": 0, "data": {"deferred": True, "attempts": attempts,
+                                            "retry_in": round(retry_at - now, 1)}}
             with self._mp().work_slice(cancelled=lambda: not self._live(generation)):
                 result = self.verify_organization()
                 if not result["checked"] and getattr(self, "_directories_requested", False):
                     self._refresh_directories_snapshot(generation)
+                retries = int(getattr(self, "_org_retry_attempts", 0) or 0)
+                self._org_retry_attempts, self._org_retry_at = 0, 0
+                if retries:
+                    logger.info(f"115文档订阅与查询：MP读取已恢复，整理核对继续（此前退避重试 {retries} 次）")
                 self._last_org_tick = {"at": time.time(), "state": "ok", "checked": result.get("checked"),
-                                       "confirmed": result.get("confirmed"), "changed": result.get("changed"), "events": events}
+                                       "confirmed": result.get("confirmed"), "changed": result.get("changed"),
+                                       "events": events, "retries": retries}
                 if result.get("checked"):
                     # 只有整理结论有变化时才 info；否则（例如翻页、无变化的复查）降为 debug，避免每页刷屏
                     log = logger.info if result.get("changed") else logger.debug
@@ -1301,6 +1319,17 @@ class TaskRuntime:
                         f"成功 {result.get('confirmed')}，部分 {result.get('partial')}，"
                         f"失败 {result.get('failed')}，未找到 {result.get('unfound')}")
                 return {"code": 0, "data": result}
+        except MPDeferred as exc:
+            attempts = int(getattr(self, "_org_retry_attempts", 0) or 0) + 1
+            delay = self._delay(attempts, base=self.ORG_RETRY_BASE, cap=self.ORG_RETRY_MAX)
+            self._org_retry_attempts = attempts
+            self._org_retry_at = time.time() + delay
+            self._last_org_tick = {"at": time.time(), "state": "deferred", "attempts": attempts,
+                                   "next_at": self._org_retry_at, "error": self._error(exc)[:300]}
+            if attempts == 1:                   # 首次排队提示一次，连续退避不再刷屏
+                logger.info(f"115文档订阅与查询：MP读取已排队，{int(delay)} 秒后自动重试整理核对（{exc}）")
+            return {"code": 0, "msg": f"MP读取已排队，{int(delay)} 秒后重试",
+                    "data": {"deferred": True, "attempts": attempts, "retry_in": delay}}
         except Exception as exc:
             self._last_org_tick = {"at": time.time(), "state": "error", "error": self._error(exc)[:300]}
             if time.time() - float(getattr(self, "_last_org_error_log", 0) or 0) > 300:
@@ -1332,6 +1361,8 @@ class TaskRuntime:
                          org_request_ts=now, org_page=1)
             # org_attempts / org_stale_count 不清零：已放弃的记录手动核对一次仍无变化会再次停止，不会重新进入长时间自动核对
             queued += 1
+        if queued:                              # 手动核对优先：清掉 MP 排队的退避窗口，下一 tick 立即执行（退避计数保留）
+            self._org_retry_at = 0
         return {"code": 0, "msg": "已排队核对整理证据，未重新获取", "data": {"state": "queued", "queued": queued}}
 
     def _mp_subscribes(self):
