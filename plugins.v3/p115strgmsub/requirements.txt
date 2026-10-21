@@ -1,4 +1,4 @@
-# p115client 0.0.9.6.5.1 requires the map APIs removed in concurrenttools 0.1.9.
-p115client==0.0.9.6.5.1
-python-concurrenttools==0.1.8
+# p115client 自 0.0.9.7.2 起不再依赖 concurrenttools 的 map 系列，放宽版本约束，
+# 以适配上游 P115Disk 3.0.3 / P115StrmHelper 3.0.2（两者都要求 p115client==0.0.9.7.2）。
+p115client>=0.0.9.6.5.1
 playwright-stealth==2.0.2
