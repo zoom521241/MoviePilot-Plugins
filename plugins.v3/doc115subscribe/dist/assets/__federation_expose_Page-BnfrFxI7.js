@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-SdO2Fg_T.js';
-import Config, { U as UI_BUILD } from './__federation_expose_Config-D0XmgihP.js';
+import Config, { U as UI_BUILD } from './__federation_expose_Config-BK-NWzI8.js';
 
 const {toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,vModelCheckbox:_vModelCheckbox,withDirectives:_withDirectives$1,createTextVNode:_createTextVNode$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,normalizeClass:_normalizeClass$1,createBlock:_createBlock$1} = await importShared('vue');
 
@@ -948,7 +948,7 @@ return (_ctx, _cache) => {
   }, [
     _createElementVNode("header", _hoisted_2, [
       _createElementVNode("div", _hoisted_3, [
-        _cache[26] || (_cache[26] = _createElementVNode("h2", null, "115文档订阅与查询", -1)),
+        _cache[27] || (_cache[27] = _createElementVNode("h2", null, "115文档订阅与查询", -1)),
         _createElementVNode("p", _hoisted_4, _toDisplayString(indexSummary.value), 1)
       ]),
       _createElementVNode("div", _hoisted_5, [
@@ -974,7 +974,7 @@ return (_ctx, _cache) => {
         }, {
           default: _withCtx(() => [
             _createVNode(_component_v_icon, null, {
-              default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
+              default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
                 _createTextVNode("mdi-close", -1)
               ]))]),
               _: 1
@@ -1072,7 +1072,7 @@ return (_ctx, _cache) => {
           }, {
             tencent: _withCtx(() => [
               _createElementVNode("p", _hoisted_10, [
-                _cache[28] || (_cache[28] = _createTextVNode("登录状态：", -1)),
+                _cache[29] || (_cache[29] = _createTextVNode("登录状态：", -1)),
                 _createElementVNode("span", {
                   class: _normalizeClass(status.cookie_ready ? 'doc115-green' : 'doc115-amber')
                 }, _toDisplayString(cookieText.value), 3),
@@ -1101,7 +1101,7 @@ return (_ctx, _cache) => {
                       disabled: busy.qr,
                       onClick: _cache[2] || (_cache[2] = $event => (checkQr()))
                     }, {
-                      default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
+                      default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
                         _createTextVNode("检查扫码状态", -1)
                       ]))]),
                       _: 1
@@ -1115,7 +1115,7 @@ return (_ctx, _cache) => {
                   disabled: jobBusy('index') || status.enabled === false,
                   onClick: refreshIndex
                 }, {
-                  default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
+                  default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
                     _createTextVNode("刷新文档索引", -1)
                   ]))]),
                   _: 1
@@ -1128,7 +1128,7 @@ return (_ctx, _cache) => {
                       alt: "微信扫码登录腾讯文档"
                     }, null, 8, _hoisted_13),
                     _createElementVNode("p", null, _toDisplayString(qrTip.value), 1),
-                    _cache[31] || (_cache[31] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "只扫描当前二维码；离开设置后停止检查扫码状态。", -1))
+                    _cache[32] || (_cache[32] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "只扫描当前二维码；离开设置后停止检查扫码状态。", -1))
                   ]))
                 : _createCommentVNode("", true)
             ]),
@@ -1141,7 +1141,7 @@ return (_ctx, _cache) => {
                   loading: busy.diagnostics,
                   onClick: loadDiagnostics
                 }, {
-                  default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+                  default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
                     _createTextVNode("查看本地诊断", -1)
                   ]))]),
                   _: 1
@@ -1150,7 +1150,7 @@ return (_ctx, _cache) => {
               (diagnostics.value)
                 ? (_openBlock(), _createElementBlock("div", _hoisted_15, [
                     _createElementVNode("p", null, _toDisplayString(diagnosticText.value), 1),
-                    _cache[33] || (_cache[33] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "只读取本插件状态，不测试真实转存。", -1))
+                    _cache[34] || (_cache[34] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "只读取本插件状态，不测试真实转存。", -1))
                   ]))
                 : _createCommentVNode("", true)
             ]),
@@ -1179,7 +1179,7 @@ return (_ctx, _cache) => {
                       density: "compact",
                       class: "doc115-feedback"
                     }, {
-                      default: _withCtx(() => [...(_cache[34] || (_cache[34] = [
+                      default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
                         _createTextVNode("插件已停用，搜索暂不可用。请在「设置」中启用插件。", -1)
                       ]))]),
                       _: 1
@@ -1204,7 +1204,7 @@ return (_ctx, _cache) => {
                     disabled: status.enabled === false,
                     onClick: doSearch
                   }, {
-                    default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
+                    default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
                       _createTextVNode("搜索", -1)
                     ]))]),
                     _: 1
@@ -1248,7 +1248,7 @@ return (_ctx, _cache) => {
                     ])
                   }), 64)),
                   _createElementVNode("div", _hoisted_22, [
-                    _cache[36] || (_cache[36] = _createElementVNode("span", { class: "doc115-filter-label" }, "排序", -1)),
+                    _cache[37] || (_cache[37] = _createElementVNode("span", { class: "doc115-filter-label" }, "排序", -1)),
                     _createVNode(_component_v_select, {
                       modelValue: sortBy.value,
                       "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((sortBy).value = $event)),
@@ -1271,7 +1271,7 @@ return (_ctx, _cache) => {
                         _createElementVNode("h3", null, "「" + _toDisplayString(searchedKeyword.value) + "」", 1),
                         _createElementVNode("span", _hoisted_25, "共 " + _toDisplayString(total.value) + " 条", 1)
                       ]),
-                      _cache[43] || (_cache[43] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "来源筛选表示条目包含此类链接；获取前会确认本次实际使用的来源和保存目录。", -1)),
+                      _cache[44] || (_cache[44] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "来源筛选表示条目包含此类链接；获取前会确认本次实际使用的来源和保存目录。", -1)),
                       (busy.search)
                         ? (_openBlock(), _createBlock(_component_v_progress_linear, {
                             key: 0,
@@ -1298,7 +1298,7 @@ return (_ctx, _cache) => {
                                     ], 64))
                               ], 64))
                             }), 128)),
-                            _cache[37] || (_cache[37] = _createTextVNode()),
+                            _cache[38] || (_cache[38] = _createTextVNode()),
                             (r.year)
                               ? (_openBlock(), _createElementBlock("span", _hoisted_29, "（" + _toDisplayString(r.year) + "）", 1))
                               : _createCommentVNode("", true)
@@ -1316,7 +1316,7 @@ return (_ctx, _cache) => {
                               : _createCommentVNode("", true)
                           ]),
                           _createElementVNode("p", _hoisted_34, [
-                            _cache[38] || (_cache[38] = _createElementVNode("span", { class: "doc115-muted" }, "规格：", -1)),
+                            _cache[39] || (_cache[39] = _createElementVNode("span", { class: "doc115-muted" }, "规格：", -1)),
                             (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(specTokens(r.qtext), (token, i) => {
                               return (_openBlock(), _createElementBlock("span", {
                                 key: i,
@@ -1374,7 +1374,7 @@ return (_ctx, _cache) => {
                                         loading: !!transferring[r.record_id],
                                         onClick: $event => (prepareTransfer(r))
                                       }, {
-                                        default: _withCtx(() => [...(_cache[39] || (_cache[39] = [
+                                        default: _withCtx(() => [...(_cache[40] || (_cache[40] = [
                                           _createTextVNode("选择来源与保存目录", -1)
                                         ]))]),
                                         _: 1
@@ -1396,7 +1396,7 @@ return (_ctx, _cache) => {
                               "onUpdate:modelValue": changePage
                             }, null, 8, ["model-value", "length", "disabled", "total-visible"]),
                             _createElementVNode("span", _hoisted_42, [
-                              _cache[41] || (_cache[41] = _createElementVNode("label", { for: 'doc115-jump-search' }, "跳至", -1)),
+                              _cache[42] || (_cache[42] = _createElementVNode("label", { for: 'doc115-jump-search' }, "跳至", -1)),
                               _withDirectives(_createElementVNode("input", {
                                 id: "doc115-jump-search",
                                 class: "doc115-jump",
@@ -1409,14 +1409,14 @@ return (_ctx, _cache) => {
                               }, null, 40, _hoisted_43), [
                                 [_vModelText, jump.search]
                               ]),
-                              _cache[42] || (_cache[42] = _createTextVNode("页", -1)),
+                              _cache[43] || (_cache[43] = _createTextVNode("页", -1)),
                               _createVNode(_component_v_btn, {
                                 size: "x-small",
                                 variant: "text",
                                 disabled: busy.search,
                                 onClick: _cache[8] || (_cache[8] = $event => (jumpTo('search')))
                               }, {
-                                default: _withCtx(() => [...(_cache[40] || (_cache[40] = [
+                                default: _withCtx(() => [...(_cache[41] || (_cache[41] = [
                                   _createTextVNode("跳转", -1)
                                 ]))]),
                                 _: 1
@@ -1430,12 +1430,12 @@ return (_ctx, _cache) => {
             : (tab.value === 'subscriptions')
               ? (_openBlock(), _createElementBlock("section", _hoisted_44, [
                   _createElementVNode("div", _hoisted_45, [
-                    _cache[44] || (_cache[44] = _createElementVNode("h3", null, "电影订阅", -1)),
+                    _cache[45] || (_cache[45] = _createElementVNode("h3", null, "电影订阅", -1)),
                     _createElementVNode("span", {
                       class: _normalizeClass(["doc115-chip", status.subscribe_enabled ? 'doc115-green' : 'doc115-neutral'])
                     }, _toDisplayString(status.subscribe_enabled ? '自动同步已启用' : '自动同步已关闭'), 3)
                   ]),
-                  _cache[48] || (_cache[48] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "按已缓存的 MP 电影订阅预演文档匹配结果，不提交资源。订阅的创建、编辑和整理由 MP 处理。", -1)),
+                  _cache[49] || (_cache[49] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "按已缓存的 MP 电影订阅预演文档匹配结果，不提交资源。订阅的创建、编辑和整理由 MP 处理。", -1)),
                   _createElementVNode("div", _hoisted_46, [
                     _createVNode(_component_v_btn, {
                       variant: "outlined",
@@ -1445,7 +1445,7 @@ return (_ctx, _cache) => {
                       disabled: status.enabled === false,
                       onClick: fetchSubscriptions
                     }, {
-                      default: _withCtx(() => [...(_cache[45] || (_cache[45] = [
+                      default: _withCtx(() => [...(_cache[46] || (_cache[46] = [
                         _createTextVNode("读取 MP 订阅并预演", -1)
                       ]))]),
                       _: 1
@@ -1458,7 +1458,7 @@ return (_ctx, _cache) => {
                       disabled: status.enabled === false || !status.subscribe_enabled || jobBusy('subscribe'),
                       onClick: runSubscribe
                     }, {
-                      default: _withCtx(() => [...(_cache[46] || (_cache[46] = [
+                      default: _withCtx(() => [...(_cache[47] || (_cache[47] = [
                         _createTextVNode("同步并获取匹配资源", -1)
                       ]))]),
                       _: 1
@@ -1502,7 +1502,7 @@ return (_ctx, _cache) => {
                       ], 2),
                       (s.qtext)
                         ? (_openBlock(), _createElementBlock("p", _hoisted_53, [
-                            _cache[47] || (_cache[47] = _createElementVNode("span", { class: "doc115-muted" }, "候选规格：", -1)),
+                            _cache[48] || (_cache[48] = _createElementVNode("span", { class: "doc115-muted" }, "候选规格：", -1)),
                             (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(specTokens(s.qtext), (token, j) => {
                               return (_openBlock(), _createElementBlock("span", {
                                 key: j,
@@ -1521,7 +1521,7 @@ return (_ctx, _cache) => {
                   "aria-busy": busy.records ? 'true' : 'false'
                 }, [
                   _createElementVNode("div", _hoisted_55, [
-                    _cache[50] || (_cache[50] = _createElementVNode("h3", null, "任务", -1)),
+                    _cache[51] || (_cache[51] = _createElementVNode("h3", null, "任务", -1)),
                     _createElementVNode("span", _hoisted_56, _toDisplayString(recordsTotal.value) + " 条", 1),
                     _createVNode(_component_v_btn, {
                       size: "small",
@@ -1530,7 +1530,7 @@ return (_ctx, _cache) => {
                       loading: busy.records,
                       onClick: loadRecords
                     }, {
-                      default: _withCtx(() => [...(_cache[49] || (_cache[49] = [
+                      default: _withCtx(() => [...(_cache[50] || (_cache[50] = [
                         _createTextVNode("刷新状态", -1)
                       ]))]),
                       _: 1
@@ -1538,7 +1538,7 @@ return (_ctx, _cache) => {
                   ]),
                   _createElementVNode("div", _hoisted_57, [
                     _createElementVNode("div", _hoisted_58, [
-                      _cache[51] || (_cache[51] = _createElementVNode("span", {
+                      _cache[52] || (_cache[52] = _createElementVNode("span", {
                         id: "doc115-rf-scope",
                         class: "doc115-filter-label"
                       }, "范围", -1)),
@@ -1569,7 +1569,7 @@ return (_ctx, _cache) => {
                       }, 8, ["modelValue"])
                     ]),
                     _createElementVNode("div", _hoisted_59, [
-                      _cache[52] || (_cache[52] = _createElementVNode("span", {
+                      _cache[53] || (_cache[53] = _createElementVNode("span", {
                         id: "doc115-rf-media",
                         class: "doc115-filter-label"
                       }, "类型", -1)),
@@ -1611,7 +1611,7 @@ return (_ctx, _cache) => {
                       class: "doc115-records-q"
                     }, null, 8, ["modelValue"])
                   ]),
-                  _cache[71] || (_cache[71] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "刷新只读取本地任务。获取、搬运与 MP 整理分别确认；MP 整理成功不代表媒体服务器已收录。", -1)),
+                  _cache[73] || (_cache[73] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "刷新只读取本地任务。获取、搬运与 MP 整理分别确认；MP 整理成功不代表媒体服务器已收录。", -1)),
                   (busy.records)
                     ? (_openBlock(), _createBlock(_component_v_progress_linear, {
                         key: 0,
@@ -1630,7 +1630,7 @@ return (_ctx, _cache) => {
                             "aria-label": "全选本页任务",
                             onChange: _cache[12] || (_cache[12] = $event => (toggleAll($event.target.checked)))
                           }, null, 40, _hoisted_62),
-                          _cache[53] || (_cache[53] = _createTextVNode(" 全选本页", -1))
+                          _cache[54] || (_cache[54] = _createTextVNode(" 全选本页", -1))
                         ]),
                         _createElementVNode("span", _hoisted_63, _toDisplayString(selectedIds.value.length ? `已选 ${selectedIds.value.length} 条` : '勾选任务后可批量处理'), 1),
                         (selectedIds.value.length)
@@ -1642,7 +1642,7 @@ return (_ctx, _cache) => {
                                 disabled: busy.bulk,
                                 onClick: _cache[13] || (_cache[13] = $event => (bulkAction('verify')))
                               }, {
-                                default: _withCtx(() => [...(_cache[54] || (_cache[54] = [
+                                default: _withCtx(() => [...(_cache[55] || (_cache[55] = [
                                   _createTextVNode("核对整理", -1)
                                 ]))]),
                                 _: 1
@@ -1656,7 +1656,7 @@ return (_ctx, _cache) => {
                                     disabled: busy.bulk,
                                     onClick: _cache[14] || (_cache[14] = $event => (bulkAction('hide')))
                                   }, {
-                                    default: _withCtx(() => [...(_cache[55] || (_cache[55] = [
+                                    default: _withCtx(() => [...(_cache[56] || (_cache[56] = [
                                       _createTextVNode("隐藏", -1)
                                     ]))]),
                                     _: 1
@@ -1671,7 +1671,7 @@ return (_ctx, _cache) => {
                                     disabled: busy.bulk,
                                     onClick: _cache[15] || (_cache[15] = $event => (bulkAction('unhide')))
                                   }, {
-                                    default: _withCtx(() => [...(_cache[56] || (_cache[56] = [
+                                    default: _withCtx(() => [...(_cache[57] || (_cache[57] = [
                                       _createTextVNode("恢复显示", -1)
                                     ]))]),
                                     _: 1
@@ -1684,8 +1684,21 @@ return (_ctx, _cache) => {
                                 disabled: busy.bulk,
                                 onClick: _cache[16] || (_cache[16] = $event => (bulkAction('stop_tracking')))
                               }, {
-                                default: _withCtx(() => [...(_cache[57] || (_cache[57] = [
+                                default: _withCtx(() => [...(_cache[58] || (_cache[58] = [
                                   _createTextVNode("停止跟踪", -1)
+                                ]))]),
+                                _: 1
+                              }, 8, ["loading", "disabled"]),
+                              _createVNode(_component_v_btn, {
+                                size: "small",
+                                variant: "text",
+                                "prepend-icon": "mdi-delete-sweep-outline",
+                                loading: busy.bulk,
+                                disabled: busy.bulk || !selectedRecords.value.some(r => r.acquisition_status === 'failed'),
+                                onClick: _cache[17] || (_cache[17] = $event => (purgeFailed(selectedIds.value)))
+                              }, {
+                                default: _withCtx(() => [...(_cache[59] || (_cache[59] = [
+                                  _createTextVNode("清理（含115）", -1)
                                 ]))]),
                                 _: 1
                               }, 8, ["loading", "disabled"])
@@ -1772,7 +1785,7 @@ return (_ctx, _cache) => {
                                     variant: "text",
                                     onClick: $event => (expanded[r.id] = false)
                                   }, {
-                                    default: _withCtx(() => [...(_cache[58] || (_cache[58] = [
+                                    default: _withCtx(() => [...(_cache[60] || (_cache[60] = [
                                       _createTextVNode("收起", -1)
                                     ]))]),
                                     _: 1
@@ -1783,7 +1796,7 @@ return (_ctx, _cache) => {
                               _createElementVNode("span", {
                                 class: _normalizeClass(["doc115-chip", statusColor(acquisitionState(r))])
                               }, _toDisplayString(statusName(acquisitionState(r))), 3),
-                              _cache[59] || (_cache[59] = _createElementVNode("span", { "aria-hidden": "true" }, "→", -1)),
+                              _cache[61] || (_cache[61] = _createElementVNode("span", { "aria-hidden": "true" }, "→", -1)),
                               _createElementVNode("span", {
                                 class: _normalizeClass(["doc115-chip", statusColor(organizationState(r))])
                               }, _toDisplayString(organizationSummary(r)), 3)
@@ -1833,7 +1846,7 @@ return (_ctx, _cache) => {
                                     disabled: busy.records || recordBusy(r),
                                     onClick: $event => (verifyOne(r))
                                   }, {
-                                    default: _withCtx(() => [...(_cache[60] || (_cache[60] = [
+                                    default: _withCtx(() => [...(_cache[62] || (_cache[62] = [
                                       _createTextVNode("核对 MP 整理", -1)
                                     ]))]),
                                     _: 1
@@ -1856,7 +1869,7 @@ return (_ctx, _cache) => {
                               }), 128))
                             ]),
                             _createElementVNode("details", _hoisted_87, [
-                              _cache[63] || (_cache[63] = _createElementVNode("summary", null, "详细信息", -1)),
+                              _cache[65] || (_cache[65] = _createElementVNode("summary", null, "详细信息", -1)),
                               (isDone(r))
                                 ? (_openBlock(), _createElementBlock("p", _hoisted_88, "目标：" + _toDisplayString(r.final_path || '待确认'), 1))
                                 : _createCommentVNode("", true),
@@ -1912,7 +1925,7 @@ return (_ctx, _cache) => {
                                       disabled: recordBusy(r),
                                       onClick: $event => (unhideRecord(r))
                                     }, {
-                                      default: _withCtx(() => [...(_cache[61] || (_cache[61] = [
+                                      default: _withCtx(() => [...(_cache[63] || (_cache[63] = [
                                         _createTextVNode("恢复显示", -1)
                                       ]))]),
                                       _: 1
@@ -1928,7 +1941,7 @@ return (_ctx, _cache) => {
                                         disabled: recordBusy(r),
                                         onClick: $event => (deleteRecord(r))
                                       }, {
-                                        default: _withCtx(() => [...(_cache[62] || (_cache[62] = [
+                                        default: _withCtx(() => [...(_cache[64] || (_cache[64] = [
                                           _createTextVNode("从列表隐藏", -1)
                                         ]))]),
                                         _: 1
@@ -1950,27 +1963,27 @@ return (_ctx, _cache) => {
                           "onUpdate:modelValue": changeRecordsPage
                         }, null, 8, ["model-value", "length", "disabled", "total-visible"]),
                         _createElementVNode("span", _hoisted_100, [
-                          _cache[65] || (_cache[65] = _createElementVNode("label", { for: "doc115-jump-records" }, "跳至", -1)),
+                          _cache[67] || (_cache[67] = _createElementVNode("label", { for: "doc115-jump-records" }, "跳至", -1)),
                           _withDirectives(_createElementVNode("input", {
                             id: "doc115-jump-records",
                             class: "doc115-jump",
                             type: "number",
                             min: "1",
                             max: recordsPageCount.value,
-                            "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((jump.records) = $event)),
+                            "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((jump.records) = $event)),
                             "aria-label": "任务列表跳转页码",
-                            onKeydown: _cache[18] || (_cache[18] = _withKeys($event => (jumpTo('records')), ["enter"]))
+                            onKeydown: _cache[19] || (_cache[19] = _withKeys($event => (jumpTo('records')), ["enter"]))
                           }, null, 40, _hoisted_101), [
                             [_vModelText, jump.records]
                           ]),
-                          _cache[66] || (_cache[66] = _createTextVNode("页", -1)),
+                          _cache[68] || (_cache[68] = _createTextVNode("页", -1)),
                           _createVNode(_component_v_btn, {
                             size: "x-small",
                             variant: "text",
                             disabled: busy.records,
-                            onClick: _cache[19] || (_cache[19] = $event => (jumpTo('records')))
+                            onClick: _cache[20] || (_cache[20] = $event => (jumpTo('records')))
                           }, {
-                            default: _withCtx(() => [...(_cache[64] || (_cache[64] = [
+                            default: _withCtx(() => [...(_cache[66] || (_cache[66] = [
                               _createTextVNode("跳转", -1)
                             ]))]),
                             _: 1
@@ -1979,8 +1992,8 @@ return (_ctx, _cache) => {
                       ]))
                     : _createCommentVNode("", true),
                   _createElementVNode("details", _hoisted_102, [
-                    _cache[69] || (_cache[69] = _createElementVNode("summary", null, "任务管理", -1)),
-                    _cache[70] || (_cache[70] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "只影响本插件的任务列表。云端搬运由后台按预算自动进行，无需手动触发。", -1)),
+                    _cache[71] || (_cache[71] = _createElementVNode("summary", null, "任务管理", -1)),
+                    _cache[72] || (_cache[72] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "只影响本插件的任务列表。云端搬运由后台按预算自动进行，无需手动触发。", -1)),
                     _createElementVNode("div", _hoisted_103, [
                       _createVNode(_component_v_btn, {
                         size: "small",
@@ -1989,7 +2002,7 @@ return (_ctx, _cache) => {
                         disabled: !recordsTotal.value || busy.bulk,
                         onClick: clearRecords
                       }, {
-                        default: _withCtx(() => [...(_cache[67] || (_cache[67] = [
+                        default: _withCtx(() => [...(_cache[69] || (_cache[69] = [
                           _createTextVNode("隐藏全部已结束任务", -1)
                         ]))]),
                         _: 1
@@ -2002,8 +2015,8 @@ return (_ctx, _cache) => {
                         disabled: !recordsTotal.value || busy.bulk,
                         onClick: purgeFailed
                       }, {
-                        default: _withCtx(() => [...(_cache[68] || (_cache[68] = [
-                          _createTextVNode("清理失败任务（含115）", -1)
+                        default: _withCtx(() => [...(_cache[70] || (_cache[70] = [
+                          _createTextVNode("清理全部失败任务（含115）", -1)
                         ]))]),
                         _: 1
                       }, 8, ["loading", "disabled"])
@@ -2013,7 +2026,7 @@ return (_ctx, _cache) => {
         ], 64)),
     _createVNode(_component_v_dialog, {
       modelValue: transferOpen.value,
-      "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((transferOpen).value = $event)),
+      "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((transferOpen).value = $event)),
       "max-width": "560"
     }, {
       default: _withCtx(() => [
@@ -2032,7 +2045,7 @@ return (_ctx, _cache) => {
           ]),
           _createVNode(_component_v_select, {
             modelValue: transferTarget.value,
-            "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((transferTarget).value = $event)),
+            "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((transferTarget).value = $event)),
             items: targetOptions,
             label: "保存到",
             variant: "outlined",
@@ -2043,7 +2056,7 @@ return (_ctx, _cache) => {
           _createElementVNode("p", _hoisted_108, _toDisplayString(transferPath.value), 1),
           _createVNode(_component_v_select, {
             modelValue: transferSource.value,
-            "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((transferSource).value = $event)),
+            "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((transferSource).value = $event)),
             items: sourceOptions(transferRecord.value),
             "item-title": "label",
             "item-value": "value",
@@ -2057,9 +2070,9 @@ return (_ctx, _cache) => {
           _createElementVNode("div", _hoisted_110, [
             _createVNode(_component_v_btn, {
               variant: "text",
-              onClick: _cache[22] || (_cache[22] = $event => (transferOpen.value = false))
+              onClick: _cache[23] || (_cache[23] = $event => (transferOpen.value = false))
             }, {
-              default: _withCtx(() => [...(_cache[72] || (_cache[72] = [
+              default: _withCtx(() => [...(_cache[74] || (_cache[74] = [
                 _createTextVNode("取消", -1)
               ]))]),
               _: 1
@@ -2071,7 +2084,7 @@ return (_ctx, _cache) => {
               loading: !!transferring[transferRecord.value?.record_id],
               onClick: confirmTransfer
             }, {
-              default: _withCtx(() => [...(_cache[73] || (_cache[73] = [
+              default: _withCtx(() => [...(_cache[75] || (_cache[75] = [
                 _createTextVNode("确认获取", -1)
               ]))]),
               _: 1
@@ -2089,8 +2102,8 @@ return (_ctx, _cache) => {
       tone: confirmState.tone,
       check: confirmState.check,
       dark: darkTheme.value,
-      onConfirm: _cache[24] || (_cache[24] = $event => (answerConfirm(true))),
-      onCancel: _cache[25] || (_cache[25] = $event => (answerConfirm(false)))
+      onConfirm: _cache[25] || (_cache[25] = $event => (answerConfirm(true))),
+      onCancel: _cache[26] || (_cache[26] = $event => (answerConfirm(false)))
     }, null, 8, ["model-value", "title", "text", "confirm-text", "tone", "check", "dark"])
   ], 8, _hoisted_1))
 }

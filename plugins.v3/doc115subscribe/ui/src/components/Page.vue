@@ -135,6 +135,7 @@
           <v-btn v-if="recordsFilter !== 'hidden'" size="small" variant="text" :loading="busy.bulk" :disabled="busy.bulk" @click="bulkAction('hide')">隐藏</v-btn>
           <v-btn v-if="recordsFilter === 'hidden' || selectedRecords.some(r => r.hidden)" size="small" variant="text" :loading="busy.bulk" :disabled="busy.bulk" @click="bulkAction('unhide')">恢复显示</v-btn>
           <v-btn size="small" variant="text" :loading="busy.bulk" :disabled="busy.bulk" @click="bulkAction('stop_tracking')">停止跟踪</v-btn>
+          <v-btn size="small" variant="text" prepend-icon="mdi-delete-sweep-outline" :loading="busy.bulk" :disabled="busy.bulk || !selectedRecords.some(r => r.acquisition_status === 'failed')" @click="purgeFailed(selectedIds)">清理（含115）</v-btn>
         </template>
       </div>
 
@@ -178,7 +179,7 @@
         </article>
       </template>
       <div v-if="recordsTotal > 0 && recordsPageCount > 1" class="doc115-pagination"><span class="doc115-muted doc115-small">第 {{ recordsPage }} / {{ recordsPageCount }} 页</span><v-pagination :model-value="recordsPage" :length="recordsPageCount" :disabled="busy.records" :total-visible="narrow ? 1 : 5" size="small" @update:model-value="changeRecordsPage" /><span class="doc115-jump-wrap"><label for="doc115-jump-records">跳至</label><input id="doc115-jump-records" class="doc115-jump" type="number" min="1" :max="recordsPageCount" v-model="jump.records" aria-label="任务列表跳转页码" @keydown.enter="jumpTo('records')" />页<v-btn size="x-small" variant="text" :disabled="busy.records" @click="jumpTo('records')">跳转</v-btn></span></div>
-      <details class="doc115-maintenance"><summary>任务管理</summary><p class="doc115-muted doc115-small">只影响本插件的任务列表。云端搬运由后台按预算自动进行，无需手动触发。</p><div class="doc115-actions doc115-wrap"><v-btn size="small" variant="text" :loading="busy.bulk" :disabled="!recordsTotal || busy.bulk" @click="clearRecords">隐藏全部已结束任务</v-btn><v-btn size="small" variant="text" prepend-icon="mdi-delete-sweep-outline" :loading="busy.bulk" :disabled="!recordsTotal || busy.bulk" @click="purgeFailed">清理失败任务（含115）</v-btn></div></details>
+      <details class="doc115-maintenance"><summary>任务管理</summary><p class="doc115-muted doc115-small">只影响本插件的任务列表。云端搬运由后台按预算自动进行，无需手动触发。</p><div class="doc115-actions doc115-wrap"><v-btn size="small" variant="text" :loading="busy.bulk" :disabled="!recordsTotal || busy.bulk" @click="clearRecords">隐藏全部已结束任务</v-btn><v-btn size="small" variant="text" prepend-icon="mdi-delete-sweep-outline" :loading="busy.bulk" :disabled="!recordsTotal || busy.bulk" @click="purgeFailed">清理全部失败任务（含115）</v-btn></div></details>
     </section>
     </template>
     <v-dialog v-model="transferOpen" max-width="560">
