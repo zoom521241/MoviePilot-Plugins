@@ -269,8 +269,15 @@ class TestEnterBlocked(unittest.TestCase):
 
 
 class TestVersion(unittest.TestCase):
-    def test_version_bumped(self):
-        self.assertEqual(P115StrgmSub.plugin_version, "1.5.9")
+    def test_version_matches_manifest(self):
+        # 版本号以 package.v3.json 为准，避免每次升版都要手改断言
+        import json
+        from pathlib import Path
+
+        manifest = json.loads(
+            (Path(__file__).resolve().parents[1] / "package.v3.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(P115StrgmSub.plugin_version, manifest["P115StrgmSub"]["version"])
 
     def test_site_constants(self):
         self.assertEqual(P115StrgmSub._SITE_115_ID, -1)

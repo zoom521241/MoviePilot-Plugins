@@ -1699,6 +1699,57 @@ class P115Transfer:
             return False
         return info["parent_id"] == str(cid)
 
+    # -- 115网盘Plus 搬运契约 ------------------------------------------------
+    # 上游 DDSRem 版 P115Api.move() 会在移动后用 self.get_item(new_path) 复核，
+    # 而它的 get_item 在接口异常时会降级走 StorageChain().get_file_item(storage="u115")
+    # —— 那是宿主的共享 u115 存储实例，既不在本插件的账号预算内，也可能读到别的账号视图。
+    # 因此允许这种"移动后自校验"实现，但必须满足：
+    #   1) move() 内不得出现本插件无法屏蔽的降级查询（get_attr / transfer_process）；
+    #   2) 调用期间屏蔽 StorageChain 降级，让 Plus 的复核只能走我们传入的私有 client；
+    #   3) 复核失败时以本插件的权威身份校验（文件ID + 父目录）为准，
+    #      避免把"其实已经搬运成功"误判为失败并触发重复搬运。
+    _PLUS_FORBIDDEN_MOVE_TOKENS = ("get_attr(", "transfer_process")
+
+    @classmethod
+    def _plus_move_contract(cls, api) -> bool:
+        """校验 Plus 的 move 实现；返回它是否自带"移动后复核"（上游 3.0.x 即如此）。"""
+        try:
+            move_source = inspect.getsource(type(api).move)
+        except (OSError, TypeError):
+            raise P115Deferred("无法验证Plus搬运请求契约，已暂停搬运", reason="capability") from None
+        if any(token in move_source for token in cls._PLUS_FORBIDDEN_MOVE_TOKENS):
+            raise P115Deferred("Plus搬运含不可控降级查询，已暂停搬运", reason="capability")
+        return "self.get_item(" in move_source
+
+    @staticmethod
+    @contextmanager
+    def _plus_shared_lookup_blocked():
+        """搬运期间屏蔽 Plus 的 StorageChain 降级查询，只放行传入的私有 client。"""
+        try:
+            from app.chain.storage import StorageChain  # type: ignore
+        except Exception:  # noqa: BLE001
+            yield
+            return
+        original = getattr(StorageChain, "get_file_item", None)
+        if not callable(original):
+            yield
+            return
+        StorageChain.get_file_item = lambda self, *args, **kwargs: None  # type: ignore[assignment]
+        try:
+            yield
+        finally:
+            StorageChain.get_file_item = original  # type: ignore[assignment]
+
+    def _plus_move_landed(self, file_id: str, item: Any, dest_dir: str) -> bool:
+        """Plus 自校验返回失败时，用本插件权威身份（文件ID + 父目录）确认真实结果。"""
+        fid = str(file_id or getattr(item, "fileid", "") or "")
+        if not fid.isdigit():
+            return False
+        try:
+            return bool(self.file_in_directory(fid, dest_dir))
+        except Exception:  # noqa: BLE001  （含预算切片耗尽：交给上层按未确认处理）
+            return False
+
     def move_via_p115disk(self, src_path: str, dest_dir: str, file_id: str = "") -> Tuple[bool, str]:
         """把网盘上的 ``src_path`` 移动到 ``dest_dir``。
 
@@ -1723,6 +1774,7 @@ class P115Transfer:
                 transport.local.last_deferred = None
                 transport.local.write_attempted = False
                 transport.local.write_completed = False
+            self_verifying = False
             if hasattr(self, "_budget"):
                 if not file_id:
                     return False, "缺少本批次真实文件ID，未执行搬运"
@@ -1743,12 +1795,7 @@ class P115Transfer:
                 cache = getattr(api, "_id_cache", None)
                 if not callable(getattr(cache, "add_cache", None)):
                     raise P115Deferred("Plus目标目录缓存契约不兼容，已暂停搬运", reason="capability")
-                try:
-                    move_source = inspect.getsource(type(api).move)
-                except (OSError, TypeError):
-                    raise P115Deferred("无法验证Plus搬运请求契约，已暂停搬运", reason="capability")
-                if any(word in move_source for word in ("StorageChain", "self.get_item(", "self.get_item_strict(", "get_attr(")):
-                    raise P115Deferred("Plus搬运含不可控降级查询，已暂停搬运", reason="capability")
+                self_verifying = self._plus_move_contract(api)
                 from app.schemas import FileItem  # type: ignore
                 is_dir = info["is_dir"]
                 item = FileItem(storage="115网盘Plus", fileid=str(file_id), parent_fileid=info["parent_id"],
@@ -1758,6 +1805,8 @@ class P115Transfer:
                     type="dir" if is_dir else "file", size=info.get("s", info.get("size", info.get("file_size"))),
                     pickcode=info.get("pc") or info.get("pick_code") or info.get("pickcode"))
                 cache.add_cache(id=cid, directory=dest)
+                if str(cache.get_id_by_dir(directory=dest)) != str(cid):
+                    raise P115Deferred("Plus未采用本插件的目标目录缓存，已暂停搬运", reason="capability")
                 dest_dir = dest
             else:  # standalone mocked compatibility path
                 lookup = getattr(api, "get_item_strict", None)
@@ -1769,7 +1818,14 @@ class P115Transfer:
             if file_id and str(getattr(item, "fileid", "")) != str(file_id):
                 return False, "源路径指向不同的115文件ID，未执行搬运，请核对同名文件"
             name = getattr(item, "name", None) or Path(src_path).name
-            if api.move(item, Path(dest_dir), name):
+            with self._plus_shared_lookup_blocked():
+                moved = api.move(item, Path(dest_dir), name)
+            if not moved and self_verifying:
+                # 上游 Plus 用 get_item 复核，目录缓存滞后时会误报失败：先失效本插件的文件信息缓存，
+                # 再用「文件ID + 父目录」重新确认，避免把已搬运的批次当成失败重试。
+                self.invalidate_file_info(file_id or str(getattr(item, "fileid", "")))
+                moved = self._plus_move_landed(file_id, item, dest_dir)
+            if moved:
                 self.invalidate_file_info(file_id or str(getattr(item, "fileid", "")))
                 src = posixpath.normpath(src_path.replace("\\", "/"))
                 if getattr(item, "type", "") == "dir":
