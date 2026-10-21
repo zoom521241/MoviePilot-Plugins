@@ -450,9 +450,10 @@ class TaskRuntime:
             self._update_live(rec["id"], generation, message="未看到对应离线任务，保留已有提交证据", offline_cursor=None)
             return
         if tr.task_failed(task):
+            message, failure_code = self._offline_failure(rec, task)
             self._update_live(rec["id"], generation, acquisition_status="failed", status="failed", next_check_at=0,
-                              message="115离线任务失败，请前往115处理")
-            self._set_subscription(rec.get("subscription_key"), status="failed", message="115离线任务失败")
+                              failure_code=failure_code, message=message)
+            self._set_subscription(rec.get("subscription_key"), status="failed", message=message)
             return
         pct = max(0, min(100, int(float(task.get("percentDone") or task.get("percent_done") or 0))))
         fid = str(task.get("file_id") or task.get("fid") or fid)
@@ -660,6 +661,34 @@ class TaskRuntime:
 
     TERMINAL_ACQUISITION = ("saved", "success", "failed")
 
+    @staticmethod
+    def _offline_failure(rec, task):
+        """区分「磁力本身无效/死种」与「其他离线失败」，返回 (提示文案, 失败码)。
+
+        115 离线任务失败时，若 size / peers / percentDone 全为 0，且任务名退化成裸 info_hash
+        （或为空），说明 115 连种子元数据都没解析出来，即公网已无做种者，重试通常没有意义。
+        只在 115 明确判定失败（status=-1）之后才调用，不会误伤刚提交、仍在解析中的任务。
+        """
+        fallback = ("115离线任务失败，请前往115处理", "offline_failed")
+        if str(rec.get("kind") or "") != LINK_MAGNET:
+            return fallback
+
+        def _num(value):
+            try:
+                return float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        size = _num(task.get("size"))
+        peers = _num(task.get("peers"))
+        pct = _num(task.get("percentDone") or task.get("percent_done"))
+        name = str(task.get("name") or "").strip().lower()
+        info_hash = str(rec.get("hash") or "").strip().lower()
+        unnamed = not name or (bool(info_hash) and name == info_hash)
+        if size <= 0 and peers <= 0 and pct <= 0 and unnamed:
+            return ("磁力链接无效或已无做种（115 未解析出种子信息，重试通常无效）", "magnet_dead")
+        return fallback
+
     @classmethod
     def _is_tracking(cls, item):
         """仍在后台处理：自动跟踪开启且获取未终结（saved/success/failed 以外）。"""
@@ -677,6 +706,8 @@ class TaskRuntime:
             actions.append("retry_submit")
         if acquisition == "failed" and item.get("hash"):
             actions.append("check_download")
+            # 失败且带 hash：允许连 115 离线任务记录一起清理（前端需二次确认）
+            actions.append("purge_cloud")
         if acquisition == "uncertain" or item.get("status") == "unverified":
             # 分享提交结果不明时自动重发已暂停；给出两条出路：只读核对 / 用户人工确认已转存
             actions.append("reconcile")
@@ -847,6 +878,56 @@ class TaskRuntime:
     def api_records_delete(self, payload: dict = None):
         return self.delete_record(str((payload or {}).get("id") or ""))
 
+    def api_purge_failed(self, payload: dict = None):
+        """清理失败任务：删除 115 对应的离线任务记录，再从列表隐藏。
+
+        只处理获取阶段明确失败（acquisition_status=failed）、带 info_hash 且已停止跟踪的记录。
+        逐条按 hash 删除，单条失败不影响其它记录；115 删除失败的记录**不会**被隐藏，
+        避免出现「本地说清了、云端还挂着」的假象。单次最多 50 条，避免集中删除触发 115 风控。
+        """
+        body = payload or {}
+        ids = body.get("ids")
+        if ids is not None and (not isinstance(ids, list) or not ids or len(ids) > 50):
+            return {"code": 1, "msg": "请选择 1 到 50 条记录"}
+        wanted = {str(x) for x in ids} if ids is not None else None
+        store = self._records()
+        targets = []
+        for rec in store.list(limit=None):
+            if wanted is not None and rec["id"] not in wanted:
+                continue
+            if rec.get("acquisition_status") != "failed" or self._is_tracking(rec):
+                continue
+            if not str(rec.get("hash") or "").strip():
+                continue
+            targets.append(rec)
+            if len(targets) >= 50:
+                break
+        if not targets:
+            return {"code": 0, "data": {"purged": 0, "failed": 0}, "msg": "没有可清理的失败任务"}
+        try:
+            tr = self._transfers()
+        except Exception as exc:
+            return {"code": 1, "msg": self._error(exc)}
+        purged, errors = 0, []
+        for rec in targets:
+            try:
+                tr.delete_offline_task(rec.get("hash"))
+            except MPDeferred as exc:
+                # 额度/风控延后：整轮停下，剩余记录留给下次，不误报为失败
+                errors.append(f"{rec.get('title') or rec.get('id')}：115请求已延后（{exc}）")
+                break
+            except Exception as exc:
+                errors.append(f"{rec.get('title') or rec.get('id')}：{self._error(exc)}")
+                continue
+            store.update(rec["id"], message="已清理115失败任务")
+            if store.delete(rec["id"]):
+                purged += 1
+        msg = f"已清理 {purged} 条失败任务及其115离线记录"
+        if errors:
+            msg += f"，{len(errors)} 条未清理：" + "；".join(errors[:3])
+        return {"code": 0 if purged or not errors else 1,
+                "data": {"purged": purged, "failed": len(errors)}, "msg": msg}
+
     def api_records_bulk(self, payload: dict = None):
         body = payload or {}
         ids, action = body.get("ids"), str(body.get("action") or "")
@@ -932,6 +1013,8 @@ class TaskRuntime:
             return self._confirm_saved(rec)
         if action == "confirm_organized":
             return self._confirm_organized(rec)
+        if action == "purge_cloud":
+            return self.api_purge_failed({"ids": [rec["id"]]})
         return {"code": 1, "msg": "不支持的任务操作"}
 
     def _request_reconcile(self, rec):

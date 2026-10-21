@@ -401,6 +401,7 @@ const ACTIONS = {
   confirm_saved: { label: '我已确认文件在 115 中' },
   confirm_organized: { label: '人工确认已整理', primary: true },
   stop_tracking: { label: '停止自动跟踪' },
+  purge_cloud: { label: '清理（含115记录）' },
 };
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
@@ -695,6 +696,24 @@ async function clearRecords() {
   finally { busy.bulk = false; }
   await afterMutation();
 }
+async function purgeFailed(ids = null) {
+  if (busy.bulk) return
+  const scope = Array.isArray(ids) && ids.length ? `选中的 ${ids.length} 条` : '所有';
+  const text = `清理${scope}失败任务？会同时删除 115 里对应的离线任务记录，已下载落盘的文件不受影响；这些资源会被记为已处理，之后不会再自动重新获取。115 删除失败的记录会保留在列表里。`;
+  if (!(await askConfirm({ title: '清理失败任务', text, confirmText: '删除记录并清理115', tone: 'danger', check: '我知道 115 端离线任务会被删除' }))) return
+  busy.bulk = true;
+  try {
+    const res = await post('purge_failed', Array.isArray(ids) && ids.length ? { ids: [...ids] } : {});
+    const data = res.data || {};
+    if (res.code === 0) {
+      const leftover = Number(data.failed) || 0;
+      setMsg(`已清理 ${Number(data.purged) || 0} 条失败任务${leftover ? `，${leftover} 条因 115 删除失败已保留` : ''}。`, leftover ? 'warning' : 'success');
+      if (Array.isArray(ids)) for (const id of ids) delete selected[id];
+    } else showResult(res, '清理已完成。');
+  } catch (e) { setMsg(`清理失败：${describeError(e)}`, 'error'); }
+  finally { busy.bulk = false; }
+  await afterMutation();
+}
 async function taskAction(r, action) {
   if (!r?.id || !hasAction(r, action) || retrying[r.id]) return
   retrying[r.id] = action;
@@ -708,6 +727,7 @@ const ACTION_CONFIRM = {
   retry_submit: r => ({ title: '重新获取', text: `重新获取「${r.title}」？会再次提交 115 转存或离线下载，只适用于此前已明确获取失败的任务。`, confirmText: '重新获取', tone: 'danger' }),
   confirm_saved: r => ({ title: '人工确认已转存', text: `把「${r.title}」标记为已保存，并转入 MP 整理核对。仅当你已在 115 中确认文件存在时使用；标记错误会让任务停在待整理状态。`, confirmText: '确认已转存', tone: 'danger', check: '我已在 115 网盘中看到这些文件' }),
   confirm_organized: r => ({ title: '人工确认已整理', text: `把「${r.title}」标记为整理成功。适用于文件已在 Emby/Plex/Jellyfin 入库，但 MP 历史记录因标题差异过大查询不到的情况。`, confirmText: '确认已整理', tone: 'danger', check: '我已在媒体库中看到这些影片' }),
+  purge_cloud: r => ({ title: '清理失败任务', text: `把「${r.title}」从列表移除，并删除 115 里对应的离线任务记录。已下载落盘的文件不受影响；该资源会被记为已处理，之后不会再自动重新获取。`, confirmText: '删除记录并清理115', tone: 'danger', check: '我知道 115 端离线任务会被删除' }),
 };
 async function runRecordAction(r, action) {
   if (!r?.id || recordBusy(r) || !hasAction(r, action)) return
@@ -1591,7 +1611,7 @@ return (_ctx, _cache) => {
                       class: "doc115-records-q"
                     }, null, 8, ["modelValue"])
                   ]),
-                  _cache[70] || (_cache[70] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "刷新只读取本地任务。获取、搬运与 MP 整理分别确认；MP 整理成功不代表媒体服务器已收录。", -1)),
+                  _cache[71] || (_cache[71] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "刷新只读取本地任务。获取、搬运与 MP 整理分别确认；MP 整理成功不代表媒体服务器已收录。", -1)),
                   (busy.records)
                     ? (_openBlock(), _createBlock(_component_v_progress_linear, {
                         key: 0,
@@ -1959,8 +1979,8 @@ return (_ctx, _cache) => {
                       ]))
                     : _createCommentVNode("", true),
                   _createElementVNode("details", _hoisted_102, [
-                    _cache[68] || (_cache[68] = _createElementVNode("summary", null, "任务管理", -1)),
-                    _cache[69] || (_cache[69] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "只影响本插件的任务列表。云端搬运由后台按预算自动进行，无需手动触发。", -1)),
+                    _cache[69] || (_cache[69] = _createElementVNode("summary", null, "任务管理", -1)),
+                    _cache[70] || (_cache[70] = _createElementVNode("p", { class: "doc115-muted doc115-small" }, "只影响本插件的任务列表。云端搬运由后台按预算自动进行，无需手动触发。", -1)),
                     _createElementVNode("div", _hoisted_103, [
                       _createVNode(_component_v_btn, {
                         size: "small",
@@ -1971,6 +1991,19 @@ return (_ctx, _cache) => {
                       }, {
                         default: _withCtx(() => [...(_cache[67] || (_cache[67] = [
                           _createTextVNode("隐藏全部已结束任务", -1)
+                        ]))]),
+                        _: 1
+                      }, 8, ["loading", "disabled"]),
+                      _createVNode(_component_v_btn, {
+                        size: "small",
+                        variant: "text",
+                        "prepend-icon": "mdi-delete-sweep-outline",
+                        loading: busy.bulk,
+                        disabled: !recordsTotal.value || busy.bulk,
+                        onClick: purgeFailed
+                      }, {
+                        default: _withCtx(() => [...(_cache[68] || (_cache[68] = [
+                          _createTextVNode("清理失败任务（含115）", -1)
                         ]))]),
                         _: 1
                       }, 8, ["loading", "disabled"])
@@ -2026,7 +2059,7 @@ return (_ctx, _cache) => {
               variant: "text",
               onClick: _cache[22] || (_cache[22] = $event => (transferOpen.value = false))
             }, {
-              default: _withCtx(() => [...(_cache[71] || (_cache[71] = [
+              default: _withCtx(() => [...(_cache[72] || (_cache[72] = [
                 _createTextVNode("取消", -1)
               ]))]),
               _: 1
@@ -2038,7 +2071,7 @@ return (_ctx, _cache) => {
               loading: !!transferring[transferRecord.value?.record_id],
               onClick: confirmTransfer
             }, {
-              default: _withCtx(() => [...(_cache[72] || (_cache[72] = [
+              default: _withCtx(() => [...(_cache[73] || (_cache[73] = [
                 _createTextVNode("确认获取", -1)
               ]))]),
               _: 1

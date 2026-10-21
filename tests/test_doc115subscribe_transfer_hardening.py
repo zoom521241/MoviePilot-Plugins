@@ -67,6 +67,8 @@ class FakeSDK:
         return self.request("https://synthetic.invalid/?ac=add_task_urls", "POST", p, **kw)
     def clouddownload_task_list(self, p, **kw):
         return self.request("https://synthetic.invalid/?ac=task_lists", payload=p, **kw)
+    def clouddownload_task_del(self, p, **kw):
+        return self.request("https://synthetic.invalid/?ac=task_del", "POST", p, **kw)
     def fs_file(self, p, **kw):
         return self.request("https://synthetic.invalid/files/get_info", payload={"file_id": p}, **kw)
     def fs_files(self, p, **kw):

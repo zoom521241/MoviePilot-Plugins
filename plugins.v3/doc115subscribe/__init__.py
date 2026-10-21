@@ -46,7 +46,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
     plugin_name = "115文档订阅与查询"
     plugin_desc = "腾讯文档跨表搜索、电影订阅与115分享/离线任务管理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
-    plugin_version = "0.11.9"
+    plugin_version = "0.12.0"
     plugin_author = "zoom521241"
     author_url = "https://github.com/zoom521241"
     plugin_config_prefix = "doc115subscribe_"
@@ -522,6 +522,7 @@ class Doc115Subscribe(TaskRuntime, _PluginBase):
                    ("search", self.api_search, "POST"), ("transfer", self.api_transfer, "POST"),
                    ("records", self.api_records, "GET"),
                    ("records_delete", self.api_records_delete, "POST"), ("records_bulk", self.api_records_bulk, "POST"),
+                   ("purge_failed", self.api_purge_failed, "POST"),
                    ("records_verify", self.api_records_verify, "POST"), ("run_subscribe", self.api_run_subscribe, "POST"),
                    ("subscriptions_preview", self.api_subscriptions_preview, "GET"), ("subscriptions_fetch", self.api_subscriptions_fetch, "POST"),
                    ("diagnostics", self.api_diagnostics, "GET"), ("directories", self.api_directories, "GET"),

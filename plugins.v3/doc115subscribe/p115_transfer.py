@@ -254,7 +254,8 @@ class _BudgetTransport:
         operation = getattr(self.local, "operation", "")
         path = urlsplit(str(url)).path.lower()
         writing = method.upper() not in ("GET", "HEAD") and (
-            operation in {"share_receive", "clouddownload_task_add_urls", "fs_makedirs_app"} or any(
+            operation in {"share_receive", "clouddownload_task_add_urls", "clouddownload_task_del",
+                          "fs_makedirs_app"} or any(
                 term in path for term in ("/move", "/rename", "/add_task", "/receive", "/mkdir", "/add_path", "/add_urls")))
         # Creating a directory is re-entrant: a lost reply is reconciled by a
         # read (fs_dir_getid) before any retry, so it is not an uncertain write.
@@ -338,7 +339,8 @@ def _private_client(cookie, transport):
         if "request" not in params or "async_" not in params:
             raise ValueError("unsupported request callback")
         for name in ("fs_file", "fs_files", "fs_dir_getid", "share_snap", "share_receive",
-                     "clouddownload_task_list", "clouddownload_task_add_urls", "fs_move", "fs_move_app", "fs_makedirs_app"):
+                     "clouddownload_task_list", "clouddownload_task_add_urls", "clouddownload_task_del",
+                     "fs_move", "fs_move_app", "fs_makedirs_app"):
             if not callable(getattr(P115Client, name, None)):
                 raise ValueError("missing SDK capability")
             source = inspect.getsource(getattr(P115Client, name))
@@ -1126,6 +1128,22 @@ class P115Transfer:
                                     retry_at=time.time() + 30, state=result.as_dict(), not_sent=False)
             deferred.reconcile_only = True
             raise deferred from exc
+
+    def delete_offline_task(self, info_hash: str, delete_files: bool = False) -> Dict[str, Any]:
+        """删除 115 离线任务记录，默认保留已落盘文件。
+
+        115 的 task_del 只按 info_hash 定位，这里不做名称模糊匹配，避免误删同名任务；
+        调用方负责先确认该任务确实处于失败状态。任务已不存在时由调用方按幂等处理。
+        """
+        wanted = normalize_info_hash(info_hash)
+        if not wanted:
+            raise P115Error("缺少 info_hash，拒绝删除离线任务")
+        resp = self._call("clouddownload_task_del", {
+            "hash[0]": wanted,
+            "flag": 1 if delete_files else 0,
+        }, intent={"kind": "offline_delete", "info_hash": wanted, "delete_files": bool(delete_files)})
+        self._require_success(resp, "删除离线任务")
+        return resp
 
     def offline_add(self, url: str, save_path: str, before_submit=None) -> OfflineSubmission:
         """Submit only trackable links; reconcile duplicate/uncertain outcomes."""
