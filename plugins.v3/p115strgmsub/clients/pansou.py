@@ -2,10 +2,12 @@
 PanSou 网盘搜索客户端
 用于搜索各类网盘资源
 """
+import ipaddress
 import re
 import unicodedata
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -60,9 +62,47 @@ class PanSouClient:
         self._api_call_count = 0
         # 代理设置（兼容字符串和字典格式）
         if proxy:
-            self._proxies = proxy if isinstance(proxy, dict) else {"http": proxy, "https": proxy}
+            host = self._extract_host(self.base_url)
+            if host and self._is_lan_host(host):
+                # 内网/回环地址若走 HTTP 代理，代理侧无法回连，会被判 502 当成「无资源」，
+                # 因此局域网自建 PanSou 一律直连；公网地址仍然沿用 MP 代理。
+                self._proxies = None
+                logger.info(f"PanSou 地址 {self.base_url} 属于内网（{host}），已跳过代理直连")
+            else:
+                self._proxies = proxy if isinstance(proxy, dict) else {"http": proxy, "https": proxy}
         else:
             self._proxies = None
+
+    @staticmethod
+    def _extract_host(url: str) -> str:
+        """从 URL 中取出主机名，兼容缺省协议头的写法"""
+        if not url:
+            return ""
+        candidate = url if "//" in url else f"//{url}"
+        try:
+            return (urlsplit(candidate).hostname or "").strip("[]")
+        except ValueError:
+            return ""
+
+    @staticmethod
+    def _is_lan_host(host: str) -> bool:
+        """
+        判断主机是否属于内网：回环、私有网段、链路本地、单标签主机名（容器名）及 .local 等内部域
+        """
+        if not host:
+            return False
+        lowered = host.lower()
+        if lowered in ("localhost", "localhost.localdomain"):
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+            return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified
+        except ValueError:
+            pass
+        if lowered.endswith((".local", ".localdomain", ".lan", ".home", ".internal")):
+            return True
+        # 不含点的单标签主机名，通常就是 Docker 容器名/内网主机名
+        return "." not in lowered
 
     @staticmethod
     def _normalize_for_match(text: str) -> str:

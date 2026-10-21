@@ -92,7 +92,7 @@
     "name": "115网盘订阅追更",
     "description": "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。",
     "labels": "订阅,115网盘,V3",
-    "version": "1.5.11",
+    "version": "1.5.12",
     "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
@@ -100,6 +100,7 @@
     "system_version": ">=3.0.0",
     "v3": true,
     "history": {
+      "v1.5.12": "修复局域网自建 PanSou 搜不到资源：MP 全局代理被无差别套用到内网地址，代理侧无法回连返回 502，插件把请求失败当成「无资源」静默跳过；现对回环/私有网段/单标签主机名的 PanSou 地址自动跳过代理直连，公网地址仍走代理；同时 PanSou 请求级失败改为告警日志，不再与「确实没有资源」混为一谈。",
       "v1.5.11": "适配上游 P115Disk 3.0.3 / P115StrmHelper 3.0.2：解除 p115client==0.0.9.6.5.1 与 python-concurrenttools==0.1.8 的硬锁，改为 p115client>=0.0.9.6.5.1，避免与上游插件的 p115client==0.0.9.7.2 冲突导致 MoviePilot 依赖健康检查整批解析失败。",
       "v1.5.10": "修复电影订阅转存错片：按分享标题/文件名校验年份与续集号，剔除同名片（如订阅《街头霸王(2026)》却转存《街头霸王2(1994)》）；PanSou 降级关键词增加英文名/原名兜底，并记录被剔除的候选资源。",
       "v1.5.9": "固定 p115client 0.0.9.6.5.1 与 python-concurrenttools 0.1.8，修复依赖接口变化导致加载失败或 115 功能不可用，避免重建容器后再次装入不兼容版本。",

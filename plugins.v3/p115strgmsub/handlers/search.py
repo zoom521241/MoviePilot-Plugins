@@ -194,7 +194,12 @@ class SearchHandler:
             limit=20
         )
 
-        results = search_results.get("results", {}) if search_results and not search_results.get("error") else {}
+        if search_results and search_results.get("error"):
+            # 请求级失败（如代理 502、超时）不能等同于「没有资源」，否则日志只剩「无结果」，极难排查
+            logger.warning(f"PanSou 搜索失败（关键词：{keyword}）：{search_results.get('error')}")
+            return []
+
+        results = (search_results or {}).get("results", {}) or {}
         return results.get("115网盘", [])
 
     def _search_nullbr(
