@@ -39,7 +39,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.12"
+    plugin_version = "1.5.13"
     # 插件作者
     plugin_author = "zoom521241"
     # 作者主页
@@ -1082,10 +1082,28 @@ class P115StrgmSub(_PluginBase):
 
         # 115 客户端检查
         if not self._p115_manager:
-            logger.error("115 客户端未初始化，请检查 Cookie 配置")
+            logger.error("115 客户端未初始化，请检查插件中的 115 Cookie 配置")
+            if self._notify:
+                self.post_message(
+                    mtype=NotificationType.Manual,
+                    title="【115网盘订阅追更】缺少 Cookie",
+                    text="未读取到 115 Cookie，请在插件设置中填写后重试。"
+                )
             return False
 
         if not self._p115_manager.check_login():
+            reason = self._p115_manager.unavailable_reason
+            if reason:
+                # 依赖未就绪属于启动阶段的一次性问题，装好后下一轮会自动恢复，
+                # 不应提示用户去更新 Cookie
+                logger.warning(f"115 客户端暂不可用，本轮跳过（{reason}）")
+                if self._notify:
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title="【115网盘订阅追更】依赖未就绪",
+                        text=f"115 客户端暂不可用：{reason}\n本轮已跳过，依赖安装完成后下一轮会自动恢复，无需修改 Cookie。"
+                    )
+                return False
             logger.error("115 登录失败，Cookie 可能已过期")
             if self._notify:
                 self.post_message(

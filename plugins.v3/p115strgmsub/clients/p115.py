@@ -9,14 +9,67 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Callable
 
 from app.log import logger
-try:
-    from p115client import P115Client, check_response
-    from p115client.util import share_extract_payload
-    from p115client.tool.iterdir import share_iterdir
+
+# 依赖延迟加载：MoviePilot 更新镜像重建容器后，插件可能在 pip 装回 p115client 之前
+# 就被导入。此前的写法把 ImportError 固化在模块级常量里，之后即使依赖装好也不会重试，
+# 表现为「115 Cookie 可能已过期」的误报。这里改为可重试的惰性导入。
+P115_AVAILABLE = False
+P115Client: Optional[Any] = None
+check_response: Optional[Callable] = None
+share_extract_payload: Optional[Callable] = None
+share_iterdir: Optional[Callable] = None
+
+_P115_LOADED = False
+_P115_IMPORT_ERROR = ""
+
+
+def ensure_p115_available(force: bool = False) -> bool:
+    """
+    惰性导入 p115client，失败不固化，下次调用会重试
+
+    :param force: 强制重新校验（例如依赖刚被安装完成）
+    :return: 依赖是否可用
+    """
+    global P115_AVAILABLE, P115Client, check_response
+    global share_extract_payload, share_iterdir
+    global _P115_LOADED, _P115_IMPORT_ERROR
+
+    if _P115_LOADED and not force:
+        return True
+
+    try:
+        from p115client import P115Client as _P115Client
+        from p115client import check_response as _check_response
+        from p115client.util import share_extract_payload as _share_extract_payload
+        from p115client.tool.iterdir import share_iterdir as _share_iterdir
+    except ImportError as e:
+        _P115_LOADED = False
+        P115_AVAILABLE = False
+        _P115_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+        logger.warning(
+            f"p115client 依赖暂不可用，稍后自动重试（{_P115_IMPORT_ERROR}）"
+        )
+        return False
+
+    P115Client = _P115Client
+    check_response = _check_response
+    share_extract_payload = _share_extract_payload
+    share_iterdir = _share_iterdir
     P115_AVAILABLE = True
-except ImportError:
-    P115_AVAILABLE = False
-    logger.warning("p115client 未安装，115网盘功能不可用，请安装: pip install p115client")
+    _P115_LOADED = True
+    _P115_IMPORT_ERROR = ""
+    return True
+
+
+def p115_unavailable_reason() -> str:
+    """返回依赖不可用的原因，可用时返回空串"""
+    if P115_AVAILABLE:
+        return ""
+    return _P115_IMPORT_ERROR or "p115client 未安装"
+
+
+# 首次导入时先尝试一次（失败不影响插件加载，后续调用会继续重试）
+ensure_p115_available()
 
 
 @dataclass
@@ -220,11 +273,38 @@ class P115ClientManager:
         # 分享信息缓存（URL -> {share_code, receive_code}）
         self._share_info_cache: Dict[str, Dict[str, str]] = {}
 
-        if P115_AVAILABLE and cookies:
-            try:
-                self.client = P115Client(cookies, app="web")
-            except Exception as e:
-                logger.error(f"初始化 P115Client 失败: {e}")
+        if cookies:
+            self._try_init_client()
+
+    def _try_init_client(self) -> bool:
+        """
+        依赖就绪时创建 115 客户端
+
+        启动阶段依赖可能还没装好，此时 client 为 None；每次检查登录前都会重新尝试，
+        依赖装好后本轮定时任务即可自愈，不必重启容器。
+        """
+        if self.client is not None:
+            return True
+        if not self.cookies:
+            return False
+        if not ensure_p115_available():
+            return False
+        try:
+            self.client = P115Client(self.cookies, app="web")
+            logger.info("p115client 依赖已就绪，115 客户端已建立")
+            return True
+        except Exception as e:
+            logger.error(f"初始化 P115Client 失败: {e}")
+            return False
+
+    @property
+    def unavailable_reason(self) -> str:
+        """客户端不可用时的原因，可用时返回空串"""
+        if self.client is not None:
+            return ""
+        if not self.cookies:
+            return "未配置 115 Cookie"
+        return p115_unavailable_reason()
 
     def _rate_limited_call(self, func: Callable, *args, **kwargs):
         """
@@ -238,7 +318,7 @@ class P115ClientManager:
 
     def check_login(self) -> bool:
         """检查登录状态"""
-        if not self.client:
+        if not self._try_init_client():
             return False
 
         try:
@@ -365,7 +445,7 @@ class P115ClientManager:
         :param url: 115 分享链接
         :return: {"share_code": ..., "receive_code": ...}
         """
-        if not P115_AVAILABLE:
+        if not ensure_p115_available():
             return {}
 
         # 检查缓存
