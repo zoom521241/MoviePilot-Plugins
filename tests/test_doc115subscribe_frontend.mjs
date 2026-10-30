@@ -708,6 +708,27 @@ test('reconcile runs directly while confirm_saved needs the checked second confi
   page.close()
 })
 
+test('paused batch shows a retry button that only asks the backend to resume tracking', async () => {
+  const posts = []
+  const page = component('Page', {
+    post: async (path, payload) => { posts.push([path, payload]); return { code: 0, msg: '已重新纳入后台跟踪，稍后自动继续', data: { state: 'queued' } } },
+    get: async () => ({ code: 0, data: { records: [], total: 0, page: 1 } }),
+  })
+  // 现场复原：SDK 能力探测失败后 tracking 关闭、acquisition 仍是 queued
+  const r = { id: 'p', title: '挽救计划', acquisition_status: 'queued', tracking_enabled: false, query_error: '未安装兼容的115网盘Plus SDK；搜索可用，云端获取暂不可用', last_error: '未安装兼容的115网盘Plus SDK；搜索可用，云端获取暂不可用', allowed_actions: ['retry'] }
+  assert.deepEqual(page.visibleActions(r).map(a => a.action), ['retry'])
+  assert.equal(page.visibleActions(r)[0].label, '重试')
+  const pending = page.runRecordAction(r, 'retry'); await flush()
+  assert.match(page.confirmState.text, /不会重复提交/, 'must state that retry never re-sends the acquire request')
+  page.answerConfirm(true); await pending
+  assert.deepEqual(posts[0], ['plugin/Doc115Subscribe/task_action', { id: 'p', action: 'retry' }])
+  // 后端不再给 retry 时按钮必须消失（避免点了报错）
+  assert.deepEqual(page.visibleActions({ ...r, tracking_enabled: true, allowed_actions: ['stop_tracking', 'check_download'] }).map(a => a.action), ['check_download', 'stop_tracking'])
+  await page.runRecordAction({ ...r, allowed_actions: [] }, 'retry')
+  assert.equal(posts.length, 1, 'retry must be refused when the backend does not advertise it')
+  page.close()
+})
+
 test('expired QR status clears the session and image even when the backend answers code 1', async () => {
   const page = component('Page', { get: async () => ({ code: 1, msg: '二维码已失效', data: { state: 'expired' } }) })
   page.qrSessionId.value = 'old'

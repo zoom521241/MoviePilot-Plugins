@@ -702,6 +702,12 @@ class TaskRuntime:
             actions += (["check_download"] if item.get("hash") else []) + ["stop_tracking"]
         if item.get("move_status") == "failed":
             actions.append("retry_move")
+        # 「重试」：因本地原因（SDK 未就绪 / 115 账号变化 / 目标目录变化）被暂停自动跟踪、
+        # 但获取流程还没终结的批次，修好原因后由用户手动放回后台队列。
+        # 它只恢复跟踪状态，不会重发已经提交过的请求；uncertain 走「核对转存结果」更安全。
+        if not item.get("tracking_enabled", True) and acquisition in (
+                "queued", "submitting", "downloading", "awaiting_move", "moving"):
+            actions.append("retry")
         if acquisition == "failed" and not item.get("hash"):
             actions.append("retry_submit")
         if acquisition == "failed" and item.get("hash"):
@@ -995,6 +1001,32 @@ class TaskRuntime:
         self._set_subscription(rec.get("subscription_key"), status="pending")
         return {"code": 0, "msg": "已排队核对原任务，遵守冷却和请求额度"}
 
+    PAUSED_RETRYABLE = ("queued", "submitting", "downloading", "awaiting_move", "moving")
+
+    def retry_paused_task(self, rec):
+        """用户手动重试：把被本地原因暂停自动跟踪的批次重新放回后台队列。
+
+        只恢复本地跟踪状态，不发送任何 115 请求；真正的下一步仍由 2 秒一轮的离线 worker
+        按原状态决定（已提交过的写操作靠 attempt 账本与 uncertain 状态防重复，
+        ``_submit_step`` 只对未提交过的批次发提交）。因此这个按钮在 115 侧是幂等的。
+        """
+        store = self._records()
+        status = str(rec.get("acquisition_status") or "")
+        if status in ("saved", "success"):
+            return {"code": 1, "msg": "任务已转存，请用「核对转存结果」"}
+        if status == "uncertain" or rec.get("status") == "unverified":
+            return {"code": 1, "msg": "提交结果待核实，请用「核对转存结果」"}
+        if status == "failed":
+            return self.api_retry_task({"id": rec["id"], "action": "retry_submit"})
+        if status not in self.PAUSED_RETRYABLE:
+            return {"code": 1, "msg": f"当前状态（{status or '未知'}）不支持重试"}
+        now = time.time()
+        store.update(rec["id"], tracking_enabled=True, config_generation=self._generation,
+                     next_check_at=now, query_error="", last_error="", query_errors=0,
+                     message="已手动重试，重新纳入后台跟踪")
+        self._set_subscription(rec.get("subscription_key"), status="pending")
+        return {"code": 0, "msg": "已重新纳入后台跟踪，稍后自动继续", "data": {"state": status}}
+
     def api_task_action(self, payload: dict = None):
         body = payload or {}
         rec = self._records().get(str(body.get("id") or ""))
@@ -1007,6 +1039,8 @@ class TaskRuntime:
             return self.api_cancel_task({"id": rec["id"]})
         if action in ("retry_move", "retry_submit", "check_download"):
             return self.api_retry_task({"id": rec["id"], "action": action})
+        if action == "retry":
+            return self.retry_paused_task(rec)
         if action == "reconcile":
             return self._request_reconcile(rec)
         if action == "confirm_saved":

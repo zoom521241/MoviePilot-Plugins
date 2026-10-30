@@ -247,6 +247,7 @@ const recordFilterOptions = [{ value: 'all', label: '全部' }, { value: 'active
 const mediaOptions = [{ value: 'all', label: '全部' }, { value: 'movie', label: '电影' }, { value: 'tv', label: '电视剧' }, { value: 'unknown', label: '类型待确认' }]
 const targetOptions = [{ title: '电影目录', value: 'movie' }, { title: '电视剧目录', value: 'tv' }]
 const ACTIONS = {
+  retry: { label: '重试', primary: true },
   reconcile: { label: '核对转存结果', primary: true },
   check_download: { label: '重查下载状态' },
   retry_move: { label: '重试搬运', primary: true },
@@ -576,6 +577,7 @@ async function taskAction(r, action) {
   await afterMutation()
 }
 const ACTION_CONFIRM = {
+  retry: r => ({ title: '重试任务', text: `把「${r.title}」重新放回后台自动处理？只会恢复跟踪状态并按原进度继续，不会重复提交 115 转存或离线任务。`, confirmText: '重试' }),
   stop_tracking: r => ({ title: '停止自动跟踪', text: `停止「${r.title}」的自动跟踪？已有下载与文件会保留，之后不再自动核对${r.subscription_key ? '；对应的电影订阅也不再由本插件自动获取' : ''}。`, confirmText: '停止跟踪', tone: 'danger' }),
   retry_submit: r => ({ title: '重新获取', text: `重新获取「${r.title}」？会再次提交 115 转存或离线下载，只适用于此前已明确获取失败的任务。`, confirmText: '重新获取', tone: 'danger' }),
   confirm_saved: r => ({ title: '人工确认已转存', text: `把「${r.title}」标记为已保存，并转入 MP 整理核对。仅当你已在 115 中确认文件存在时使用；标记错误会让任务停在待整理状态。`, confirmText: '确认已转存', tone: 'danger', check: '我已在 115 网盘中看到这些文件' }),

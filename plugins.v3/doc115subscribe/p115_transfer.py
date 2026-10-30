@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import gzip
 import hashlib
+import importlib
 import inspect
 import json
 import posixpath
@@ -26,15 +27,40 @@ from urllib.parse import parse_qs, urlsplit, urlencode
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, HTTPCookieProcessor, HTTPRedirectHandler
 
-try:
-    from p115client import P115Client
-    from p115client.util import share_extract_payload
+P115Client = None  # type: ignore
+share_extract_payload = None  # type: ignore
+# 最近一次导入失败的原文，仅用于诊断提示（不含 cookie / 账号信息）。
+P115_SDK_ERROR = ""
+P115_AVAILABLE = False
 
-    P115_AVAILABLE = True
-except Exception:  # noqa: BLE001
-    P115Client = None  # type: ignore
-    share_extract_payload = None  # type: ignore
-    P115_AVAILABLE = False
+
+def load_sdk(force: bool = False) -> bool:
+    """惰性导入 115 SDK，可在运行期自愈。
+
+    MoviePilot 启动时会先加载插件、再安装插件依赖，所以「模块导入那一刻」SDK 可能
+    还不存在。早期实现把这次失败永久固化进模块级 ``P115_AVAILABLE``，导致进程里
+    所有云端操作都报「未安装兼容的115网盘Plus SDK」，直到重启 MP 才好。
+    这里改成：导入失败不算终态，每次真正要用 SDK 时再试一次（``force`` 可强制重试）。
+    """
+    global P115Client, share_extract_payload, P115_AVAILABLE, P115_SDK_ERROR
+    if P115_AVAILABLE and not force:
+        return True
+    try:
+        # 依赖是在本进程启动后装进 site-packages 的：清掉导入器缓存，
+        # 否则 sys.path 里新出现的包可能仍然找不到。
+        importlib.invalidate_caches()
+        from p115client import P115Client as _client
+        from p115client.util import share_extract_payload as _extract
+    except Exception as exc:  # noqa: BLE001
+        P115_SDK_ERROR = f"{type(exc).__name__}: {exc}"
+        # 已经成功导入过就保持可用：一次探测失败不应把能力收回。
+        return P115_AVAILABLE
+    P115Client, share_extract_payload = _client, _extract
+    P115_AVAILABLE, P115_SDK_ERROR = True, ""
+    return True
+
+
+load_sdk()
 
 try:
     from .link_router import LINK_115_SHARE, LINK_ED2K, LINK_MAGNET
@@ -468,8 +494,11 @@ class P115Transfer:
         return self.__dict__.setdefault("_doc115_state_lock", threading.RLock())
 
     def __init__(self, cookie: str, timeout: int = 30):
-        if not P115_AVAILABLE:
-            raise P115Deferred("未安装兼容的115网盘Plus SDK；搜索可用，云端获取暂不可用", reason="capability")
+        if not load_sdk():
+            # 依赖可能是本进程启动后才装上的：每次构造都重新探测一次，装好即自愈，
+            # 不必再重启 MoviePilot。导入错误原文只用于定位，不含任何账号信息。
+            detail = f"（{P115_SDK_ERROR[:180]}）" if P115_SDK_ERROR else ""
+            raise P115Deferred(f"未安装兼容的115网盘Plus SDK；搜索可用，云端获取暂不可用{detail}", reason="capability")
         if not cookie:
             raise P115Error("缺少 115 Cookie")
         self.timeout = max(1.0, float(timeout))
