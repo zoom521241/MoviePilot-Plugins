@@ -45,10 +45,11 @@ def ensure_p115_available(force: bool = False) -> bool:
     except ImportError as e:
         _P115_LOADED = False
         P115_AVAILABLE = False
-        _P115_IMPORT_ERROR = f"{type(e).__name__}: {e}"
-        logger.warning(
-            f"p115client 依赖暂不可用，稍后自动重试（{_P115_IMPORT_ERROR}）"
-        )
+        reason = f"{type(e).__name__}: {e}"
+        # 依赖安装窗口期内会被反复调用，同一条原因只告警一次，避免刷屏
+        if reason != _P115_IMPORT_ERROR:
+            _P115_IMPORT_ERROR = reason
+            logger.warning(f"p115client 依赖暂不可用，稍后自动重试（{reason}）")
         return False
 
     P115Client = _P115Client
