@@ -212,6 +212,7 @@ class UIConfig:
                                     'model': 'search_source_order',
                                     'label': '搜索源优先级（按选择顺序排序）',
                                     'items': [
+                                        {'title': 'RDhub (rdhub115)', 'value': 'rdhub'},
                                         {'title': 'PanSou (盘搜)', 'value': 'pansou'},
                                         {'title': 'HDHive (影巢)', 'value': 'hdhive'},
                                         {'title': 'Nullbr', 'value': 'nullbr'}
@@ -220,7 +221,7 @@ class UIConfig:
                                     'chips': True,
                                     'clearable': True,
                                     'closable-chips': True,
-                                    'hint': '按选择的先后顺序依次搜索，前面的源搜到结果就不再查询后面的；留空使用默认优先级 Nullbr > HDHive > PanSou；未选入的已启用源会自动排在末尾',
+                                    'hint': '按选择的先后顺序依次搜索，前面的源搜到结果就不再查询后面的；留空使用默认优先级 RDhub > Nullbr > HDHive > PanSou；未选入的已启用源会自动排在末尾',
                                     'persistent-hint': True
                                 }
                             }]
@@ -260,6 +261,73 @@ class UIConfig:
                              'content': [{'component': 'VTextField', 'props': {'model': 'pansou_username', 'label': 'PanSou 用户名', 'placeholder': '启用认证时填写'}}]},
                             {'component': 'VCol', 'props': {'cols': 12, 'md': 6},
                              'content': [{'component': 'VTextField', 'props': {"clearable": True, 'model': 'pansou_password', 'label': 'PanSou 密码', 'type': 'password', 'placeholder': '启用认证时填写'}}]}
+                        ]
+                    },
+                    # RDhub说明
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol',
+                            'props': {'cols': 12},
+                            'content': [{
+                                'component': 'VAlert',
+                                'props': {'type': 'info', 'variant': 'tonal',
+                                          'text': 'RDhub（rdhub115.cc）：115 分享资源分发站，按 TMDB ID 精确查询，直接给出 115 分享链接，'
+                                                  '集号/画质标注完整。默认排除原盘（REMUX/BDMV/原盘/ISO），4K 与中文资源优先。'
+                                                  '只需填写站点账号密码，登录失败时可用 access_token 兜底。'}
+                            }]
+                        }]
+                    },
+                    # RDhub 配置
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
+                             'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_enabled', 'label': '启用 RDhub'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 5},
+                             'content': [{'component': 'VTextField', 'props': {'model': 'rdhub_url', 'label': '站点地址', 'placeholder': 'https://www.rdhub115.cc'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_exclude_disc', 'label': '排除原盘/蓝光镜像'}}]}
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VTextField', 'props': {'model': 'rdhub_username', 'label': '站点账号', 'placeholder': '用户名'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VTextField', 'props': {'clearable': True, 'model': 'rdhub_password', 'label': '站点密码', 'type': 'password', 'placeholder': '密码'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 2},
+                             'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_prefer_4k', 'label': '4K 优先'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 2},
+                             'content': [{'component': 'VTextField', 'props': {'model': 'rdhub_max_preview', 'label': '预览上限', 'type': 'number', 'placeholder': '8'}}]}
+                        ]
+                    },
+                    # 全局整理口径
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol',
+                            'props': {'cols': 12, 'md': 4},
+                            'content': [{'component': 'VSwitch', 'props': {'model': 'exclude_disc_images',
+                                                                          'label': '整理时排除原盘/蓝光镜像'}}]
+                        }, {
+                            'component': 'VCol',
+                            'props': {'cols': 12, 'md': 8},
+                            'content': [{'component': 'VAlert', 'props': {
+                                'type': 'info', 'variant': 'tonal',
+                                'text': '开启后，分享内命中 REMUX / BDMV / BDISO / 原盘 / ISO 的文件与目录不会被转存；'
+                                        '同时按 4K（2160p）与中文（简繁/中字/国语/双语）给候选文件加分，用于洗版时择优。'}}]
+                        }]
+                    },
+                    # RDhub Token（可选，登录失败兜底）
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6},
+                             'content': [{'component': 'VTextField', 'props': {'clearable': True, 'model': 'rdhub_access_token', 'label': 'Access Token（可选）', 'type': 'password', 'placeholder': '自动登录失败时可手动粘贴'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6},
+                             'content': [{'component': 'VTextField', 'props': {'clearable': True, 'model': 'rdhub_refresh_token', 'label': 'Refresh Token（可选）', 'type': 'password', 'placeholder': '用于自动续期'}}]}
                         ]
                     },
                     # Nullbr说明
@@ -436,8 +504,7 @@ class UIConfig:
             "save_path": "/我的接收/MoviePilot/TV",
             "movie_save_path": "/我的接收/MoviePilot/Movie",
             "cookies": "",
-            "pansou_enabled": True,
-            "pansou_url": "https://so.252035.xyz/",
+            "pansou_enabled": True,            "pansou_url": "https://so.252035.xyz/",
             "pansou_username": "",
             "pansou_password": "",
             "pansou_auth_enabled": False,
@@ -462,6 +529,16 @@ class UIConfig:
             "hdhive_cookie": "",
             "hdhive_auto_refresh": True,
             "hdhive_refresh_before": 86400,
+            "rdhub_enabled": False,
+            "rdhub_url": "https://www.rdhub115.cc",
+            "rdhub_username": "",
+            "rdhub_password": "",
+            "rdhub_access_token": "",
+            "rdhub_refresh_token": "",
+            "rdhub_exclude_disc": True,
+            "rdhub_prefer_4k": True,
+            "rdhub_max_preview": 8,
+            "exclude_disc_images": True,
             "search_source_order": [],
             "subscribe_filter_mode": "exclude",
             "exclude_subscribes": [],

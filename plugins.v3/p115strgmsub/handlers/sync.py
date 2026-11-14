@@ -16,7 +16,7 @@ from app.schemas import MediaInfo
 from app.schemas.types import MediaType, NotificationType
 from app.utils.string import StringUtils
 
-from ..utils import FileMatcher, SubscribeFilter
+from ..utils import FileMatcher, SubscribeFilter, name_rank
 from .search import SearchHandler
 from .subscribe import SubscribeHandler
 
@@ -63,7 +63,8 @@ class SyncHandler:
         notify: bool = False,
         post_message_func: Callable = None,
         get_data_func: Callable = None,
-        save_data_func: Callable = None
+        save_data_func: Callable = None,
+        exclude_disc_images: bool = True
     ):
         """
         初始化同步处理器
@@ -95,6 +96,28 @@ class SyncHandler:
         self._post_message = post_message_func
         self._get_data = get_data_func
         self._save_data = save_data_func
+        self._exclude_disc_images = exclude_disc_images
+
+    def _drop_disc_images(self, share_files: List[Dict]) -> List[Dict]:
+        """
+        剔除原盘 / 蓝光镜像文件（REMUX、BDMV、ISO、m2ts 等）
+
+        这类资源体积巨大且不符合整理入库要求，按「原盘不要」的统一口径过滤。
+        """
+        if not self._exclude_disc_images or not share_files:
+            return share_files
+        kept: List[Dict] = []
+        dropped = 0
+        for item in share_files:
+            name = item.get("name") or ""
+            path = item.get("path") or ""
+            if name_rank.is_disc_image(name, path):
+                dropped += 1
+                continue
+            kept.append(item)
+        if dropped:
+            logger.info(f"已排除 {dropped} 个原盘/镜像文件（{len(kept)} 个保留）")
+        return kept
 
     def process_movie_subscribe(
         self,
@@ -224,6 +247,7 @@ class SyncHandler:
                         continue
 
                     share_files = self._p115_manager.list_share_files(share_url)
+                    share_files = self._drop_disc_images(share_files)
                     if not share_files:
                         logger.info(f"分享链接无内容：{share_url}")
                         continue
@@ -242,6 +266,8 @@ class SyncHandler:
 
                         # 计算当前文件的过滤分数和是否完美匹配
                         _, current_score = subscribe_filter.match(file_name) if subscribe_filter.has_filters() else (True, 0)
+                        # 4K / 中文偏好加分（原盘已在列目录阶段剔除）
+                        current_score += name_rank.preference_score(file_name)
                         is_perfect = subscribe_filter.is_perfect_match(file_name) if subscribe_filter.has_filters() else True
 
                         # 洗版模式下检查是否需要升级资源
@@ -659,6 +685,7 @@ class SyncHandler:
                             share_url,
                             target_season=(season if self._skip_other_season_dirs else None)
                         )
+                        share_files = self._drop_disc_images(share_files)
                         if not share_files:
                             logger.info(f"分享链接无内容：{share_url}")
                             continue
@@ -682,6 +709,8 @@ class SyncHandler:
                                 logger.info(f"找到匹配文件：{file_name} -> E{episode:02d}")
 
                                 _, current_score = subscribe_filter.match(file_name) if subscribe_filter.has_filters() else (True, 0)
+                                # 4K / 中文偏好加分（原盘已在列目录阶段剔除）
+                                current_score += name_rank.preference_score(file_name)
                                 is_perfect = subscribe_filter.is_perfect_match(file_name) if subscribe_filter.has_filters() else True
 
                                 is_upgrade = False

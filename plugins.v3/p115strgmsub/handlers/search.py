@@ -33,7 +33,9 @@ class SearchHandler:
         hdhive_max_points_per_sub: int = 20,
         only_115: bool = True,
         pansou_channels: str = "",
-        search_source_order: Optional[List[str]] = None
+        search_source_order: Optional[List[str]] = None,
+        rdhub_client=None,
+        rdhub_enabled: bool = False
     ):
         """
         初始化搜索处理器
@@ -75,6 +77,8 @@ class SearchHandler:
         self._only_115 = only_115
         self._pansou_channels = pansou_channels
         self._search_source_order = search_source_order or []
+        self._rdhub_client = rdhub_client
+        self._rdhub_enabled = rdhub_enabled
 
     def get_enabled_sources(self) -> List[str]:
         """
@@ -83,12 +87,16 @@ class SearchHandler:
         优先级规则：
         1. 用户配置了自定义优先级（search_source_order）时按其顺序排列；
            未出现在自定义列表中的已启用源按默认顺序追加在末尾
-        2. 未配置时使用默认优先级 Nullbr > HDHive > PanSou
+        2. 未配置时使用默认优先级 RDhub > Nullbr > HDHive > PanSou
 
         :return: 搜索源名称列表
         """
         # 按默认优先级收集已启用且可用的源
         available = []
+
+        # RDhub（按 TMDB 精确查询，4K/中文优先，原盘排除）
+        if self._rdhub_enabled and self._rdhub_client and getattr(self._rdhub_client, "is_ready", False):
+            available.append("rdhub")
 
         # Nullbr
         if self._nullbr_enabled and self._nullbr_client:
@@ -155,13 +163,15 @@ class SearchHandler:
         """
         使用指定的单一搜索源查询资源
 
-        :param source: 搜索源名称 ("nullbr", "hdhive", "pansou")
+        :param source: 搜索源名称 ("rdhub", "nullbr", "hdhive", "pansou")
         :param mediainfo: 媒体信息
         :param media_type: 媒体类型
         :param season: 季号（电视剧时使用）
         :return: 115网盘资源列表
         """
-        if source == "nullbr":
+        if source == "rdhub":
+            return self._search_rdhub(mediainfo, media_type, season)
+        elif source == "nullbr":
             return self._search_nullbr(mediainfo, media_type, season)
         elif source == "hdhive":
             return self._search_hdhive(mediainfo, media_type, season)
@@ -238,6 +248,59 @@ class SearchHandler:
 
         logger.info(f"Nullbr 未找到资源")
         return []
+
+    def _search_rdhub(
+        self,
+        mediainfo: MediaInfo,
+        media_type: MediaType,
+        season: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        仅使用 RDhub 搜索资源
+
+        RDhub 按 TMDB ID 精确查询，返回的候选已按「原盘排除、4K 优先、中文优先」排序，
+        因此这里不再做标题模糊匹配，只需把结构转换成插件统一格式。
+
+        :param mediainfo: 媒体信息
+        :param media_type: 媒体类型（MOVIE 或 TV）
+        :param season: 季号（电视剧时使用）
+        :return: 115网盘资源列表
+        """
+        if not self._rdhub_client or not getattr(self._rdhub_client, "is_ready", False):
+            logger.warning("RDhub 未启用或未配置账号密码，跳过 RDhub 查询")
+            return []
+
+        if not getattr(mediainfo, "tmdb_id", None):
+            logger.warning(f"{mediainfo.title} 缺少 TMDB ID，无法使用 RDhub 查询")
+            return []
+
+        try:
+            results = self._rdhub_client.search(mediainfo, media_type, season)
+        except Exception as e:
+            logger.error(f"RDhub 查询异常：{e}")
+            return []
+
+        if not results:
+            logger.info("RDhub 未找到资源")
+            return []
+
+        converted: List[Dict] = []
+        for item in results:
+            url = item.get("url") or ""
+            if not url:
+                continue
+            converted.append({
+                "title": item.get("title") or mediainfo.title,
+                "url": url,
+                "tmdb_id": item.get("tmdb_id"),
+                "source": "rdhub",
+                "quality": item.get("quality") or "",
+                "season_episode": item.get("season_episode") or "",
+                "score": item.get("score") or 0,
+            })
+
+        logger.info(f"RDhub 找到 {len(converted)} 个候选资源（已按原盘/4K/中文偏好排序）")
+        return converted
 
     @staticmethod
     def _movie_title_variants(mediainfo: MediaInfo) -> List[str]:

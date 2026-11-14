@@ -3,6 +3,7 @@
 包含文件匹配、通用工具等
 """
 from .file_matcher import FileMatcher, SubscribeFilter
+from . import name_rank
 from .tools import (
     download_so_file,
     get_hdhive_token_info,
@@ -16,6 +17,7 @@ from .tools import (
 __all__ = [
     "FileMatcher",
     "SubscribeFilter",
+    "name_rank",
     "download_so_file",
     "get_hdhive_token_info",
     "check_hdhive_cookie_valid",

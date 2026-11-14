@@ -21,7 +21,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, MediaType, NotificationType, SystemConfigKey
 
-from .clients import PanSouClient, P115ClientManager, NullbrClient, HDHiveOpenAPIClient, HDHiveOpenAPIError
+from .clients import PanSouClient, P115ClientManager, NullbrClient, HDHiveOpenAPIClient, HDHiveOpenAPIError, RDHubClient
 from .handlers import SearchHandler, SyncHandler, SubscribeHandler, ApiHandler
 from .ui import UIConfig
 from .utils import download_so_file
@@ -39,7 +39,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.13"
+    plugin_version = "1.5.14"
     # 插件作者
     plugin_author = "zoom521241"
     # 作者主页
@@ -81,6 +81,19 @@ class P115StrgmSub(_PluginBase):
     _nullbr_appid: str = ""
     _nullbr_api_key: str = ""
 
+    # RDhub（rdhub115.cc）：按 TMDB 查询 115 分享资源
+    _rdhub_enabled: bool = False
+    _rdhub_url: str = "https://www.rdhub115.cc"
+    _rdhub_username: str = ""
+    _rdhub_password: str = ""
+    _rdhub_access_token: str = ""
+    _rdhub_refresh_token: str = ""
+    _rdhub_exclude_disc: bool = True
+    _rdhub_prefer_4k: bool = True
+    _rdhub_max_preview: int = 8
+    # 全局：整理时排除原盘/蓝光镜像
+    _exclude_disc_images: bool = True
+
     _hdhive_enabled: bool = False
     _hdhive_username: str = ""
     _hdhive_password: str = ""
@@ -119,6 +132,7 @@ class P115StrgmSub(_PluginBase):
     _p115_manager: Optional[P115ClientManager] = None
     _nullbr_client: Optional[NullbrClient] = None
     _hdhive_client: Optional[Any] = None
+    _rdhub_client: Optional[Any] = None
 
     # 处理器
     _search_handler: Optional[SearchHandler] = None
@@ -666,6 +680,21 @@ class P115StrgmSub(_PluginBase):
             self._nullbr_appid = config.get("nullbr_appid", "")
             self._nullbr_api_key = config.get("nullbr_api_key", "")
 
+            # RDhub
+            self._rdhub_enabled = config.get("rdhub_enabled", False)
+            self._rdhub_url = (config.get("rdhub_url", self._rdhub_url) or "https://www.rdhub115.cc").strip()
+            self._rdhub_username = (config.get("rdhub_username", "") or "").strip()
+            self._rdhub_password = (config.get("rdhub_password", "") or "").strip()
+            self._rdhub_access_token = (config.get("rdhub_access_token", "") or "").strip()
+            self._rdhub_refresh_token = (config.get("rdhub_refresh_token", "") or "").strip()
+            self._rdhub_exclude_disc = bool(config.get("rdhub_exclude_disc", True))
+            self._rdhub_prefer_4k = bool(config.get("rdhub_prefer_4k", True))
+            try:
+                self._rdhub_max_preview = int(config.get("rdhub_max_preview", self._rdhub_max_preview) or 8)
+            except (TypeError, ValueError):
+                self._rdhub_max_preview = 8
+            self._exclude_disc_images = bool(config.get("exclude_disc_images", True))
+
             self._hdhive_enabled = config.get("hdhive_enabled", False)
             self._hdhive_query_mode = config.get("hdhive_query_mode", "api")
             self._hdhive_api_key = (config.get("hdhive_api_key", "") or "").strip()
@@ -747,11 +776,51 @@ class P115StrgmSub(_PluginBase):
 
     # ------------------ init clients/handlers ------------------
 
+    def _on_rdhub_token_update(self, tokens: Dict[str, Any]):
+        """RDhub Token 变更后持久化到插件配置"""
+        self._rdhub_access_token = tokens.get("access_token", "") or ""
+        self._rdhub_refresh_token = tokens.get("refresh_token", "") or ""
+        try:
+            self.__update_config()
+        except Exception as e:
+            logger.debug(f"RDhub Token 持久化异常：{e}")
+
+    def _init_rdhub_client(self, proxy=None):
+        """初始化 RDhub 客户端"""
+        try:
+            self._rdhub_client = RDHubClient(
+                base_url=self._rdhub_url,
+                username=self._rdhub_username,
+                password=self._rdhub_password,
+                access_token=self._rdhub_access_token,
+                refresh_token=self._rdhub_refresh_token,
+                proxy=proxy,
+                on_token_update=self._on_rdhub_token_update,
+                exclude_disc=self._rdhub_exclude_disc,
+                prefer_4k=self._rdhub_prefer_4k,
+                max_preview=self._rdhub_max_preview,
+            )
+            logger.info(f"RDhub 客户端初始化成功（{self._rdhub_url}）")
+        except Exception as e:
+            self._rdhub_client = None
+            logger.error(f"RDhub 客户端初始化失败：{e}")
+
     def _init_clients(self):
         """初始化客户端"""
         proxy = settings.PROXY
         if proxy:
             logger.info(f"使用 MoviePilot PROXY: {proxy}")
+
+        # RDhub
+        self._rdhub_client = None
+        if self._rdhub_enabled:
+            if not self._rdhub_username or not self._rdhub_password:
+                if not self._rdhub_access_token:
+                    logger.warning("RDhub 已启用但未配置账号密码（或 access_token），将无法使用 RDhub 查询功能")
+                else:
+                    self._init_rdhub_client(proxy)
+            else:
+                self._init_rdhub_client(proxy)
 
         if self._pansou_enabled and self._pansou_url:
             self._pansou_client = PanSouClient(
@@ -879,7 +948,9 @@ class P115StrgmSub(_PluginBase):
             hdhive_cookie=self._hdhive_cookie,
             only_115=self._only_115,
             pansou_channels=self._pansou_channels,
-            search_source_order=self._search_source_order
+            search_source_order=self._search_source_order,
+            rdhub_client=self._rdhub_client,
+            rdhub_enabled=self._rdhub_enabled,
         )
         # 设置持久化函数，用于保存订阅的历史积分花费
         self._search_handler.set_data_funcs(self.get_data, self.save_data)
@@ -897,7 +968,8 @@ class P115StrgmSub(_PluginBase):
             notify=self._notify,
             post_message_func=self.post_message,
             get_data_func=self.get_data,
-            save_data_func=self.save_data
+            save_data_func=self.save_data,
+            exclude_disc_images=self._exclude_disc_images
         )
 
         self._api_handler = ApiHandler(
@@ -948,6 +1020,17 @@ class P115StrgmSub(_PluginBase):
             "hdhive_cookie": self._hdhive_cookie,
             "hdhive_auto_refresh": self._hdhive_auto_refresh,
             "hdhive_refresh_before": self._hdhive_refresh_before,
+            # RDhub
+            "rdhub_enabled": self._rdhub_enabled,
+            "rdhub_url": self._rdhub_url,
+            "rdhub_username": self._rdhub_username,
+            "rdhub_password": self._rdhub_password,
+            "rdhub_access_token": self._rdhub_access_token,
+            "rdhub_refresh_token": self._rdhub_refresh_token,
+            "rdhub_exclude_disc": self._rdhub_exclude_disc,
+            "rdhub_prefer_4k": self._rdhub_prefer_4k,
+            "rdhub_max_preview": self._rdhub_max_preview,
+            "exclude_disc_images": self._exclude_disc_images,
             # 其他配置
             "search_source_order": self._search_source_order,
             "subscribe_filter_mode": self._subscribe_filter_mode,
