@@ -40,7 +40,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.25"
+    plugin_version = "1.5.26"
     # 插件作者
     plugin_author = "zoom521241"
     # 作者主页
@@ -94,6 +94,8 @@ class P115StrgmSub(_PluginBase):
     _rdhub_checkin_enabled: bool = False
     _rdhub_checkin_time: str = "08:30"
     _rdhub_checkin_gamble: bool = False
+    # RDhub 订阅同步（独立于搜索开关，仅同步电影）
+    _rdhub_sub_sync_enabled: bool = False
     # 全局：整理时排除原盘/蓝光镜像
     _exclude_disc_images: bool = True
 
@@ -628,6 +630,31 @@ class P115StrgmSub(_PluginBase):
         except Exception as e:
             logger.error(f"SubscribeAdded 兜底失败：{e}")
 
+        # RDhub 平台订阅同步（仅电影，独立开关）
+        try:
+            self._sync_subscribe_to_rdhub_by_id(sid)
+        except Exception as e:
+            logger.warning(f"RDhub 订阅同步异常（subscribe_id={sid}）：{e}")
+
+    @eventmanager.register(EventType.SubscribeDeleted)
+    def on_subscribe_deleted(self, event: Event):
+        """MP 取消订阅 → 取消 RDhub 平台订阅"""
+        if not self._rdhub_sub_sync_enabled:
+            return
+        tmdb_id = self._extract_tmdb_from_event(event)
+        if not tmdb_id:
+            return
+        self._cancel_rdhub_subscription(tmdb_id)
+
+    @eventmanager.register(EventType.SubscribeComplete)
+    def on_subscribe_complete(self, event: Event):
+        """MP 订阅完成 → 取消 RDhub 平台订阅"""
+        if not self._rdhub_sub_sync_enabled:
+            return
+        tmdb_id = self._extract_tmdb_from_event(event)
+        if tmdb_id:
+            self._cancel_rdhub_subscription(tmdb_id)
+
     @eventmanager.register(EventType.SubscribeModified)
     def on_subscribe_modified(self, event: Event):
         """
@@ -640,6 +667,138 @@ class P115StrgmSub(_PluginBase):
         if self._block_system_subscribe:
             logger.info(f"已屏蔽系统订阅：检测到订阅改动，按规则不自动拉回（subscribe_id={sid}）")
         return
+
+    # ------------------ RDhub 订阅同步 ------------------
+
+    @staticmethod
+    def _extract_tmdb_from_event(event: Event) -> Optional[str]:
+        """从事件快照里尽量取出 tmdb_id（订阅已删除时 DB 查不到，只能靠快照）"""
+        if not event or not event.event_data:
+            return None
+        data = event.event_data or {}
+        info = {}
+        if isinstance(data, dict):
+            info = data.get("subscribe_info") or data.get("old_subscribe_info") or {}
+        if not isinstance(info, dict):
+            info = {}
+        for key in ("tmdbid", "tmdb_id", "media_id"):
+            value = info.get(key)
+            if value:
+                return str(value)
+        return None
+
+    def _rdhub_ready(self) -> bool:
+        client = self._rdhub_client
+        return bool(self._rdhub_sub_sync_enabled and client and getattr(client, "is_ready", False))
+
+    def _sync_subscribe_to_rdhub_by_id(self, subscribe_id: int) -> None:
+        """按订阅 ID 同步单条（事件入口）"""
+        if not self._rdhub_ready():
+            return
+        try:
+            subscribe = SubscribeOper().get(subscribe_id)
+        except Exception as e:
+            logger.debug(f"读取订阅失败（id={subscribe_id}）：{e}")
+            return
+        if not subscribe:
+            return
+        self._sync_one_subscribe_to_rdhub(subscribe)
+
+    def _sync_one_subscribe_to_rdhub(self, subscribe) -> bool:
+        """
+        同步单条订阅到 RDhub（仅电影）
+
+        :return: True 表示已同步/已存在，False 表示失败或跳过
+        """
+        if not self._rdhub_ready():
+            return False
+        if getattr(subscribe, "type", "") != "电影":
+            return False
+        tmdb_id = str(getattr(subscribe, "media_id", "") or "").strip()
+        name = getattr(subscribe, "name", "") or ""
+        if not tmdb_id:
+            logger.info(f"RDhub 订阅同步跳过：{name} 缺少 TMDB ID")
+            return False
+        client = self._rdhub_client
+        try:
+            for item in client.list_subscriptions():
+                if str(item.get("tmdb_id")) == tmdb_id and (item.get("media_type") or "movie") == "movie":
+                    logger.info(f"RDhub 已存在该订阅，跳过：{name} (TMDB {tmdb_id})")
+                    return True
+            data = client.subscribe_tmdb(tmdb_id, "movie", title=name)
+            message = (data or {}).get("message") or ""
+            if "already" in message.lower():
+                logger.info(f"RDhub 已存在该订阅：{name} (TMDB {tmdb_id})")
+                return True
+            logger.info(f"RDhub 订阅同步成功：{name} (TMDB {tmdb_id}) → {message or 'ok'}")
+            return True
+        except Exception as e:
+            logger.warning(f"RDhub 订阅同步失败：{name} (TMDB {tmdb_id}) - {e}")
+            return False
+
+    def _cancel_rdhub_subscription(self, tmdb_id) -> bool:
+        """取消 RDhub 订阅（按 tmdb_id 找 resource_id）"""
+        if not self._rdhub_ready():
+            return False
+        client = self._rdhub_client
+        try:
+            for item in client.list_subscriptions():
+                if str(item.get("tmdb_id")) != str(tmdb_id):
+                    continue
+                resource_id = item.get("resource_id")
+                if not resource_id:
+                    continue
+                client.unsubscribe(resource_id)
+                logger.info(f"RDhub 订阅已取消：TMDB {tmdb_id}（resource_id={resource_id}）")
+                return True
+            logger.info(f"RDhub 无对应订阅，无需取消：TMDB {tmdb_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"RDhub 取消订阅失败：TMDB {tmdb_id} - {e}")
+            return False
+
+    def sync_rdhub_subscriptions(self) -> dict:
+        """一次性全量同步：MP 电影订阅 → RDhub（差集，已存在的跳过）"""
+        if not self._rdhub_sub_sync_enabled:
+            return {"success": False, "message": "订阅同步开关未开启"}
+        if not self._rdhub_ready():
+            return {"success": False, "message": "RDhub 客户端未就绪（检查账号密码/开关）"}
+        client = self._rdhub_client
+        try:
+            mp_subs = [
+                s for s in (SubscribeOper().list() or [])
+                if getattr(s, "type", "") == "电影" and getattr(s, "state", "") in ("R", "P", None)
+            ]
+        except Exception as e:
+            return {"success": False, "message": f"读取 MP 订阅失败：{e}"}
+
+        try:
+            site_subs = client.list_subscriptions()
+        except Exception as e:
+            return {"success": False, "message": f"读取 RDhub 订阅失败：{e}"}
+
+        existing = {
+            str(item.get("tmdb_id"))
+            for item in site_subs
+            if (item.get("media_type") or "movie") == "movie"
+        }
+        added, skipped, failed = 0, 0, 0
+        for sub in mp_subs:
+            tmdb_id = str(getattr(sub, "media_id", "") or "").strip()
+            if not tmdb_id:
+                skipped += 1
+                continue
+            if tmdb_id in existing:
+                skipped += 1
+                continue
+            if self._sync_one_subscribe_to_rdhub(sub):
+                added += 1
+                existing.add(tmdb_id)
+            else:
+                failed += 1
+        summary = f"共 {len(mp_subs)} 条电影订阅：新增 {added}，已存在 {skipped}，失败 {failed}"
+        logger.info(f"RDhub 订阅同步完成：{summary}")
+        return {"success": True, "message": summary, "added": added, "skipped": skipped, "failed": failed}
 
     # ------------------ init_plugin ------------------
 
@@ -699,6 +858,7 @@ class P115StrgmSub(_PluginBase):
             self._rdhub_checkin_enabled = bool(config.get("rdhub_checkin_enabled", False))
             self._rdhub_checkin_time = (config.get("rdhub_checkin_time", self._rdhub_checkin_time) or "08:30").strip()
             self._rdhub_checkin_gamble = bool(config.get("rdhub_checkin_gamble", False))
+            self._rdhub_sub_sync_enabled = bool(config.get("rdhub_sub_sync_enabled", False))
 
             self._hdhive_enabled = config.get("hdhive_enabled", False)
             self._hdhive_query_mode = config.get("hdhive_query_mode", "api")
@@ -895,16 +1055,24 @@ class P115StrgmSub(_PluginBase):
         if proxy:
             logger.info(f"使用 MoviePilot PROXY: {proxy}")
 
-        # RDhub
+        # RDhub：搜索与订阅同步各自独立，任一开启都需要客户端
         self._rdhub_client = None
-        if self._rdhub_enabled:
+        if self._rdhub_enabled or self._rdhub_sub_sync_enabled:
+            need_for = []
+            if self._rdhub_enabled:
+                need_for.append("搜索")
+            if self._rdhub_sub_sync_enabled:
+                need_for.append("订阅同步")
             if not self._rdhub_username or not self._rdhub_password:
                 if not self._rdhub_access_token:
-                    logger.warning("RDhub 已启用但未配置账号密码（或 access_token），将无法使用 RDhub 查询功能")
+                    logger.warning(
+                        f"RDhub 已开启（{'/'.join(need_for)}）但未配置账号密码（或 access_token），相关功能不可用"
+                    )
                 else:
                     self._init_rdhub_client(proxy)
             else:
                 self._init_rdhub_client(proxy)
+                logger.info(f"RDhub 客户端已就绪（用途：{'/'.join(need_for)}）")
 
         if self._pansou_enabled and self._pansou_url:
             self._pansou_client = PanSouClient(
@@ -1116,6 +1284,7 @@ class P115StrgmSub(_PluginBase):
             "rdhub_checkin_enabled": self._rdhub_checkin_enabled,
             "rdhub_checkin_time": self._rdhub_checkin_time,
             "rdhub_checkin_gamble": self._rdhub_checkin_gamble,
+            "rdhub_sub_sync_enabled": self._rdhub_sub_sync_enabled,
             "exclude_disc_images": self._exclude_disc_images,
             # 其他配置
             "search_source_order": self._search_source_order,
@@ -1184,6 +1353,12 @@ class P115StrgmSub(_PluginBase):
                 "endpoint": self.sync_subscribes,
                 "methods": ["GET"],
                 "summary": "执行同步订阅追更"
+            },
+            {
+                "path": "/sync_rdhub_subscriptions",
+                "endpoint": self.sync_rdhub_subscriptions,
+                "methods": ["GET"],
+                "summary": "把 MP 电影订阅同步到 RDhub"
             },
             {
                 "path": "/clear_history",

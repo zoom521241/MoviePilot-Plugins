@@ -333,6 +333,27 @@ class UIConfig:
                                                                           'text': '每天定时签到；当天已签到会自动跳过，结果按需通知。'}}]}
                         ]
                     },
+                    # RDhub 订阅同步
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_sub_sync_enabled',
+                                                                           'label': '同步 MP 电影订阅到 RDhub'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VBtn',
+                                          'props': {'color': 'primary', 'variant': 'outlined', 'size': 'small',
+                                                    'prepend-icon': 'mdi-cloud-upload'},
+                                          'text': '立即同步订阅',
+                                          'events': {'click': {'api': f'/plugin/P115StrgmSub/sync_rdhub_subscriptions?apikey={settings.API_TOKEN}',
+                                                               'method': 'get'}}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VAlert', 'props': {
+                                 'type': 'info', 'variant': 'tonal',
+                                 'text': '仅同步电影订阅；MP 新增订阅会自动同步过去，取消/完成订阅会自动取消 RDhub 那边。'
+                                         '该开关独立于 RDhub 搜索开关，搜索关闭时同步依然生效。'}}]}
+                        ]
+                    },
                     # RDhub Token（可选，登录失败兜底）
                     {
                         'component': 'VRow',
@@ -552,6 +573,7 @@ class UIConfig:
             "rdhub_checkin_enabled": False,
             "rdhub_checkin_time": "08:30",
             "rdhub_checkin_gamble": False,
+            "rdhub_sub_sync_enabled": False,
             "exclude_disc_images": True,
             "search_source_order": [],
             "subscribe_filter_mode": "exclude",

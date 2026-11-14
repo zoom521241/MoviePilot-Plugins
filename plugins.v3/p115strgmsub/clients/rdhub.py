@@ -342,6 +342,43 @@ class RDHubClient:
         return False
 
     # ------------------------------------------------------------------
+    # 站点订阅（把 MP 的订阅同步过去）
+    # ------------------------------------------------------------------
+    def list_subscriptions(self) -> List[Dict[str, Any]]:
+        """站点订阅列表（含 subscription_id / resource_id / tmdb_id / media_type / title）"""
+        data = self._request("GET", "/v1/subscriptions")
+        return data if isinstance(data, list) else []
+
+    def subscribe_tmdb(self, tmdb_id: Any, media_type: str = "movie", title: str = "",
+                       push_now: bool = False, push_mode: str = "new_only") -> Dict[str, Any]:
+        """
+        按 TMDB ID 订阅站点资源
+
+        :param push_now: 是否立即推送站点已有资源（默认否，只推订阅之后的新资源）
+        :param push_mode: new_only / push
+        """
+        params = {
+            "media_type": media_type or "movie",
+            "push_now": "true" if push_now else "false",
+        }
+        if push_mode:
+            params["push_mode"] = push_mode
+        data = self._request(
+            "POST",
+            f"/v1/user/subscribe-by-tmdb/{tmdb_id}",
+            json_body={"title": title or ""},
+            params=params,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def unsubscribe(self, resource_id: Any) -> bool:
+        """取消站点订阅（resource_id 来自 list_subscriptions）"""
+        if not resource_id:
+            return False
+        self._request("DELETE", f"/v1/subscriptions/{resource_id}")
+        return True
+
+    # ------------------------------------------------------------------
     # 签到
     # ------------------------------------------------------------------
     def sign_in_status(self) -> Dict[str, Any]:
