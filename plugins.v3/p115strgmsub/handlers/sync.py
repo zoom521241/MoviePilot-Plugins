@@ -64,7 +64,8 @@ class SyncHandler:
         post_message_func: Callable = None,
         get_data_func: Callable = None,
         save_data_func: Callable = None,
-        exclude_disc_images: bool = True
+        exclude_disc_images: bool = True,
+        resolution_fallback: bool = True
     ):
         """
         初始化同步处理器
@@ -82,6 +83,8 @@ class SyncHandler:
         :param post_message_func: 发送消息的函数
         :param get_data_func: 获取数据的函数
         :param save_data_func: 保存数据的函数
+        :param exclude_disc_images: 是否在整理时排除原盘/蓝光镜像
+        :param resolution_fallback: 分辨率降级：4K 优先，没有 4K 时接受较低分辨率
         """
         self._p115_manager = p115_manager
         self._search_handler = search_handler
@@ -97,6 +100,7 @@ class SyncHandler:
         self._get_data = get_data_func
         self._save_data = save_data_func
         self._exclude_disc_images = exclude_disc_images
+        self._resolution_fallback = resolution_fallback
 
     def _drop_disc_images(self, share_files: List[Dict]) -> List[Dict]:
         """
@@ -205,10 +209,16 @@ class SyncHandler:
                 quality=subscribe.quality,
                 resolution=subscribe.resolution,
                 effect=subscribe.effect,
-                strict=not is_best_version
+                # 洗版模式或开启「分辨率降级」时用非严格模式：4K 优先，没有再收 1080p
+                strict=not is_best_version and not self._resolution_fallback
             )
             if subscribe_filter.has_filters():
-                mode_text = "洗版模式" if is_best_version else "严格模式"
+                if is_best_version:
+                    mode_text = "洗版模式"
+                elif self._resolution_fallback:
+                    mode_text = "降级模式（4K 优先，无 4K 时接受低分辨率）"
+                else:
+                    mode_text = "严格模式"
                 logger.info(f"电影 {subscribe.name} 过滤条件({mode_text}) - 质量: {subscribe.quality}, 分辨率: {subscribe.resolution}, 特效: {subscribe.effect}")
 
             # 遍历搜索结果，尝试找到并转存电影
@@ -600,10 +610,16 @@ class SyncHandler:
                 quality=subscribe.quality,
                 resolution=subscribe.resolution,
                 effect=subscribe.effect,
-                strict=not is_best_version
+                # 洗版模式或开启「分辨率降级」时用非严格模式：4K 优先，没有再收 1080p
+                strict=not is_best_version and not self._resolution_fallback
             )
             if subscribe_filter.has_filters():
-                mode_text = "洗版模式" if is_best_version else "严格模式"
+                if is_best_version:
+                    mode_text = "洗版模式"
+                elif self._resolution_fallback:
+                    mode_text = "降级模式（4K 优先，无 4K 时接受低分辨率）"
+                else:
+                    mode_text = "严格模式"
                 logger.info(f"{mediainfo.title} S{season} 过滤条件({mode_text}) - 质量: {subscribe.quality}, 分辨率: {subscribe.resolution}, 特效: {subscribe.effect}")
 
             # 成功转存的集数列表

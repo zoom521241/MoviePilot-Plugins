@@ -47,6 +47,27 @@ def _install_stubs():
     sys.modules["app"] = app
     sys.modules["app.log"] = log
 
+    core = types.ModuleType("app.core")
+    metainfo = types.ModuleType("app.core.metainfo")
+
+    class MetaInfo:  # pragma: no cover - 仅用于让 file_matcher 可导入
+        pass
+
+    metainfo.MetaInfo = MetaInfo
+    core.metainfo = metainfo
+    app.core = core
+    sys.modules["app.core"] = core
+    sys.modules["app.core.metainfo"] = metainfo
+
+    schemas = types.ModuleType("app.schemas")
+
+    class MediaInfo:  # pragma: no cover
+        pass
+
+    schemas.MediaInfo = MediaInfo
+    app.schemas = schemas
+    sys.modules["app.schemas"] = schemas
+
 
 def _load_package_module():
     """把插件目录伪装成包，按需加载 rdhub / name_rank"""
@@ -147,6 +168,49 @@ class ShareUrlTest(unittest.TestCase):
     def test_unknown_link_untouched(self):
         got = rdhub.RDHubClient.normalize_share_url("https://example.com/x")
         self.assertEqual(got, "https://example.com/x")
+
+
+def _load_file_matcher():
+    """加载插件里的 SubscribeFilter（依赖 app.schemas / app.core.metainfo 桩）"""
+    key = "rdhub_pkg.utils.file_matcher"
+    if key in sys.modules:
+        return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(
+        key, PLUGIN_PATH / "utils" / "file_matcher.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class ResolutionFallbackTest(unittest.TestCase):
+    """分辨率降级：4K 优先，没有 4K 时接受 1080p"""
+
+    def setUp(self):
+        self.fm = _load_file_matcher()
+
+    def test_strict_mode_rejects_1080p_when_subscribe_is_4k(self):
+        flt = self.fm.SubscribeFilter(resolution="4K|2160p|x2160", strict=True)
+        ok, _ = flt.match("某片 (2026) - 1080p.WEB-DL.H264.mkv")
+        self.assertFalse(ok)
+
+    def test_fallback_mode_accepts_1080p_with_lower_score(self):
+        flt = self.fm.SubscribeFilter(resolution="4K|2160p|x2160", strict=False)
+        ok4k, score4k = flt.match("某片 (2026) - 2160p.WEB-DL.H265.mkv")
+        ok1080, score1080 = flt.match("某片 (2026) - 1080p.WEB-DL.H264.mkv")
+        self.assertTrue(ok4k)
+        self.assertTrue(ok1080)
+        self.assertGreater(score4k, score1080)
+
+    def test_fallback_mode_still_prefers_4k_by_name_rank(self):
+        # 严格模式被放宽后，靠偏好分保证 4K 排在前
+        flt = self.fm.SubscribeFilter(resolution="4K|2160p|x2160", strict=False)
+        uhd = flt.match("某片 (2026) - 2160p.WEB-DL.H265.mkv")[1] + \
+            sys.modules["rdhub_pkg.utils.name_rank"].preference_score("某片 2160p WEB-DL")
+        fhd = flt.match("某片 (2026) - 1080p.WEB-DL.H264.mkv")[1] + \
+            sys.modules["rdhub_pkg.utils.name_rank"].preference_score("某片 1080p WEB-DL")
+        self.assertGreater(uhd, fhd)
 
 
 class RDHubSearchTest(unittest.TestCase):
