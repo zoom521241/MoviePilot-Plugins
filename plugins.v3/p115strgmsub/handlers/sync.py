@@ -144,16 +144,15 @@ class SyncHandler:
         try:
             from app.db.subscribe_oper import SubscribeOper
 
-            tier = 100 - int(pri_order) + 1
-            SubscribeOper().update(subscribe.id, {"current_priority": 100})
+            pri_order = max(0, min(100, int(pri_order)))
+            tier = 100 - pri_order + 1
+            # 如实记录 MP 给出的规则组优先级，是否毕业完全交给 MP 自己的判定
+            SubscribeOper().update(subscribe.id, {"current_priority": pri_order})
             try:
-                subscribe.current_priority = 100
+                subscribe.current_priority = pri_order
             except Exception:
                 pass
-            logger.info(
-                f"洗版优先级已写入：规则组命中第 {tier} 层（pri_order={pri_order}），"
-                f"按「任意梯队即毕业」记为 100"
-            )
+            logger.info(f"洗版优先级已写入：规则组第 {tier} 层（current_priority={pri_order}）")
         except Exception as e:
             logger.warning(f"写入洗版优先级失败：{e}")
 
@@ -311,8 +310,6 @@ class SyncHandler:
 
                         # 计算当前文件的过滤分数和是否完美匹配
                         _, current_score = subscribe_filter.match(file_name) if subscribe_filter.has_filters() else (True, 0)
-                        # 4K / 中文偏好加分（原盘已在列目录阶段剔除）
-                        current_score += name_rank.preference_score(file_name)
                         is_perfect = subscribe_filter.is_perfect_match(file_name) if subscribe_filter.has_filters() else True
 
                         # 洗版模式下检查是否需要升级资源
@@ -764,8 +761,6 @@ class SyncHandler:
                                 logger.info(f"找到匹配文件：{file_name} -> E{episode:02d}")
 
                                 _, current_score = subscribe_filter.match(file_name) if subscribe_filter.has_filters() else (True, 0)
-                                # 4K / 中文偏好加分（原盘已在列目录阶段剔除）
-                                current_score += name_rank.preference_score(file_name)
                                 is_perfect = subscribe_filter.is_perfect_match(file_name) if subscribe_filter.has_filters() else True
 
                                 is_upgrade = False
