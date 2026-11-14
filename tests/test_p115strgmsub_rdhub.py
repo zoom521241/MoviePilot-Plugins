@@ -119,12 +119,19 @@ class NameRankTest(unittest.TestCase):
 
     def test_disc_images_excluded(self):
         for name in [
-            "赤道 UHD蓝光原盘REMUX 国粤双语",
             "火星救援 UHD 4K原盘&蓝光原盘&3D原盘 3碟 原生中字 ISO",
-            "Interstellar.2014.2160p.UHD.BluRay.REMUX.HDR.HEVC-TERMiNAL.mkv",
+            "[队长小翼][Captain Tsubasa (2018)][BDMV][1080p]",
             "BDMV/STREAM/00001.m2ts",
         ]:
             self.assertTrue(self.nr.is_disc_image(name), name)
+
+    def test_remux_is_kept(self):
+        # REMUX 是无损重封装的 mkv，用户要它，不能当原盘排掉
+        for name in [
+            "Interstellar.2014.2160p.UHD.BluRay.REMUX.HDR.HEVC-TERMiNAL.mkv",
+            "赤道 UHD蓝光原盘REMUX 次世代国粤双语]内封简繁字幕]",
+        ]:
+            self.assertFalse(self.nr.is_disc_image(name), name)
 
     def test_web_dl_not_excluded(self):
         for name in [
@@ -254,8 +261,8 @@ class RDHubSearchTest(unittest.TestCase):
                     {"id": 1, "resource_name": "动画电影：八仙！(2026) 2160p WEB-DL",
                      "quality": "2160p WEB-DL DV H265", "season_episode": None,
                      "transfer_link": "https://115cdn.com/s/aaa1?password=p1"},
-                    {"id": 2, "resource_name": "八仙！ 4K原盘REMUX",
-                     "quality": "4K REMUX", "season_episode": None,
+                    {"id": 2, "resource_name": "八仙！ 4K原盘 BDMV",
+                     "quality": "4K BDMV", "season_episode": None,
                      "transfer_link": "https://115cdn.com/s/bbb2?password=p2"},
                 ]})
             if "/stock-resources/public/list" in url:

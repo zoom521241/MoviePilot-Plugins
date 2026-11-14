@@ -96,7 +96,7 @@
     "name": "115网盘订阅追更",
     "description": "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。",
     "labels": "订阅,115网盘,V3",
-    "version": "1.5.20",
+    "version": "1.5.21",
     "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
@@ -104,6 +104,7 @@
     "system_version": ">=3.0.0",
     "v3": true,
     "history": {
+      "v1.5.21": "原盘过滤口径修正：REMUX 不再被当成原盘排除——它是无损重封装后的 mkv，属于正常视频；现在只排除完整蓝光镜像（BDMV / BDISO / BD-ISO / ISO 碟 / 中文「完整原盘」描述），显式标注 REMUX 的资源一律保留（含「蓝光原盘REMUX」这类描述）。与 MP 洗版规则组优先 REMUX 的口径一致。",
       "v1.5.20": "合并原盘过滤：去掉 RDhub 源级的「排除原盘」开关（内部固定排除，避免重复设置），只保留全局「整理时排除原盘/蓝光镜像」。说明：MoviePilot 的规则组并不等于排除原盘——内置 BLU 规则只认 BDMV/BD25/BD50 与「BluRay+HEVC」结构，REMUX 在它的 exclude 里（不算 BLU），中文『原盘/蓝光原盘/ISO』也认不出；且洗版组「电影含杜比画质优先」反而优先 REMUX。所以保留插件这层兜底，否则洗版会优先转存 REMUX 原盘。",
       "v1.5.19": "新增 RDhub 账号保存后自检：配置保存/reload 后 5 秒异步调一次 /auth/me，成功打印账号、VIP 等级、115 绑定状态与当日搜索配额，失败打印具体原因，无需等到第一次同步才知道账号密码是否有效；自检在线程里执行，不阻塞保存。",
       "v1.5.18": "补齐 1.5.16/1.5.17 遗漏发布的文件：clients/p115.py（目录列表字段统一 name/is_dir/size）与 utils/file_matcher.py（SubscribeFilter 改为 MP 原生过滤适配器）此前只升级了版本号，源码未随包里更新，导致线上仍报 SubscribeFilter.__init__() got an unexpected keyword argument 'mediainfo'。本次一并补发。",

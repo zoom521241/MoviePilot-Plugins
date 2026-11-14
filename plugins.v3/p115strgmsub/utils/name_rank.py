@@ -6,11 +6,15 @@
 import re
 from typing import Optional
 
-# 原盘 / 蓝光镜像：这类资源体积巨大且不适合 MP 的整理入库流程，直接排除
+# 完整蓝光镜像（BDMV 目录 / ISO 碟）：不经重封装、体积极大且无法直接作为视频文件入库，排除。
+# 注意：REMUX 是无损重封装后的 mkv，属于正常可播放的视频，**不在此列**。
 DISC_IMAGE_RE = re.compile(
-    r"(\bREMUX\b|\bBDMV\b|\bBDISO\b|\bBD-?ISO\b|原盘|未经压缩|Untouched|Blu-?ray\s*Disc|全碟|\bISO\b)",
+    r"(\bBDMV\b|\bBDISO\b|\bBD-?ISO\b|完整原盘|蓝光原盘(?!.*REMUX)|未经压缩|Untouched"
+    r"|Blu-?ray\s*Disc|全碟|\bISO\b)",
     re.IGNORECASE,
 )
+# 明确标注为 REMUX 时一律保留（哪怕描述里带「原盘 REMUX」）
+_REMUX_RE = re.compile(r"\bREMUX\b", re.IGNORECASE)
 
 # 4K / 2160p
 UHD_RE = re.compile(r"(2160[pP]|(?<![0-9])4[kK](?![0-9])|4KUHD|(?<![A-Za-z])UHD(?![A-Za-z]))", re.IGNORECASE)
@@ -51,12 +55,14 @@ def join_names(*names: Optional[str]) -> str:
 
 def is_disc_image(*names: Optional[str]) -> bool:
     """
-    是否原盘 / 蓝光镜像资源
+    是否完整蓝光镜像（BDMV / BDISO / ISO 碟 / 「原盘」描述）
 
-    命中 REMUX、BDMV、BDISO、原盘、ISO 等关键词即视为原盘。
+    REMUX 不算镜像——它是无损重封装出的 mkv，按正常视频入库。
     """
     text = join_names(*names)
     if not text:
+        return False
+    if _REMUX_RE.search(text):
         return False
     return bool(DISC_IMAGE_RE.search(text))
 
