@@ -318,6 +318,21 @@ class UIConfig:
                                         '想让 1080p 作为 4K 的兜底，请把订阅里的分辨率留空，由规则组决定优先级。'}}]
                         }]
                     },
+                    # RDhub 每日签到
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
+                             'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_checkin_enabled', 'label': '启用每日签到'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
+                             'content': [{'component': 'VTextField', 'props': {'model': 'rdhub_checkin_time', 'label': '签到时间', 'placeholder': '08:30', 'hint': 'HH:MM，按 MoviePilot 时区'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
+                             'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_checkin_gamble', 'label': '赌狗签到（随机积分）'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
+                             'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal',
+                                                                          'text': '每天定时签到；当天已签到会自动跳过，结果按需通知。'}}]}
+                        ]
+                    },
                     # RDhub Token（可选，登录失败兜底）
                     {
                         'component': 'VRow',
@@ -534,6 +549,9 @@ class UIConfig:
             "rdhub_access_token": "",
             "rdhub_refresh_token": "",
             "rdhub_max_preview": 8,
+            "rdhub_checkin_enabled": False,
+            "rdhub_checkin_time": "08:30",
+            "rdhub_checkin_gamble": False,
             "exclude_disc_images": True,
             "search_source_order": [],
             "subscribe_filter_mode": "exclude",

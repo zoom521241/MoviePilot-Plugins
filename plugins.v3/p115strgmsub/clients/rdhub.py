@@ -342,6 +342,30 @@ class RDHubClient:
         return False
 
     # ------------------------------------------------------------------
+    # 签到
+    # ------------------------------------------------------------------
+    def sign_in_status(self) -> Dict[str, Any]:
+        """
+        查询今日签到状态
+
+        :return: {"has_signed_in": bool, "sign_type": str, "today_points": int,
+                  "total_points": int, "consecutive_days": int}
+        """
+        data = self._request("GET", "/points/sign-in/status")
+        return data if isinstance(data, dict) else {}
+
+    def sign_in(self, gamble: bool = False) -> Dict[str, Any]:
+        """
+        执行签到
+
+        :param gamble: True 走「赌狗签到」（随机积分，可能倒扣），False 走普通签到
+        :return: {"points": int, ...}
+        """
+        path = "/points/sign-in/gamble" if gamble else "/points/sign-in/normal"
+        data = self._request("POST", path)
+        return data if isinstance(data, dict) else {}
+
+    # ------------------------------------------------------------------
     # 资源查询
     # ------------------------------------------------------------------
     def _cache_get(self, key: str) -> Optional[Any]:

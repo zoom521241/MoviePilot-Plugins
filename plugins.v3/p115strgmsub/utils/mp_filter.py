@@ -52,7 +52,12 @@ def _filter_module():
         return None
     if _FILTER_MODULE is None:
         try:
-            _FILTER_MODULE = mp["FilterModule"]()
+            module = mp["FilterModule"]()
+            # 关键：init_module() 才会把内置规则集（37 条）灌进 rule_set。
+            # 少了这一步 rule_set 为空，任何关键词都判定不存在，规则组会拒掉全部文件。
+            module.init_module()
+            _FILTER_MODULE = module
+            logger.debug(f"FilterModule 就绪，规则集 {len(getattr(module, 'rule_set', {}) or {})} 条")
         except Exception as e:
             logger.warning(f"FilterModule 初始化失败：{e}")
             return None
@@ -166,8 +171,9 @@ def match_file(
     if not result:
         # 命中不了任何规则组 = 不符合该订阅的优先级规则
         return False, 0
+    # MP 的优先级从 100 起、每降一层减 1；换算成「越大越优」的分数
     pri_order = getattr(result[0], "pri_order", 0) or 0
-    return True, 10000 - int(pri_order)
+    return True, 9900 + min(int(pri_order), 100)
 
 
 def describe(subscribe: Any, is_best_version: bool = False, systemconfig: Any = None) -> str:

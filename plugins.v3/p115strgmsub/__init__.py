@@ -40,7 +40,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.21"
+    plugin_version = "1.5.22"
     # 插件作者
     plugin_author = "zoom521241"
     # 作者主页
@@ -90,6 +90,10 @@ class P115StrgmSub(_PluginBase):
     _rdhub_access_token: str = ""
     _rdhub_refresh_token: str = ""
     _rdhub_max_preview: int = 8
+    # RDhub 每日签到
+    _rdhub_checkin_enabled: bool = False
+    _rdhub_checkin_time: str = "08:30"
+    _rdhub_checkin_gamble: bool = False
     # 全局：整理时排除原盘/蓝光镜像
     _exclude_disc_images: bool = True
 
@@ -132,6 +136,7 @@ class P115StrgmSub(_PluginBase):
     _nullbr_client: Optional[NullbrClient] = None
     _hdhive_client: Optional[Any] = None
     _rdhub_client: Optional[Any] = None
+    _checkin_scheduler: Optional[BackgroundScheduler] = None
 
     # 处理器
     _search_handler: Optional[SearchHandler] = None
@@ -691,6 +696,9 @@ class P115StrgmSub(_PluginBase):
             except (TypeError, ValueError):
                 self._rdhub_max_preview = 8
             self._exclude_disc_images = bool(config.get("exclude_disc_images", True))
+            self._rdhub_checkin_enabled = bool(config.get("rdhub_checkin_enabled", False))
+            self._rdhub_checkin_time = (config.get("rdhub_checkin_time", self._rdhub_checkin_time) or "08:30").strip()
+            self._rdhub_checkin_gamble = bool(config.get("rdhub_checkin_gamble", False))
 
             self._hdhive_enabled = config.get("hdhive_enabled", False)
             self._hdhive_query_mode = config.get("hdhive_query_mode", "api")
@@ -740,6 +748,7 @@ class P115StrgmSub(_PluginBase):
         # 初始化客户端/handlers
         self._init_clients()
         self._init_handlers()
+        self._schedule_rdhub_checkin()
 
         # 配置立即生效
         if self._block_system_subscribe:
@@ -813,6 +822,72 @@ class P115StrgmSub(_PluginBase):
             client.check_login()
         except Exception as e:
             logger.warning(f"RDhub 账号自检异常：{e}")
+
+    # ------------------ RDhub 每日签到 ------------------
+
+    @staticmethod
+    def _parse_checkin_time(value: str):
+        """解析 HH:MM，非法值回退 08:30"""
+        try:
+            hour_text, minute_text = (value or "08:30").replace("：", ":").split(":", 1)
+            hour = max(0, min(23, int(hour_text)))
+            minute = max(0, min(59, int(minute_text)))
+            return hour, minute
+        except Exception:
+            return 8, 30
+
+    def _ensure_checkin_scheduler(self):
+        if not self._checkin_scheduler:
+            self._checkin_scheduler = BackgroundScheduler(timezone=settings.TZ)
+            self._checkin_scheduler.start()
+
+    def _schedule_rdhub_checkin(self):
+        """按配置注册/更新每日签到任务"""
+        try:
+            self._ensure_checkin_scheduler()
+            self._checkin_scheduler.remove_all_jobs()
+            if not (self._rdhub_enabled and self._rdhub_checkin_enabled and self._rdhub_client):
+                return
+            hour, minute = self._parse_checkin_time(self._rdhub_checkin_time)
+            self._checkin_scheduler.add_job(
+                func=self.rdhub_checkin,
+                trigger=CronTrigger(hour=hour, minute=minute, timezone=settings.TZ),
+                id="rdhub_checkin",
+                replace_existing=True,
+            )
+            logger.info(f"RDhub 每日签到已排期：{hour:02d}:{minute:02d}（{'赌狗签到' if self._rdhub_checkin_gamble else '普通签到'}）")
+        except Exception as e:
+            logger.error(f"RDhub 签到排期失败：{e}")
+
+    def rdhub_checkin(self):
+        """执行一次签到（已签到则跳过）"""
+        client = self._rdhub_client
+        if not client or not getattr(client, "is_ready", False):
+            logger.warning("RDhub 签到跳过：客户端未就绪")
+            return
+        try:
+            status = client.sign_in_status()
+            if status.get("has_signed_in"):
+                logger.info(
+                    f"RDhub 今日已签到（类型 {status.get('sign_type') or '-'}，"
+                    f"今日 {status.get('today_points') or 0} 分，累计 {status.get('total_points') or 0} 分，"
+                    f"连续 {status.get('consecutive_days') or 0} 天）"
+                )
+                return
+            result = client.sign_in(gamble=self._rdhub_checkin_gamble)
+            points = result.get("points")
+            title = "【115网盘订阅追更】RDhub 签到成功"
+            text = (
+                f"类型：{'赌狗签到' if self._rdhub_checkin_gamble else '普通签到'}\n"
+                f"本次积分：{points if points is not None else '-'}\n"
+                f"累计积分：{result.get('total_points', status.get('total_points', '-'))}\n"
+                f"连续签到：{result.get('consecutive_days', status.get('consecutive_days', '-'))} 天"
+            )
+            logger.info(f"RDhub 签到成功：{' '.join(text.splitlines())}")
+            if self._notify:
+                self.post_message(mtype=NotificationType.Plugin, title=title, text=text)
+        except Exception as e:
+            logger.error(f"RDhub 签到失败：{e}")
 
     def _init_clients(self):
         """初始化客户端"""
@@ -1038,6 +1113,9 @@ class P115StrgmSub(_PluginBase):
             "rdhub_access_token": self._rdhub_access_token,
             "rdhub_refresh_token": self._rdhub_refresh_token,
             "rdhub_max_preview": self._rdhub_max_preview,
+            "rdhub_checkin_enabled": self._rdhub_checkin_enabled,
+            "rdhub_checkin_time": self._rdhub_checkin_time,
+            "rdhub_checkin_gamble": self._rdhub_checkin_gamble,
             "exclude_disc_images": self._exclude_disc_images,
             # 其他配置
             "search_source_order": self._search_source_order,
@@ -1073,6 +1151,15 @@ class P115StrgmSub(_PluginBase):
                 if self._toggle_scheduler.running:
                     self._toggle_scheduler.shutdown()
                 self._toggle_scheduler = None
+        except Exception:
+            pass
+
+        try:
+            if self._checkin_scheduler:
+                self._checkin_scheduler.remove_all_jobs()
+                if self._checkin_scheduler.running:
+                    self._checkin_scheduler.shutdown()
+                self._checkin_scheduler = None
         except Exception:
             pass
 

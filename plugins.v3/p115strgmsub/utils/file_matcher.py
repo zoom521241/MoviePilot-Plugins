@@ -126,7 +126,8 @@ class SubscribeFilter:
         if not matched:
             return False
         if self._mp_enabled and (self.mp_params or self.rule_groups):
-            return score >= 9999
+            # 只有落在规则组第一优先级层级（MP 的 pri_order=100 → 分数 10000）才算完美
+            return score >= 10000
         # 回退模式：沿用原语义（全部条件匹配）
         if self.quality and not re.search(self.quality, file_name, re.IGNORECASE):
             return False
