@@ -318,6 +318,32 @@ class RDHubClient:
             except Exception as e:
                 logger.debug(f"RDhub Token 持久化失败：{e}")
 
+    def check_login(self) -> bool:
+        """
+        主动校验账号可用性（会按需触发浏览器门禁与登录）
+
+        用于「保存配置后自检」，让用户在保存后立刻知道账号密码是否有效。
+        """
+        if not self.is_ready:
+            logger.warning("RDhub 自检跳过：未配置账号密码")
+            return False
+        try:
+            data = self._request("GET", "/auth/me")
+        except RDHubError as e:
+            logger.warning(f"RDhub 自检失败：{e}")
+            return False
+        if isinstance(data, dict) and data.get("id"):
+            quota = data.get("quota") or {}
+            logger.info(
+                "RDhub 自检通过：账号 %s（VIP: %s，115 绑定: %s，搜索配额 %s/%s）",
+                data.get("username"), data.get("vip_level") or "无",
+                "是" if data.get("cookie_115_valid") else "否",
+                quota.get("search_today_used", "-"), quota.get("search_daily_limit", "-"),
+            )
+            return True
+        logger.warning("RDhub 自检失败：/auth/me 未返回用户信息")
+        return False
+
     # ------------------------------------------------------------------
     # 资源查询
     # ------------------------------------------------------------------

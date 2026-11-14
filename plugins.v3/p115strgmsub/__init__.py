@@ -3,8 +3,9 @@
 结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失剧集
 """
 import datetime
+import time
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Optional, Any, List, Dict, Tuple
 
 import pytz
@@ -39,7 +40,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.18"
+    plugin_version = "1.5.19"
     # 插件作者
     plugin_author = "zoom521241"
     # 作者主页
@@ -798,9 +799,23 @@ class P115StrgmSub(_PluginBase):
                 max_preview=self._rdhub_max_preview,
             )
             logger.info(f"RDhub 客户端初始化成功（{self._rdhub_url}）")
+            if self._rdhub_client.is_ready:
+                # 保存配置后异步自检一次登录，避免密码错误要等到第一次同步才发现
+                Thread(target=self._rdhub_self_check, daemon=True).start()
         except Exception as e:
             self._rdhub_client = None
             logger.error(f"RDhub 客户端初始化失败：{e}")
+
+    def _rdhub_self_check(self):
+        """延迟 5 秒做一次账号自检（不阻塞配置保存）"""
+        time.sleep(5)
+        client = self._rdhub_client
+        if not client:
+            return
+        try:
+            client.check_login()
+        except Exception as e:
+            logger.warning(f"RDhub 账号自检异常：{e}")
 
     def _init_clients(self):
         """初始化客户端"""
