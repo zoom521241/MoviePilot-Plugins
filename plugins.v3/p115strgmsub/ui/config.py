@@ -284,10 +284,8 @@ class UIConfig:
                         'content': [
                             {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
                              'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_enabled', 'label': '启用 RDhub'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 5},
-                             'content': [{'component': 'VTextField', 'props': {'model': 'rdhub_url', 'label': '站点地址', 'placeholder': 'https://www.rdhub115.cc'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                             'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_exclude_disc', 'label': '排除原盘/蓝光镜像'}}]}
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 9},
+                             'content': [{'component': 'VTextField', 'props': {'model': 'rdhub_url', 'label': '站点地址', 'placeholder': 'https://www.rdhub115.cc'}}]}
                         ]
                     },
                     {
@@ -535,7 +533,6 @@ class UIConfig:
             "rdhub_password": "",
             "rdhub_access_token": "",
             "rdhub_refresh_token": "",
-            "rdhub_exclude_disc": True,
             "rdhub_max_preview": 8,
             "exclude_disc_images": True,
             "search_source_order": [],

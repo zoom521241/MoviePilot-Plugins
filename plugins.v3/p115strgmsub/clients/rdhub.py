@@ -67,7 +67,6 @@ class RDHubClient:
         refresh_token: str = "",
         proxy: Any = None,
         on_token_update: Optional[Any] = None,
-        exclude_disc: bool = True,
         max_preview: int = 8,
         timeout: int = 20,
         cache_ttl: int = 900,
@@ -80,7 +79,6 @@ class RDHubClient:
         :param refresh_token: 已保存的 refresh_token
         :param proxy: MP 代理配置（字符串或 dict）
         :param on_token_update: Token 变更回调，用于持久化到插件配置
-        :param exclude_disc: 是否排除原盘/蓝光镜像
         :param max_preview: 单次查询最多换取多少个分享码（控制请求量）
         :param timeout: 请求超时（秒）
         :param cache_ttl: 查询结果缓存时间（秒）
@@ -91,7 +89,6 @@ class RDHubClient:
         self._access_token = (access_token or "").strip()
         self._refresh_token = (refresh_token or "").strip()
         self._on_token_update = on_token_update
-        self.exclude_disc = bool(exclude_disc)
         self.max_preview = max(1, int(max_preview or 8))
         self.timeout = max(5, int(timeout or 20))
         self.cache_ttl = max(0, int(cache_ttl or 0))
@@ -529,7 +526,7 @@ class RDHubClient:
         # 1) 分发通道（明文链接、带集号、不消耗搜索配额）
         for item in self.get_distributions(tmdb_id, mt):
             desc = " ".join([item.get("resource_name", ""), item.get("quality", "")])
-            if self.exclude_disc and name_rank.is_disc_image(desc):
+            if name_rank.is_disc_image(desc):
                 logger.info(f"RDhub：跳过原盘资源 {desc[:60]}")
                 continue
             if mt == "tv" and season is not None:
@@ -552,7 +549,7 @@ class RDHubClient:
         previewed = 0
         for item in stock_items:
             desc = " ".join([item.get("resource_name", ""), item.get("version_info", "")])
-            if self.exclude_disc and name_rank.is_disc_image(desc):
+            if name_rank.is_disc_image(desc):
                 logger.info(f"RDhub：跳过原盘库存 {desc[:60]}")
                 continue
             links = item.get("parsed_links") or []
@@ -563,7 +560,7 @@ class RDHubClient:
                     break
                 link_desc = (link.get("desc") or "") if isinstance(link, dict) else ""
                 full_desc = f"{desc} {link_desc}".strip()
-                if self.exclude_disc and name_rank.is_disc_image(full_desc):
+                if name_rank.is_disc_image(full_desc):
                     continue
                 if mt == "tv" and season is not None:
                     episodes = self._parse_episodes(link_desc)
