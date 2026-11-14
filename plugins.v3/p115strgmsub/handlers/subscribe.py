@@ -176,6 +176,18 @@ class SubscribeHandler:
                         lefts={},
                         force=True
                     )
+                    # MP 对洗版订阅可能返回「继续洗版」（不移入历史），这里回查真实状态再决定文案与通知
+                    remain = None
+                    try:
+                        remain = SubscribeOper().get(subscribe.id)
+                    except Exception as e:
+                        logger.debug(f"回查订阅状态失败：{e}")
+                    if remain is not None:
+                        logger.info(
+                            f"订阅 {subscribe.name} 仍在追踪（state={getattr(remain, 'state', '-')}，"
+                            f"优先级={getattr(remain, 'current_priority', None)}），洗版继续"
+                        )
+                        return
                     logger.info(f"订阅 {subscribe.name} 已移至历史记录")
                     if self._notify and self._post_message:
                         season_text = f" 第{subscribe.season}季" if subscribe.type == MediaType.TV.value and subscribe.season else ""

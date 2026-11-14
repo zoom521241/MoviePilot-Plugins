@@ -96,7 +96,7 @@
     "name": "115网盘订阅追更",
     "description": "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。",
     "labels": "订阅,115网盘,V3",
-    "version": "1.5.22",
+    "version": "1.5.23",
     "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
@@ -104,6 +104,7 @@
     "system_version": ">=3.0.0",
     "v3": true,
     "history": {
+      "v1.5.23": "洗版毕业判定打通：插件转存成功后把本次资源在规则组的优先级写回 subscribe.current_priority（按『任意梯队命中即毕业』统一记 100），此前该值恒为 NULL 导致洗版订阅永远「继续洗版」。同时把候选排序细化为 REMUX(+400) > 杜比(+200) > HDR(+100) > WEB-DL(+50)，保证同分辨率下优先挑 REMUX。修复完成通知误报：MP 返回「继续洗版」时不再打印/推送「订阅已完成、已移至历史记录」，改为回查订阅状态并提示仍在追踪。",
       "v1.5.22": "修复规则组过滤全部误拒（出入平安等 4K 有资源却转存不了）：插件内新建的 FilterModule 没有调用 init_module()，rule_set 为空（0 条内置规则），任何关键词都被判定为「规则不存在」，于是 MP 规则组把每个文件都拒了。现在初始化后调用 init_module() 载入 37 条内置规则 + 自定义规则。同时修正优先级换算：MP 的 pri_order 从 100 起每降一层减 1，分数改为 9900+pri_order，is_perfect_match 以第一层级（10000 分）为准，洗版判断才正确。新增 RDhub 每日自动签到：可配置开关、时间（默认 08:30）、是否赌狗签到，当天已签到自动跳过，结果可通知。",
       "v1.5.21": "原盘过滤口径修正：REMUX 不再被当成原盘排除——它是无损重封装后的 mkv，属于正常视频；现在只排除完整蓝光镜像（BDMV / BDISO / BD-ISO / ISO 碟 / 中文「完整原盘」描述），显式标注 REMUX 的资源一律保留（含「蓝光原盘REMUX」这类描述）。与 MP 洗版规则组优先 REMUX 的口径一致。",
       "v1.5.20": "合并原盘过滤：去掉 RDhub 源级的「排除原盘」开关（内部固定排除，避免重复设置），只保留全局「整理时排除原盘/蓝光镜像」。说明：MoviePilot 的规则组并不等于排除原盘——内置 BLU 规则只认 BDMV/BD25/BD50 与「BluRay+HEVC」结构，REMUX 在它的 exclude 里（不算 BLU），中文『原盘/蓝光原盘/ISO』也认不出；且洗版组「电影含杜比画质优先」反而优先 REMUX。所以保留插件这层兜底，否则洗版会优先转存 REMUX 原盘。",

@@ -123,6 +123,40 @@ class SyncHandler:
             logger.info(f"已排除 {dropped} 个原盘/镜像文件（{len(kept)} 个保留）")
         return kept
 
+    @staticmethod
+    def _mark_current_priority(subscribe, is_best_version: bool, subscribe_filter) -> None:
+        """
+        把本次入库资源在规则组中的优先级写回订阅
+
+        MP 判断电影洗版是否完成只看 subscribe.current_priority == 100，
+        而这个值原本由 MP 的下载链写入；插件走的是 115 转存，必须自己补上，
+        否则洗版订阅永远「继续洗版」。
+
+        这里按「规则组任意梯队命中即毕业」的口径统一记 100：
+        梯队顺序仍由规则组决定（选片时优先级高的分数更高），只是不再要求必须命中第一层。
+        """
+        if not is_best_version:
+            return
+        pri_order = getattr(subscribe_filter, "last_pri_order", None)
+        if pri_order is None:
+            logger.info("洗版优先级：本次没有拿到规则组层级，跳过写入")
+            return
+        try:
+            from app.db.subscribe_oper import SubscribeOper
+
+            tier = 100 - int(pri_order) + 1
+            SubscribeOper().update(subscribe.id, {"current_priority": 100})
+            try:
+                subscribe.current_priority = 100
+            except Exception:
+                pass
+            logger.info(
+                f"洗版优先级已写入：规则组命中第 {tier} 层（pri_order={pri_order}），"
+                f"按「任意梯队即毕业」记为 100"
+            )
+        except Exception as e:
+            logger.warning(f"写入洗版优先级失败：{e}")
+
     def process_movie_subscribe(
         self,
         subscribe,
@@ -354,6 +388,9 @@ class SyncHandler:
                                 logger.debug(f"已记录电影 {mediainfo.title} 下载历史")
                             except Exception as e:
                                 logger.warning(f"记录下载历史失败：{e}")
+
+                            # 先写回洗版优先级，再让 MP 判定是否完成
+                            self._mark_current_priority(subscribe, is_best_version, subscribe_filter)
 
                             # 电影转存成功后完成订阅
                             self._subscribe_handler.check_and_finish_subscribe(

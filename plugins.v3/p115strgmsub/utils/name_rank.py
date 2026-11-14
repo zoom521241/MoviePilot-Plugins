@@ -29,18 +29,24 @@ CHINESE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 画质特效
+# 画质特效（拆开计分，保证挑选顺序 REMUX > 杜比 > HDR > 普通 WEB-DL）
+DOLBY_RE = re.compile(r"(\bDV\b|DoVi|杜比视界|Dolby\.?Vision)", re.IGNORECASE)
+HDR_RE = re.compile(r"(HDR10\+?|\bHDR\b)", re.IGNORECASE)
 EFFECT_RE = re.compile(r"(\bDV\b|DoVi|杜比视界|Dolby\.?Vision|\bHDR10\+?\b|\bHDR\b)", re.IGNORECASE)
 # 片源类型
 WEB_RE = re.compile(r"(WEB-?DL|WEBRip|WEB)", re.IGNORECASE)
 BLURAY_RE = re.compile(r"(BluRay|Blu-?ray|BDRip|BRRip)", re.IGNORECASE)
 
-# 打分权重：4K 最高，中文其次，特效/片源再次
+# 打分权重：4K 最高，中文其次，然后按 REMUX > 杜比 > HDR > 片源类型排
+# 注意 SCORE_REMUX 必须大于 SCORE_DOLBY + SCORE_HDR + SCORE_WEB，保证 REMUX 永远排最前
 SCORE_UHD = 1000
 SCORE_FHD = 600
 SCORE_LOW = 200
 SCORE_CHINESE = 300
-SCORE_EFFECT = 100
+SCORE_REMUX = 400
+SCORE_DOLBY = 200
+SCORE_HDR = 100
+SCORE_EFFECT = 100          # 兼容旧引用，不再单独参与打分
 SCORE_WEB = 50
 SCORE_BLURAY = 40
 
@@ -122,8 +128,12 @@ def preference_score(*names: Optional[str]) -> int:
 
     if CHINESE_RE.search(text):
         score += SCORE_CHINESE
-    if EFFECT_RE.search(text):
-        score += SCORE_EFFECT
+    if _REMUX_RE.search(text):
+        score += SCORE_REMUX
+    if DOLBY_RE.search(text):
+        score += SCORE_DOLBY
+    if HDR_RE.search(text):
+        score += SCORE_HDR
     if WEB_RE.search(text):
         score += SCORE_WEB
     elif BLURAY_RE.search(text):

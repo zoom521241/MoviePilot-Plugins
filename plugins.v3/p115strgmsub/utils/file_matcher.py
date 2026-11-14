@@ -54,6 +54,8 @@ class SubscribeFilter:
         self.mp_params = mp_params or {}
         self.rule_groups = rule_groups or []
         self._mp_enabled = mp_filter.is_available()
+        # 上一次 MP 规则组命中的优先级（100=第一层），供调用方写回订阅
+        self.last_pri_order = None
 
     def has_filters(self) -> bool:
         """是否有任何过滤条件"""
@@ -81,6 +83,8 @@ class SubscribeFilter:
             )
             if result is not None:
                 matched, score = result
+                if matched and 9900 <= score <= 10000:
+                    self.last_pri_order = score - 9900
                 logger.info(
                     f"【MP过滤】{file_name} -> {'通过' if matched else '拒绝'}"
                     f"{f'（优先级分 {score}）' if matched else ''}"
