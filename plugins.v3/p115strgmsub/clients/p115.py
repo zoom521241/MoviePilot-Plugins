@@ -964,12 +964,43 @@ class P115ClientManager:
 
         return False
 
+    @staticmethod
+    def _normalize_fs_item(item: dict) -> dict:
+        """
+        统一 115 目录列表项字段
+
+        115 原始接口返回 n / fc / s / cid / fid，插件内部按 name / is_dir / size 使用，
+        这里做一次双向兼容，避免上层拿到的是原始字段而判断全部落空。
+        """
+        raw = dict(item or {})
+        name = raw.get("name") or raw.get("n") or ""
+        if "fc" in raw:
+            # 115：fc=0 表示文件夹，非 0 表示文件
+            is_dir = not bool(raw.get("fc"))
+        else:
+            is_dir = bool(raw.get("is_dir"))
+        size = raw.get("size")
+        if size is None:
+            size = raw.get("s") or 0
+        normalized = {
+            "name": name,
+            "is_dir": is_dir,
+            "size": size,
+            "cid": raw.get("cid") or 0,
+            "fid": raw.get("fid") or 0,
+            "raw": raw,
+        }
+        # 保留原始字段，调用方若依赖 115 原生键仍可取到
+        for key, value in raw.items():
+            normalized.setdefault(key, value)
+        return normalized
+
     def list_files(self, path: str) -> List[dict]:
         """
         列出指定路径下的文件
 
         :param path: 目录路径
-        :return: 文件列表
+        :return: 文件列表（已统一 name / is_dir / size 字段）
         """
         if not self.client:
             return []
@@ -981,9 +1012,9 @@ class P115ClientManager:
         try:
             self.rate_limiter.wait()
             self._api_call_count += 1
-            resp = self.client.fs_files({"cid": cid, "limit": 1000})
+            resp = self.client.fs_files({"cid": cid, "limit": 1000, "show_dir": 1})
             if resp.get("state"):
-                return resp.get("data", [])
+                return [self._normalize_fs_item(item) for item in (resp.get("data") or [])]
             return []
         except Exception as e:
             logger.error(f"列出文件失败: {e}")
@@ -998,10 +1029,10 @@ class P115ClientManager:
         """
         files = self.list_files(path)
 
-        # 过滤出目录（fid=0 表示目录）
+        # 过滤出目录（list_files 已统一 is_dir 字段）
         directories = []
         for f in files:
-            if f.get("fid") == 0:  # 是目录
+            if f.get("is_dir"):
                 dir_name = f.get("name", "")
                 dir_path = f"{path.rstrip('/')}/{dir_name}" if path != "/" else f"/{dir_name}"
                 directories.append({

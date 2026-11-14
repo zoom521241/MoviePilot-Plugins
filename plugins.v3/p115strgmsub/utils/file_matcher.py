@@ -9,95 +9,125 @@ from app.core.metainfo import MetaInfo
 from app.schemas import MediaInfo
 from app.log import logger
 
+from . import mp_filter
+
 # 从资源标题/文件名里识别年份（仅 19xx / 20xx，避免把 1080p、2160p、H.265 当成有效年份）
 _YEAR_IN_NAME_RE = re.compile(r'(?<!\d)(19\d{2}|20\d{2})(?!\d)')
 
 
 class SubscribeFilter:
-    """订阅过滤条件"""
+    """
+    订阅过滤条件
 
-    def __init__(self, quality: str = None, resolution: str = None, effect: str = None, strict: bool = True):
+    优先复用 MoviePilot 原生口径：
+      1. TorrentHelper.filter_torrent —— 按订阅的 quality / resolution / effect / include / exclude 硬过滤
+      2. FilterModule.filter_torrents —— 按订阅规则组（或系统默认组）打优先级
+
+    MP 侧不可用（非 MP 环境、规则组读取失败等）时回退到内置的三正则判定，
+    保证插件在任何情况下都能工作。
+    """
+
+    def __init__(
+            self,
+            quality: str = None,
+            resolution: str = None,
+            effect: str = None,
+            strict: bool = True,
+            mediainfo=None,
+            mp_params: Optional[dict] = None,
+            rule_groups: Optional[List[str]] = None,
+    ):
         """
-        初始化过滤条件
-
-        :param quality: 质量正则表达式，如 "WEB-?DL|WEB-?RIP"
-        :param resolution: 分辨率正则表达式，如 "4K|2160p|x2160"
-        :param effect: 特效正则表达式
-        :param strict: 是否严格匹配，False 时不符合条件的资源也会被接受但分数较低
+        :param quality: 质量正则（回退用）
+        :param resolution: 分辨率正则（回退用）
+        :param effect: 特效正则（回退用）
+        :param strict: 回退模式下是否严格匹配
+        :param mediainfo: MP MediaInfo，供规则组按媒体类型/分类挑选
+        :param mp_params: MP 硬过滤参数（quality/resolution/effect/include/exclude）
+        :param rule_groups: MP 规则组名称列表
         """
         self.quality = quality
         self.resolution = resolution
         self.effect = effect
         self.strict = strict
+        self.mediainfo = mediainfo
+        self.mp_params = mp_params or {}
+        self.rule_groups = rule_groups or []
+        self._mp_enabled = mp_filter.is_available()
 
     def has_filters(self) -> bool:
         """是否有任何过滤条件"""
+        if self.mp_params or self.rule_groups:
+            return True
         return bool(self.quality or self.resolution or self.effect)
 
     def match(self, file_name: str) -> Tuple[bool, int]:
         """
-        检查文件名是否符合过滤条件
+        检查文件名是否符合订阅条件
 
         :param file_name: 文件名
-        :return: (是否匹配, 匹配分数) - 分数越高越优先
-                 严格模式下不匹配返回 (False, 0)
-                 非严格模式下不匹配返回 (True, 较低分数)
+        :return: (是否通过, 优先级分数) - 分数越大越优（10000 - pri_order）
         """
         if not self.has_filters():
             return True, 0
 
+        # 优先走 MoviePilot 原生口径
+        if self._mp_enabled and (self.mp_params or self.rule_groups):
+            result = mp_filter.match_file(
+                file_name=file_name,
+                params=self.mp_params,
+                rule_groups=self.rule_groups,
+                mediainfo=self.mediainfo,
+            )
+            if result is not None:
+                matched, score = result
+                logger.info(
+                    f"【MP过滤】{file_name} -> {'通过' if matched else '拒绝'}"
+                    f"{f'（优先级分 {score}）' if matched else ''}"
+                )
+                return matched, score
+
+        return self._match_legacy(file_name)
+
+    def _match_legacy(self, file_name: str) -> Tuple[bool, int]:
+        """MP 不可用时的回退判定（插件原有三正则逻辑）"""
         score = 0
-        matched_count = 0
-        total_rules = 0
 
-        # 检查质量
         if self.quality:
-            total_rules += 1
             if re.search(self.quality, file_name, re.IGNORECASE):
-                score += 100  # 质量匹配加 100 分
-                matched_count += 1
-                logger.info(f"文件 {file_name} 匹配质量规则: {self.quality}")
-            else:
-                logger.info(f"文件 {file_name} 不匹配质量规则: {self.quality}")
-                if self.strict:
-                    return False, 0
+                score += 100
+            elif self.strict:
+                return False, 0
 
-        # 检查分辨率
         if self.resolution:
-            total_rules += 1
             if re.search(self.resolution, file_name, re.IGNORECASE):
-                score += 100  # 分辨率匹配加 100 分
-                matched_count += 1
-                logger.info(f"文件 {file_name} 匹配分辨率规则: {self.resolution}")
-            else:
-                logger.info(f"文件 {file_name} 不匹配分辨率规则: {self.resolution}")
-                if self.strict:
-                    return False, 0
+                score += 100
+            elif self.strict:
+                return False, 0
 
-        # 检查特效
         if self.effect:
-            total_rules += 1
             if re.search(self.effect, file_name, re.IGNORECASE):
-                score += 100  # 特效匹配加 100 分
-                matched_count += 1
-                logger.info(f"文件 {file_name} 匹配特效规则: {self.effect}")
-            else:
-                logger.info(f"文件 {file_name} 不匹配特效规则: {self.effect}")
-                if self.strict:
-                    return False, 0
+                score += 100
+            elif self.strict:
+                return False, 0
 
-        # 非严格模式下，即使不完全匹配也返回 True，但分数较低
-        # 完全匹配的资源分数更高，便于后续替换
         return True, score
 
     def is_perfect_match(self, file_name: str) -> bool:
         """
-        检查文件是否完全匹配所有过滤条件
-        用于判断是否需要替换已有资源
+        是否已是最优版本（用于洗版判断）
+
+        只用「通过硬过滤」还不够——1080p 在 4K 之前也能通过，
+        必须落在规则组的第一优先级层级才算完美，否则洗版会提前结束。
         """
         if not self.has_filters():
             return True
-
+        matched, score = self.match(file_name)
+        if not matched:
+            return False
+        if self._mp_enabled and (self.mp_params or self.rule_groups):
+            return score >= 9999
+        # 回退模式：沿用原语义（全部条件匹配）
         if self.quality and not re.search(self.quality, file_name, re.IGNORECASE):
             return False
         if self.resolution and not re.search(self.resolution, file_name, re.IGNORECASE):
