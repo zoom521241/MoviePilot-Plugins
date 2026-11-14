@@ -311,17 +311,13 @@ class UIConfig:
                                                                           'label': '整理时排除原盘/蓝光镜像'}}]
                         }, {
                             'component': 'VCol',
-                            'props': {'cols': 12, 'md': 4},
-                            'content': [{'component': 'VSwitch', 'props': {'model': 'resolution_fallback',
-                                                                          'label': '分辨率降级（4K 优先，无 4K 收 1080p）'}}]
-                        }, {
-                            'component': 'VCol',
-                            'props': {'cols': 12, 'md': 4},
+                            'props': {'cols': 12, 'md': 8},
                             'content': [{'component': 'VAlert', 'props': {
                                 'type': 'info', 'variant': 'tonal',
-                                'text': '「排除原盘」命中 REMUX / BDMV / BDISO / 原盘 / ISO 的文件与目录不转存；'
-                                        '「分辨率降级」开启时按 4K > 1080p > 720p 择优，没有 4K 就收 1080p，'
-                                        '关闭则严格按订阅的分辨率条件过滤。中文（简繁/中字/国语/双语）始终优先。'}}]
+                                'text': '选片口径完全跟随 MoviePilot：先用订阅自己的「质量/分辨率/特效/包含/排除」做硬过滤，'
+                                        '再按订阅的过滤规则组（或系统默认规则组，洗版时用洗版规则组）排优先级。'
+                                        '「排除原盘」只额外拦掉 REMUX / BDMV / BDISO / 原盘 / ISO 这类不适合入库的资源。'
+                                        '想让 1080p 作为 4K 的兜底，请把订阅里的分辨率留空，由规则组决定优先级。'}}]
                         }]
                     },
                     # RDhub Token（可选，登录失败兜底）
@@ -542,7 +538,6 @@ class UIConfig:
             "rdhub_exclude_disc": True,
             "rdhub_max_preview": 8,
             "exclude_disc_images": True,
-            "resolution_fallback": True,
             "search_source_order": [],
             "subscribe_filter_mode": "exclude",
             "exclude_subscribes": [],

@@ -170,8 +170,20 @@ class ShareUrlTest(unittest.TestCase):
         self.assertEqual(got, "https://example.com/x")
 
 
+def _load_mp_filter():
+    key = "rdhub_pkg.utils.mp_filter"
+    if key in sys.modules:
+        return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key, PLUGIN_PATH / "utils" / "mp_filter.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_file_matcher():
     """加载插件里的 SubscribeFilter（依赖 app.schemas / app.core.metainfo 桩）"""
+    _load_mp_filter()
     key = "rdhub_pkg.utils.file_matcher"
     if key in sys.modules:
         return sys.modules[key]
@@ -184,18 +196,26 @@ def _load_file_matcher():
     return module
 
 
-class ResolutionFallbackTest(unittest.TestCase):
-    """分辨率降级：4K 优先，没有 4K 时接受 1080p"""
+class SubscribeFilterTest(unittest.TestCase):
+    """SubscribeFilter：MP 不可用时回退到内置三正则"""
 
     def setUp(self):
         self.fm = _load_file_matcher()
+        self.mp = _load_mp_filter()
 
-    def test_strict_mode_rejects_1080p_when_subscribe_is_4k(self):
+    def test_mp_filter_unavailable_in_test_env(self):
+        # 测试环境没有 app.modules.filter，应安全降级而不是抛异常
+        self.assertFalse(self.mp.is_available())
+        self.assertIsNone(self.mp.match_file("x.mkv", {"resolution": "4K"}, ["4K和1080p都可以"]))
+        self.assertEqual(self.mp.build_filter_params(None), {})
+        self.assertEqual(self.mp.resolve_rule_groups(None), [])
+
+    def test_strict_mode_rejects_1080p_in_fallback(self):
         flt = self.fm.SubscribeFilter(resolution="4K|2160p|x2160", strict=True)
         ok, _ = flt.match("某片 (2026) - 1080p.WEB-DL.H264.mkv")
         self.assertFalse(ok)
 
-    def test_fallback_mode_accepts_1080p_with_lower_score(self):
+    def test_non_strict_accepts_1080p_with_lower_score(self):
         flt = self.fm.SubscribeFilter(resolution="4K|2160p|x2160", strict=False)
         ok4k, score4k = flt.match("某片 (2026) - 2160p.WEB-DL.H265.mkv")
         ok1080, score1080 = flt.match("某片 (2026) - 1080p.WEB-DL.H264.mkv")
@@ -203,14 +223,17 @@ class ResolutionFallbackTest(unittest.TestCase):
         self.assertTrue(ok1080)
         self.assertGreater(score4k, score1080)
 
-    def test_fallback_mode_still_prefers_4k_by_name_rank(self):
-        # 严格模式被放宽后，靠偏好分保证 4K 排在前
+    def test_mp_params_make_has_filters_true(self):
+        flt = self.fm.SubscribeFilter(mp_params={"resolution": "4K"}, rule_groups=["4K和1080p都可以"])
+        self.assertTrue(flt.has_filters())
+        # MP 不可用 → 回退；本次没配三正则，回退路径直接放行
+        ok, score = flt.match("某片 1080p.mkv")
+        self.assertTrue(ok)
+
+    def test_perfect_match_semantics_in_fallback(self):
         flt = self.fm.SubscribeFilter(resolution="4K|2160p|x2160", strict=False)
-        uhd = flt.match("某片 (2026) - 2160p.WEB-DL.H265.mkv")[1] + \
-            sys.modules["rdhub_pkg.utils.name_rank"].preference_score("某片 2160p WEB-DL")
-        fhd = flt.match("某片 (2026) - 1080p.WEB-DL.H264.mkv")[1] + \
-            sys.modules["rdhub_pkg.utils.name_rank"].preference_score("某片 1080p WEB-DL")
-        self.assertGreater(uhd, fhd)
+        self.assertTrue(flt.is_perfect_match("某片 2160p.mkv"))
+        self.assertFalse(flt.is_perfect_match("某片 1080p.mkv"))
 
 
 class RDHubSearchTest(unittest.TestCase):

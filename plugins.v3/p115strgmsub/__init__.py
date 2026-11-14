@@ -39,7 +39,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.16"
+    plugin_version = "1.5.17"
     # 插件作者
     plugin_author = "zoom521241"
     # 作者主页
@@ -92,8 +92,6 @@ class P115StrgmSub(_PluginBase):
     _rdhub_max_preview: int = 8
     # 全局：整理时排除原盘/蓝光镜像
     _exclude_disc_images: bool = True
-    # 全局：分辨率降级（4K 优先，没有 4K 时接受 1080p 等较低分辨率）
-    _resolution_fallback: bool = True
 
     _hdhive_enabled: bool = False
     _hdhive_username: str = ""
@@ -694,7 +692,6 @@ class P115StrgmSub(_PluginBase):
             except (TypeError, ValueError):
                 self._rdhub_max_preview = 8
             self._exclude_disc_images = bool(config.get("exclude_disc_images", True))
-            self._resolution_fallback = bool(config.get("resolution_fallback", True))
 
             self._hdhive_enabled = config.get("hdhive_enabled", False)
             self._hdhive_query_mode = config.get("hdhive_query_mode", "api")
@@ -970,7 +967,7 @@ class P115StrgmSub(_PluginBase):
             get_data_func=self.get_data,
             save_data_func=self.save_data,
             exclude_disc_images=self._exclude_disc_images,
-            resolution_fallback=self._resolution_fallback
+            systemconfig=getattr(self, "systemconfig", None)
         )
 
         self._api_handler = ApiHandler(
@@ -1031,7 +1028,6 @@ class P115StrgmSub(_PluginBase):
             "rdhub_exclude_disc": self._rdhub_exclude_disc,
             "rdhub_max_preview": self._rdhub_max_preview,
             "exclude_disc_images": self._exclude_disc_images,
-            "resolution_fallback": self._resolution_fallback,
             # 其他配置
             "search_source_order": self._search_source_order,
             "subscribe_filter_mode": self._subscribe_filter_mode,
