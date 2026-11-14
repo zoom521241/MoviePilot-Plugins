@@ -87,6 +87,7 @@ class ShareLinkStatus:
     error_code: int = 0                 # 错误码（0 表示无错误）
     error_message: str = ""             # 错误信息
     file_count: int = 0                 # 分享中的文件数量
+    share_size: int = 0                 # 分享总大小（字节）
     share_info: Dict[str, Any] = field(default_factory=dict)  # 分享详情
 
     @property
@@ -110,6 +111,11 @@ class RateLimiter:
     API 请求速率限制器
     确保请求之间有最小间隔，并添加随机抖动避免触发风控
     """
+
+    # 单次列目录最多读取的条目数（跨递归共享），防止超大合集分享卡死线程
+    MAX_SHARE_ITEMS: int = 3000
+    # 单个分享的体积上限（字节）：超过视为整包合集，直接跳过不遍历
+    MAX_SHARE_SIZE: int = 500 * 1024 ** 3
 
     def __init__(self, min_interval: float = 1.5, jitter_ratio: float = 0.3):
         """
@@ -516,8 +522,13 @@ class P115ClientManager:
                 file_list = data.get("list", [])
 
                 status.file_count = int(data.get("count", len(file_list)))
+                try:
+                    status.share_size = int(share_info.get("file_size") or 0)
+                except (TypeError, ValueError):
+                    status.share_size = 0
                 status.share_info = {
                     "share_title": share_info.get("share_title", ""),
+                    "file_size": status.share_size,
                     "share_state": share_info.get("share_state", ""),
                     "file_count": status.file_count,
                     "create_time": share_info.get("create_time", ""),
@@ -607,11 +618,19 @@ class P115ClientManager:
             cid: int = 0,
             depth: int = 1,
             max_depth: int = 3,
-            target_season: int = None
+            target_season: int = None,
+            budget: Optional[list] = None
     ) -> List[dict]:
-        """递归列出分享文件（带速率限制和季数过滤优化）"""
+        """
+        递归列出分享文件（带速率限制、季数过滤与总条目预算）
+
+        budget 是跨递归共享的计数器 [已读取条目数, 上限]，
+        超过上限立即停止，避免「171T 原盘合集」这类超大分享把线程卡死。
+        """
         if depth > max_depth:
             return []
+        if budget is None:
+            budget = [0, self.MAX_SHARE_ITEMS]
 
         files = []
         try:
@@ -628,6 +647,12 @@ class P115ClientManager:
             )
 
             for item in iterator:
+                budget[0] += 1
+                if budget[0] > budget[1]:
+                    logger.warning(
+                        f"分享条目超过上限 {budget[1]}，停止继续遍历（该分享可能是超大合集）"
+                    )
+                    return files
                 file_info = {
                     "id": str(item.get("id", "")),
                     "name": item.get("name", ""),
@@ -663,7 +688,8 @@ class P115ClientManager:
                         cid=sub_cid,
                         depth=depth + 1,
                         max_depth=max_depth,
-                        target_season=target_season
+                        target_season=target_season,
+                        budget=budget,
                     )
                     file_info["children"] = children
 

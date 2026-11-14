@@ -123,6 +123,23 @@ class SyncHandler:
             logger.info(f"已排除 {dropped} 个原盘/镜像文件（{len(kept)} 个保留）")
         return kept
 
+    def _skip_oversize_share(self, share_status, share_url: str) -> bool:
+        """
+        分享体积过大时跳过
+
+        115 上有很多「171T UHD 原盘合集」这类整包分享，里面确实含目标影片，
+        但逐层遍历会耗尽时间并长期占用同步锁，因此超过阈值直接放弃。
+        """
+        limit = getattr(self._p115_manager, "MAX_SHARE_SIZE", 500 * 1024 ** 3)
+        size = int(getattr(share_status, "share_size", 0) or 0)
+        if size and size > limit:
+            logger.warning(
+                f"分享体积 {size / 1024 ** 3:.1f}GB 超过上限 {limit / 1024 ** 3:.0f}GB，"
+                f"判定为整包合集，跳过：{share_url}"
+            )
+            return True
+        return False
+
     @staticmethod
     def _mark_current_priority(subscribe, is_best_version: bool, subscribe_filter) -> None:
         """
@@ -288,6 +305,8 @@ class SyncHandler:
                     share_status = self._p115_manager.check_share_status(share_url)
                     if not share_status.is_valid:
                         logger.warning(f"分享链接无效：{share_url}，原因：{share_status.status_text}")
+                        continue
+                    if self._skip_oversize_share(share_status, share_url):
                         continue
 
                     share_files = self._p115_manager.list_share_files(share_url)
@@ -730,6 +749,8 @@ class SyncHandler:
                         share_status = self._p115_manager.check_share_status(share_url)
                         if not share_status.is_valid:
                             logger.warning(f"分享链接无效：{share_url}，原因：{share_status.status_text}")
+                            continue
+                        if self._skip_oversize_share(share_status, share_url):
                             continue
 
                         # 列出分享内容

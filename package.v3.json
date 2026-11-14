@@ -96,7 +96,7 @@
     "name": "115网盘订阅追更",
     "description": "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。",
     "labels": "订阅,115网盘,V3",
-    "version": "1.5.24",
+    "version": "1.5.25",
     "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
@@ -104,6 +104,7 @@
     "system_version": ">=3.0.0",
     "v3": true,
     "history": {
+      "v1.5.25": "修复超大整包分享把同步卡死：115 上存在「171T UHD 原盘 iso 合集」这类分享，插件逐层遍历会长时间占用同步锁。现在 ①check_share_status 读取分享总大小，超过 500GB 直接跳过并告警；②递归列目录增加 3000 条目的共享预算，超出立即停止，避免任何异常大分享拖死线程。",
       "v1.5.24": "回滚插件的独立判定，选片与毕业口径完全以 MoviePilot 为准：①洗版优先级不再强制写 100，改为如实记录 MP 规则组给出的 pri_order，是否毕业由 MP 的 is_best_version_complete 判定；②去掉插件自加的 name_rank 偏好加分，文件匹配分数直接等于 MP 的打分（4K/中文/REMUX 等一律由规则组表达）；③保留 name_rank 仅用于搜索候选的粗排与 BDMV/ISO 镜像排除。",
       "v1.5.23": "洗版毕业判定打通：插件转存成功后把本次资源在规则组的优先级写回 subscribe.current_priority（按『任意梯队命中即毕业』统一记 100），此前该值恒为 NULL 导致洗版订阅永远「继续洗版」。同时把候选排序细化为 REMUX(+400) > 杜比(+200) > HDR(+100) > WEB-DL(+50)，保证同分辨率下优先挑 REMUX。修复完成通知误报：MP 返回「继续洗版」时不再打印/推送「订阅已完成、已移至历史记录」，改为回查订阅状态并提示仍在追踪。",
       "v1.5.22": "修复规则组过滤全部误拒（出入平安等 4K 有资源却转存不了）：插件内新建的 FilterModule 没有调用 init_module()，rule_set 为空（0 条内置规则），任何关键词都被判定为「规则不存在」，于是 MP 规则组把每个文件都拒了。现在初始化后调用 init_module() 载入 37 条内置规则 + 自定义规则。同时修正优先级换算：MP 的 pri_order 从 100 起每降一层减 1，分数改为 9900+pri_order，is_perfect_match 以第一层级（10000 分）为准，洗版判断才正确。新增 RDhub 每日自动签到：可配置开关、时间（默认 08:30）、是否赌狗签到，当天已签到自动跳过，结果可通知。",
