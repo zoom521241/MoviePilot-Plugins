@@ -68,7 +68,6 @@ class RDHubClient:
         proxy: Any = None,
         on_token_update: Optional[Any] = None,
         exclude_disc: bool = True,
-        prefer_4k: bool = True,
         max_preview: int = 8,
         timeout: int = 20,
         cache_ttl: int = 900,
@@ -82,7 +81,6 @@ class RDHubClient:
         :param proxy: MP 代理配置（字符串或 dict）
         :param on_token_update: Token 变更回调，用于持久化到插件配置
         :param exclude_disc: 是否排除原盘/蓝光镜像
-        :param prefer_4k: 是否 4K 优先（影响排序分数）
         :param max_preview: 单次查询最多换取多少个分享码（控制请求量）
         :param timeout: 请求超时（秒）
         :param cache_ttl: 查询结果缓存时间（秒）
@@ -94,7 +92,6 @@ class RDHubClient:
         self._refresh_token = (refresh_token or "").strip()
         self._on_token_update = on_token_update
         self.exclude_disc = bool(exclude_disc)
-        self.prefer_4k = bool(prefer_4k)
         self.max_preview = max(1, int(max_preview or 8))
         self.timeout = max(5, int(timeout or 20))
         self.cache_ttl = max(0, int(cache_ttl or 0))

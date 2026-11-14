@@ -39,7 +39,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.15"
+    plugin_version = "1.5.16"
     # 插件作者
     plugin_author = "zoom521241"
     # 作者主页
@@ -89,7 +89,6 @@ class P115StrgmSub(_PluginBase):
     _rdhub_access_token: str = ""
     _rdhub_refresh_token: str = ""
     _rdhub_exclude_disc: bool = True
-    _rdhub_prefer_4k: bool = True
     _rdhub_max_preview: int = 8
     # 全局：整理时排除原盘/蓝光镜像
     _exclude_disc_images: bool = True
@@ -690,7 +689,6 @@ class P115StrgmSub(_PluginBase):
             self._rdhub_access_token = (config.get("rdhub_access_token", "") or "").strip()
             self._rdhub_refresh_token = (config.get("rdhub_refresh_token", "") or "").strip()
             self._rdhub_exclude_disc = bool(config.get("rdhub_exclude_disc", True))
-            self._rdhub_prefer_4k = bool(config.get("rdhub_prefer_4k", True))
             try:
                 self._rdhub_max_preview = int(config.get("rdhub_max_preview", self._rdhub_max_preview) or 8)
             except (TypeError, ValueError):
@@ -800,7 +798,6 @@ class P115StrgmSub(_PluginBase):
                 proxy=proxy,
                 on_token_update=self._on_rdhub_token_update,
                 exclude_disc=self._rdhub_exclude_disc,
-                prefer_4k=self._rdhub_prefer_4k,
                 max_preview=self._rdhub_max_preview,
             )
             logger.info(f"RDhub 客户端初始化成功（{self._rdhub_url}）")
@@ -1032,7 +1029,6 @@ class P115StrgmSub(_PluginBase):
             "rdhub_access_token": self._rdhub_access_token,
             "rdhub_refresh_token": self._rdhub_refresh_token,
             "rdhub_exclude_disc": self._rdhub_exclude_disc,
-            "rdhub_prefer_4k": self._rdhub_prefer_4k,
             "rdhub_max_preview": self._rdhub_max_preview,
             "exclude_disc_images": self._exclude_disc_images,
             "resolution_fallback": self._resolution_fallback,

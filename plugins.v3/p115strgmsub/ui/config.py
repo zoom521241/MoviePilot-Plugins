@@ -272,9 +272,9 @@ class UIConfig:
                             'content': [{
                                 'component': 'VAlert',
                                 'props': {'type': 'info', 'variant': 'tonal',
-                                          'text': 'RDhub（rdhub115.cc）：115 分享资源分发站，按 TMDB ID 精确查询，直接给出 115 分享链接，'
-                                                  '集号/画质标注完整。默认排除原盘（REMUX/BDMV/原盘/ISO），4K 与中文资源优先。'
-                                                  '只需填写站点账号密码，登录失败时可用 access_token 兜底。'}
+                                          'text': 'RDhub（rdhub115.cc）：第三方 115 资源分发站，按 TMDB ID 精确查询，直接给出 115 分享链接，'
+                                                  '集号/画质标注完整。需要自行在站点注册账号后填写账号密码；不填即在下方保持关闭，'
+                                                  '不影响其它搜索源。默认排除原盘（REMUX/BDMV/原盘/ISO），4K 与中文资源优先排序。'}
                             }]
                         }]
                     },
@@ -297,9 +297,7 @@ class UIConfig:
                              'content': [{'component': 'VTextField', 'props': {'model': 'rdhub_username', 'label': '站点账号', 'placeholder': '用户名'}}]},
                             {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
                              'content': [{'component': 'VTextField', 'props': {'clearable': True, 'model': 'rdhub_password', 'label': '站点密码', 'type': 'password', 'placeholder': '密码'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 2},
-                             'content': [{'component': 'VSwitch', 'props': {'model': 'rdhub_prefer_4k', 'label': '4K 优先'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 2},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
                              'content': [{'component': 'VTextField', 'props': {'model': 'rdhub_max_preview', 'label': '预览上限', 'type': 'number', 'placeholder': '8'}}]}
                         ]
                     },
@@ -542,7 +540,6 @@ class UIConfig:
             "rdhub_access_token": "",
             "rdhub_refresh_token": "",
             "rdhub_exclude_disc": True,
-            "rdhub_prefer_4k": True,
             "rdhub_max_preview": 8,
             "exclude_disc_images": True,
             "resolution_fallback": True,

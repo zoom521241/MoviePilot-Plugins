@@ -96,7 +96,7 @@
     "name": "115网盘订阅追更",
     "description": "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。",
     "labels": "订阅,115网盘,V3",
-    "version": "1.5.15",
+    "version": "1.5.16",
     "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "zoom521241",
@@ -104,6 +104,7 @@
     "system_version": ">=3.0.0",
     "v3": true,
     "history": {
+      "v1.5.16": "修复插件「目录选择」接口列不出目录：115 原始目录接口返回 n / fc / s 字段，而 list_files 按 name / fid 解析，导致地址目录列表恒为空；现统一normalize成 name / is_dir / size（保留原始字段），list_directories 改按 is_dir 判断。去掉 RDhub 的「4K 优先」开关（与「分辨率降级」功能重复）：4K 优先本身就是固定排序口径，是否接受低分辨率只由「分辨率降级」控制。RDhub 配置说明补充：需自行在站点注册账号，未填写即视为未启用，不影响其它源。",
       "v1.5.15": "新增「分辨率降级」开关（默认开启）：订阅里写死 4K/2160p 时，站点只有 1080p 也会接受，排序仍按 4K > 1080p > 720p 与中文优先走，保证有 4K 就先取 4K；关闭该开关即回到原来的严格过滤。该口径对全部搜索源一致生效（RDhub / PanSou / HDHive / Nullbr）。",
       "v1.5.14": "新增 RDhub（rdhub115.cc）搜索源：按 TMDB ID 精确查询 115 分享资源，直接取站点分发/库存链接交给现有转存链路，落盘仍是原来的电影/电视剧目录；默认排除原盘（REMUX/BDMV/BDISO/原盘/ISO），4K（2160p）与中文（简繁/中字/国语/双语）优先排序，并在转存打分中对文件名追加同样的偏好加分；登录走站点账号密码（浏览器门禁 proof 本地复现 + access/refresh token 自动续期），失败可用 access_token 兜底；新增「整理时排除原盘/蓝光镜像」全局开关，默认开启。",
       "v1.5.13": "修复镜像更新后误报「115 Cookie 可能已过期」：MoviePilot 重建容器会清空容器内已装的 pip 依赖，若插件在依赖装回之前就被导入，p115client 的 ImportError 会被固化成模块级常量 P115_AVAILABLE=False，之后即使依赖装好也不再重试，导致定时任务每轮都判定登录失败并提示更换 Cookie（实际 Cookie 有效）。现改为可重试的惰性导入，客户端在依赖就绪后自动补建，无需重启容器；同时把「依赖未就绪」与「Cookie 真的失效」拆成两种提示，前者只提示等待自动恢复、不再引导更换 Cookie。",
